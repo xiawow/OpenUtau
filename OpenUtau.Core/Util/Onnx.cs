@@ -94,6 +94,7 @@ namespace OpenUtau.Core {
 
         private static SessionOptions getOnnxSessionOptions(bool coremlEnableOnSubgraphs = false) {
             SessionOptions options = new SessionOptions();
+            options.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;
             List<string> runnerOptions = getRunnerOptions();
             string runner = Preferences.Default.OnnxRunner;
             if (String.IsNullOrEmpty(runner)) {
@@ -103,6 +104,10 @@ namespace OpenUtau.Core {
                 runner = "CPU";
             }
             switch (runner) {
+                case "CPU":
+                    options.IntraOpNumThreads = Math.Max(1, Environment.ProcessorCount / 2);
+                    options.InterOpNumThreads = 1;
+                    break;
                 case "DirectML":
                     var d = devices[Preferences.Default.OnnxGpu];
                     options.AppendExecutionProvider(
@@ -132,7 +137,7 @@ namespace OpenUtau.Core {
         public static InferenceSession getInferenceSession(byte[] model, OnnxRunnerChoice runnerChoice = OnnxRunnerChoice.Default) {
             if (runnerChoice == OnnxRunnerChoice.CPU ||
                 (runnerChoice == OnnxRunnerChoice.CPUForCoreML && Preferences.Default.OnnxRunner == "CoreML")) {
-                return new InferenceSession(model);
+                return new InferenceSession(model, getCpuSessionOptions());
             } else {
                 // Try with CoreML subgraphs enabled first, fallback to default if it fails
                 if (OS.IsMacOS() && Preferences.Default.OnnxRunner == "CoreML") {
@@ -149,7 +154,7 @@ namespace OpenUtau.Core {
         public static InferenceSession getInferenceSession(string modelPath, OnnxRunnerChoice runnerChoice = OnnxRunnerChoice.Default) {
             if (runnerChoice == OnnxRunnerChoice.CPU ||
                 (runnerChoice == OnnxRunnerChoice.CPUForCoreML && Preferences.Default.OnnxRunner == "CoreML")) {
-                return new InferenceSession(modelPath);
+                return new InferenceSession(modelPath, getCpuSessionOptions());
             } else {
                 // Try with CoreML subgraphs enabled first, fallback to default if it fails
                 if (OS.IsMacOS() && Preferences.Default.OnnxRunner == "CoreML") {
@@ -180,6 +185,15 @@ namespace OpenUtau.Core {
             if (unexpected.Length > 0) {
                 throw new ArgumentException("Unexpected input(s) for the inference session: " + string.Join(", ", unexpected));
             }
+        }
+
+        private static SessionOptions getCpuSessionOptions() {
+            var options = new SessionOptions {
+                GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
+                IntraOpNumThreads = Math.Max(1, Environment.ProcessorCount / 2),
+                InterOpNumThreads = 1,
+            };
+            return options;
         }
     }
 }
