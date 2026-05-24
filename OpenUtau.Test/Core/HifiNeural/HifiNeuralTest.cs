@@ -67,7 +67,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
             Assert.True(result.Debug.VowelTargetFrames > result.Debug.VowelSourceFrames);
             Assert.Equal(0, result.Debug.LoopCount);
             Assert.Equal(0, result.Debug.CrossfadeFrames);
-            Assert.Equal("continuous_sustain_stretch", result.Debug.VowelStretchStrategy);
+            Assert.StartsWith("continuous_sustain_stretch", result.Debug.VowelStretchStrategy);
             Assert.All(result.Mel.Cast<float>(), value => {
                 Assert.False(float.IsNaN(value));
                 Assert.False(float.IsInfinity(value));
@@ -104,7 +104,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 targetF0: targetF0);
 
             Assert.Equal(72, result.Mel.GetLength(1));
-            Assert.Equal("continuous_sustain_stretch", result.Debug.VowelStretchStrategy);
+            Assert.StartsWith("continuous_sustain_stretch", result.Debug.VowelStretchStrategy);
             Assert.Equal(0, result.Debug.LoopCount);
         }
 
@@ -123,7 +123,8 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 targetF0: targetF0);
 
             Assert.Equal(72, result.Mel.GetLength(1));
-            Assert.Equal("continuous_sustain_stretch_f0_motion", result.Debug.VowelStretchStrategy);
+            Assert.StartsWith("continuous_sustain_stretch", result.Debug.VowelStretchStrategy);
+            Assert.Contains("_f0_motion", result.Debug.VowelStretchStrategy);
             Assert.Equal(0, result.Debug.LoopCount);
         }
 

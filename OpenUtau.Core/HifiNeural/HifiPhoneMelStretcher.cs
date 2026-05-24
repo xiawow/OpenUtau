@@ -76,6 +76,14 @@ namespace OpenUtau.Core.HifiNeural {
             double F0MaxSlopeCents,
             double F0MeanSlopeCents);
 
+        readonly record struct TransientAnchorPlan(
+            bool Enabled,
+            int SourceAnchorFrame,
+            int TargetAnchorFrame,
+            double PeakFlux,
+            double MedianFlux,
+            string Reason);
+
         public static HifiPhoneStretchResult Stretch(
             float[,] sourceMel,
             int targetFrames,
@@ -368,6 +376,11 @@ namespace OpenUtau.Core.HifiNeural {
                 sourceSustainFrames,
                 releaseFrames,
                 dstFrames);
+            var transientAnchor = DetectTransientAnchor(
+                sourceMel,
+                vowelStart + onsetFrames,
+                sourceSustainFrames,
+                targetSustainFrames);
 
             if (targetOnsetFrames > 0) {
                 WriteMappedRegion(
@@ -379,13 +392,14 @@ namespace OpenUtau.Core.HifiNeural {
                     targetOnsetFrames);
             }
             if (targetSustainFrames > 0) {
-                WriteMappedRegion(
+                WriteSustainWithNaturalTimeMap(
                     sourceMel,
                     vowelStart + onsetFrames,
                     sourceSustainFrames,
                     output,
                     dstStart + targetOnsetFrames,
-                    targetSustainFrames);
+                    targetSustainFrames,
+                    transientAnchor);
             }
             if (targetReleaseFrames > 0) {
                 WriteMappedRegion(
@@ -402,6 +416,12 @@ namespace OpenUtau.Core.HifiNeural {
                 : dstFrames > vowelSourceFrames
                     ? "continuous_sustain_stretch"
                     : "area_compress";
+            if (dstFrames > vowelSourceFrames && targetSustainFrames > sourceSustainFrames) {
+                strategy += "_natural";
+                if (transientAnchor.Enabled) {
+                    strategy += "_transient_lock";
+                }
+            }
             if (targetF0 != null && targetF0.Length > 1 && HasFastF0Motion(targetF0, dstStart, dstFrames)) {
                 strategy += "_f0_motion";
             }
@@ -494,6 +514,187 @@ namespace OpenUtau.Core.HifiNeural {
                 sustainFrames += targetTotalFrames - sum;
             }
             return (Math.Max(0, onsetFrames), Math.Max(0, sustainFrames), Math.Max(0, releaseFrames));
+        }
+
+        static void WriteSustainWithNaturalTimeMap(
+            float[,] sourceMel,
+            int sourceStart,
+            int sourceFrames,
+            float[,] output,
+            int outputStart,
+            int outputFrames,
+            TransientAnchorPlan transientAnchor) {
+            if (outputFrames <= 0) {
+                return;
+            }
+            if (sourceFrames <= 2 || outputFrames <= sourceFrames) {
+                WriteMappedRegion(sourceMel, sourceStart, sourceFrames, output, outputStart, outputFrames);
+                return;
+            }
+            WriteMappedRegionNaturalStretch(
+                sourceMel,
+                sourceStart,
+                sourceFrames,
+                output,
+                outputStart,
+                outputFrames,
+                transientAnchor);
+        }
+
+        static TransientAnchorPlan DetectTransientAnchor(
+            float[,] sourceMel,
+            int sourceStart,
+            int sourceFrames,
+            int targetFrames) {
+            if (sourceFrames < 10 || targetFrames < 8) {
+                return new TransientAnchorPlan(false, 0, 0, 0, 0, "too_short");
+            }
+            int bins = sourceMel.GetLength(0);
+            var flux = new double[sourceFrames];
+            for (int t = 1; t < sourceFrames; t++) {
+                int current = sourceStart + t;
+                int previous = current - 1;
+                double sum = 0;
+                for (int m = 0; m < bins; m++) {
+                    sum += Math.Abs(sourceMel[m, current] - sourceMel[m, previous]);
+                }
+                flux[t] = sum / Math.Max(1, bins);
+            }
+
+            int first = 2;
+            int last = sourceFrames - 3;
+            if (last <= first) {
+                return new TransientAnchorPlan(false, 0, 0, 0, 0, "too_short_interior");
+            }
+            int peakFrame = first;
+            double peakFlux = flux[first];
+            var region = new List<double>(last - first + 1);
+            for (int t = first; t <= last; t++) {
+                double value = flux[t];
+                region.Add(value);
+                if (value > peakFlux) {
+                    peakFlux = value;
+                    peakFrame = t;
+                }
+            }
+            if (region.Count == 0) {
+                return new TransientAnchorPlan(false, 0, 0, 0, 0, "empty_flux_region");
+            }
+            region.Sort();
+            double medianFlux = region[region.Count / 2];
+            if (!IsFinite(peakFlux) || !IsFinite(medianFlux) || medianFlux <= 1e-6) {
+                return new TransientAnchorPlan(false, 0, 0, peakFlux, medianFlux, "invalid_flux");
+            }
+            if (peakFlux < medianFlux * 1.8) {
+                return new TransientAnchorPlan(false, 0, 0, peakFlux, medianFlux, "no_strong_transient");
+            }
+
+            int sourceMinAnchor = Math.Max(2, (int)Math.Round(sourceFrames * 0.15));
+            int sourceMaxAnchor = Math.Min(sourceFrames - 3, (int)Math.Round(sourceFrames * 0.85));
+            if (sourceMaxAnchor <= sourceMinAnchor) {
+                return new TransientAnchorPlan(false, 0, 0, peakFlux, medianFlux, "no_anchor_room");
+            }
+            int clampedSourceAnchor = Math.Clamp(peakFrame, sourceMinAnchor, sourceMaxAnchor);
+            double sourceAnchorNorm = clampedSourceAnchor / (double)Math.Max(1, sourceFrames - 1);
+
+            int targetAnchor = (int)Math.Round(sourceAnchorNorm * Math.Max(1, targetFrames - 1));
+            int targetMinAnchor = Math.Max(2, (int)Math.Round(targetFrames * 0.12));
+            int targetMaxAnchor = Math.Min(targetFrames - 3, (int)Math.Round(targetFrames * 0.88));
+            if (targetMaxAnchor <= targetMinAnchor) {
+                return new TransientAnchorPlan(false, 0, 0, peakFlux, medianFlux, "no_target_anchor_room");
+            }
+            int clampedTargetAnchor = Math.Clamp(targetAnchor, targetMinAnchor, targetMaxAnchor);
+            return new TransientAnchorPlan(
+                true,
+                clampedSourceAnchor,
+                clampedTargetAnchor,
+                peakFlux,
+                medianFlux,
+                string.Empty);
+        }
+
+        static void WriteMappedRegionNaturalStretch(
+            float[,] sourceMel,
+            int sourceStart,
+            int sourceFrames,
+            float[,] output,
+            int outputStart,
+            int outputFrames,
+            TransientAnchorPlan transientAnchor) {
+            int bins = sourceMel.GetLength(0);
+            int totalSourceFrames = sourceMel.GetLength(1);
+            sourceStart = Math.Clamp(sourceStart, 0, Math.Max(0, totalSourceFrames - 1));
+            sourceFrames = Math.Max(1, Math.Min(sourceFrames, totalSourceFrames - sourceStart));
+            outputFrames = Math.Min(outputFrames, output.GetLength(1) - outputStart);
+            if (outputFrames <= 0) {
+                return;
+            }
+            double stretchRatio = sourceFrames > 0
+                ? outputFrames / (double)sourceFrames
+                : 1.0;
+            for (int t = 0; t < outputFrames; t++) {
+                double targetNorm = outputFrames == 1 ? 0 : t / (double)(outputFrames - 1);
+                double sourceNorm = MapSourceNormalized(targetNorm, stretchRatio, transientAnchor, sourceFrames, outputFrames);
+                sourceNorm = Math.Clamp(sourceNorm, 0, 1);
+                double sourceIndex = sourceNorm * Math.Max(0, sourceFrames - 1);
+                int left = sourceStart + (int)Math.Floor(sourceIndex);
+                int right = Math.Min(sourceStart + sourceFrames - 1, left + 1);
+                float alpha = (float)(sourceIndex - Math.Floor(sourceIndex));
+                for (int m = 0; m < bins; m++) {
+                    float v0 = sourceMel[m, left];
+                    float v1 = sourceMel[m, right];
+                    output[m, outputStart + t] = v0 + (v1 - v0) * alpha;
+                }
+            }
+        }
+
+        static double MapSourceNormalized(
+            double targetNorm,
+            double stretchRatio,
+            TransientAnchorPlan transientAnchor,
+            int sourceFrames,
+            int targetFrames) {
+            targetNorm = Math.Clamp(targetNorm, 0, 1);
+            if (sourceFrames <= 1 || targetFrames <= 1) {
+                return targetNorm;
+            }
+            if (!transientAnchor.Enabled) {
+                return ApplyNaturalStretchWarp(targetNorm, stretchRatio);
+            }
+            double sourceAnchorNorm = transientAnchor.SourceAnchorFrame / (double)(sourceFrames - 1);
+            double targetAnchorNorm = transientAnchor.TargetAnchorFrame / (double)(targetFrames - 1);
+            sourceAnchorNorm = Math.Clamp(sourceAnchorNorm, 1e-4, 1 - 1e-4);
+            targetAnchorNorm = Math.Clamp(targetAnchorNorm, 1e-4, 1 - 1e-4);
+
+            if (targetNorm <= targetAnchorNorm) {
+                double local = targetNorm / targetAnchorNorm;
+                double segmentStretchRatio = targetAnchorNorm / sourceAnchorNorm;
+                return sourceAnchorNorm * ApplyNaturalStretchWarp(local, segmentStretchRatio);
+            }
+            double rightLocal = (targetNorm - targetAnchorNorm) / (1 - targetAnchorNorm);
+            double rightStretchRatio = (1 - targetAnchorNorm) / (1 - sourceAnchorNorm);
+            return sourceAnchorNorm + (1 - sourceAnchorNorm) * ApplyNaturalStretchWarp(rightLocal, rightStretchRatio);
+        }
+
+        static double ApplyNaturalStretchWarp(double u, double stretchRatio) {
+            u = Math.Clamp(u, 0, 1);
+            if (!IsFinite(stretchRatio) || stretchRatio <= 0) {
+                return u;
+            }
+            double magnitude = Math.Abs(Math.Log(stretchRatio, 2.0));
+            double strength = Math.Clamp(0.08 + 0.20 * magnitude, 0, 0.38);
+            if (stretchRatio > 1.05) {
+                return Math.Clamp(u + strength * (u - SmoothStep(u)), 0, 1);
+            }
+            if (stretchRatio < 0.95) {
+                return Math.Clamp(u + strength * (SmoothStep(u) - u), 0, 1);
+            }
+            return u;
+        }
+
+        static double SmoothStep(double x) {
+            x = Math.Clamp(x, 0, 1);
+            return x * x * (3 - 2 * x);
         }
 
         static bool HasFastF0Motion(float[] f0, int start, int frames) {
@@ -894,7 +1095,7 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         public static string CacheKey() {
-            return $"v5-sync1-{StretchModeName(StretchMode)}-lock{ConsonantLockModeName(ConsonantLockMode)}-borrow{EnableDurationBorrow}-pmc{EnablePitchMelCompensation}-se{EnableStretchEnergyCompensation}-aenv{EnableAudioEnvelopeNormalization}-{AudioEnvelopeMaxCutDb:0.0}-{AudioEnvelopeHeadroomDb:0.0}-{AudioEnvelopeStrength:0.00}-out{OutputTargetVoicedRmsDb:0.0}-{OutputMaxMakeupDb:0.0}-{OutputPeakLimit:0.00}-exc{EnableOutputExciter}-{OutputExciterDrive:0.00}-{OutputExciterMix:0.00}";
+            return $"v5-sync2-{StretchModeName(StretchMode)}-lock{ConsonantLockModeName(ConsonantLockMode)}-borrow{EnableDurationBorrow}-pmc{EnablePitchMelCompensation}-se{EnableStretchEnergyCompensation}-aenv{EnableAudioEnvelopeNormalization}-{AudioEnvelopeMaxCutDb:0.0}-{AudioEnvelopeHeadroomDb:0.0}-{AudioEnvelopeStrength:0.00}-out{OutputTargetVoicedRmsDb:0.0}-{OutputMaxMakeupDb:0.0}-{OutputPeakLimit:0.00}-exc{EnableOutputExciter}-{OutputExciterDrive:0.00}-{OutputExciterMix:0.00}";
         }
         public const string LockPreserve = "preserve";
         public const string LockReadable = "readable";
