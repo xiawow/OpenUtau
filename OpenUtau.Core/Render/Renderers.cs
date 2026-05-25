@@ -15,7 +15,8 @@ namespace OpenUtau.Core.Render {
         public const string VOGEN = "VOGEN";
         public const string DIFFSINGER = "DIFFSINGER";
         public const string VOICEVOX = "VOICEVOX";
-        public const string HIFI_NEURAL_PHRASE = "HIFI-NEURAL-PHRASE";
+        public const string HIFI_NEURAL_PHRASE = "HIFI-NEURA";
+        public const string HIFI_NEURAL_PHRASE_LEGACY = "HIFI-NEURAL-PHRASE";
 
         static readonly string[] classicRenderers = new[] { WORLDLINE_R, CLASSIC, HIFI_NEURAL_PHRASE };
         static readonly string[] enunuRenderers = new[] { ENUNU };
@@ -52,6 +53,8 @@ namespace OpenUtau.Core.Render {
         public static string GetDefaultRenderer(USingerType singerType) {
             if (Preferences.Default.DefaultRenderer == "Classic" && singerType == USingerType.Classic) {
                 return CLASSIC;
+            } else if (Preferences.Default.DefaultRenderer == HIFI_NEURAL_PHRASE_LEGACY && singerType == USingerType.Classic) {
+                return HIFI_NEURAL_PHRASE;
             } else if (GetSupportedRenderers(singerType).Contains(Preferences.Default.DefaultRenderer)) {
                 return Preferences.Default.DefaultRenderer;
             } else {
@@ -74,7 +77,7 @@ namespace OpenUtau.Core.Render {
                 return new DiffSinger.DiffSingerRenderer();
             } else if (renderer == VOICEVOX) {
                 return new Voicevox.VoicevoxRenderer();
-            } else if (renderer == HIFI_NEURAL_PHRASE) {
+            } else if (renderer == HIFI_NEURAL_PHRASE || renderer == HIFI_NEURAL_PHRASE_LEGACY) {
                 return new HifiNeural.HifiNeuralPhraseRenderer();
             }
             return null;

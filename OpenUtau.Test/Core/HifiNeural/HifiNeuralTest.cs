@@ -29,6 +29,18 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
+        public void LegacyHifiRendererNameMapsToNewRenderer() {
+            string original = Preferences.Default.DefaultRenderer;
+            try {
+                Preferences.Default.DefaultRenderer = Renderers.HIFI_NEURAL_PHRASE_LEGACY;
+                Assert.Equal(Renderers.HIFI_NEURAL_PHRASE, Renderers.GetDefaultRenderer(Ustx.USingerType.Classic));
+                Assert.IsType<HifiNeuralPhraseRenderer>(Renderers.CreateRenderer(Renderers.HIFI_NEURAL_PHRASE_LEGACY));
+            } finally {
+                Preferences.Default.DefaultRenderer = original;
+            }
+        }
+
+        [Fact]
         public void MelExtractorReturnsValidShapeAndValues() {
             var dir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
             var file = Path.Join(dir, "Files", "sine.wav");
@@ -106,6 +118,24 @@ namespace OpenUtau.Core.Test.HifiNeural {
             Assert.Equal(72, result.Mel.GetLength(1));
             Assert.StartsWith("continuous_sustain_stretch", result.Debug.VowelStretchStrategy);
             Assert.Equal(0, result.Debug.LoopCount);
+        }
+
+        [Fact]
+        public void LongSustainAppliesMicroVariationStrategyTag() {
+            if (!HifiNeuralConfig.EnableSustainMicroVariation) {
+                return;
+            }
+            var mel = CreateTestMel(frames: 48);
+            var targetF0 = Enumerable.Repeat(220f, 72).ToArray();
+            var result = HifiPhoneMelStretcher.Stretch(
+                mel,
+                72,
+                "la",
+                consonantMs: 20,
+                HifiStretchMode.ConsonantVowelSplit,
+                targetF0: targetF0);
+
+            Assert.Contains("_microvar", result.Debug.VowelStretchStrategy);
         }
 
         [Fact]
@@ -260,6 +290,22 @@ namespace OpenUtau.Core.Test.HifiNeural {
             Assert.Equal(4, result.Mel.GetLength(1));
             Assert.Equal(2, result.Debug.TargetConsonantFrames);
             Assert.Equal(2, result.Debug.TargetVowelFrames);
+        }
+
+        [Fact]
+        public void ShortNoteCompressionKeepsVowelNucleusAndCanDropRelease() {
+            var mel = CreateTestMel(frames: 40);
+            var result = HifiPhoneMelStretcher.Stretch(
+                mel,
+                targetFrames: 6,
+                phoneme: "ta",
+                consonantMs: 20,
+                mode: HifiStretchMode.ConsonantVowelSplit,
+                lockModeOverride: HifiConsonantLockMode.Preserve);
+
+            Assert.Equal(6, result.Mel.GetLength(1));
+            Assert.True(result.Debug.TargetVowelSustainFrames >= 2);
+            Assert.InRange(result.Debug.TargetVowelReleaseFrames, 0, 1);
         }
 
         [Fact]

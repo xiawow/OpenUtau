@@ -33,6 +33,9 @@ namespace OpenUtau.Core.HifiNeural {
         public int SourceVowelFrames { get; init; }
         public int TargetVowelFrames { get; init; }
         public double StretchRatioVowel { get; init; }
+        public int TargetVowelOnsetFrames { get; init; }
+        public int TargetVowelSustainFrames { get; init; }
+        public int TargetVowelReleaseFrames { get; init; }
         public string ConsonantLockMode { get; init; } = string.Empty;
         public int BorrowedFrames { get; init; }
         public string BorrowedFramesAppliedTo { get; init; } = "none";
@@ -71,6 +74,9 @@ namespace OpenUtau.Core.HifiNeural {
             int LoopCount,
             int CrossfadeFrames,
             string Strategy,
+            int TargetOnsetFrames,
+            int TargetSustainFrames,
+            int TargetReleaseFrames,
             int F0StableStartFrame,
             int F0StableEndFrame,
             double F0MaxSlopeCents,
@@ -201,6 +207,9 @@ namespace OpenUtau.Core.HifiNeural {
                 SourceVowelFrames = vowelSourceFrames,
                 TargetVowelFrames = vowelTargetFrames,
                 StretchRatioVowel = vowelDurationRatio,
+                TargetVowelOnsetFrames = vowelMap.TargetOnsetFrames,
+                TargetVowelSustainFrames = vowelMap.TargetSustainFrames,
+                TargetVowelReleaseFrames = vowelMap.TargetReleaseFrames,
                 ConsonantLockMode = lockMode.ToString().ToLowerInvariant(),
                 BorrowedFrames = borrowedFrames,
                 BorrowedFramesAppliedTo = borrowedFramesAppliedTo,
@@ -391,15 +400,20 @@ namespace OpenUtau.Core.HifiNeural {
                     dstStart,
                     targetOnsetFrames);
             }
+            bool sustainHasFastF0Motion = targetF0 != null
+                && targetSustainFrames > 1
+                && HasFastF0Motion(targetF0, dstStart + targetOnsetFrames, targetSustainFrames);
+            bool sustainMicroVariationApplied = false;
             if (targetSustainFrames > 0) {
-                WriteSustainWithNaturalTimeMap(
+                sustainMicroVariationApplied = WriteSustainWithNaturalTimeMap(
                     sourceMel,
                     vowelStart + onsetFrames,
                     sourceSustainFrames,
                     output,
                     dstStart + targetOnsetFrames,
                     targetSustainFrames,
-                    transientAnchor);
+                    transientAnchor,
+                    allowMicroVariation: !sustainHasFastF0Motion);
             }
             if (targetReleaseFrames > 0) {
                 WriteMappedRegion(
@@ -421,6 +435,9 @@ namespace OpenUtau.Core.HifiNeural {
                 if (transientAnchor.Enabled) {
                     strategy += "_transient_lock";
                 }
+                if (sustainMicroVariationApplied) {
+                    strategy += "_microvar";
+                }
             }
             if (targetF0 != null && targetF0.Length > 1 && HasFastF0Motion(targetF0, dstStart, dstFrames)) {
                 strategy += "_f0_motion";
@@ -431,6 +448,9 @@ namespace OpenUtau.Core.HifiNeural {
                 0,
                 0,
                 strategy,
+                targetOnsetFrames,
+                targetSustainFrames,
+                targetReleaseFrames,
                 0,
                 0,
                 0,
@@ -466,6 +486,13 @@ namespace OpenUtau.Core.HifiNeural {
             if (targetTotalFrames <= 0) {
                 return (0, 0, 0);
             }
+            int sourceTotal = Math.Max(1, sourceOnsetFrames + sourceSustainFrames + sourceReleaseFrames);
+            bool compressed = targetTotalFrames < sourceTotal;
+            int minNucleusFrames = ResolveShortNoteNucleusFloor(
+                sourceSustainFrames,
+                sourceTotal,
+                targetTotalFrames,
+                compressed);
             if (targetTotalFrames == 1) {
                 return sourceOnsetFrames > 0 ? (1, 0, 0) : (0, 1, 0);
             }
@@ -473,14 +500,38 @@ namespace OpenUtau.Core.HifiNeural {
                 int quickOnsetFrames = sourceOnsetFrames > 0 ? 1 : 0;
                 int quickReleaseFrames = sourceReleaseFrames > 0 && targetTotalFrames >= 6 ? 1 : 0;
                 int quickSustainFrames = Math.Max(1, targetTotalFrames - quickOnsetFrames - quickReleaseFrames);
+                if (minNucleusFrames > 0 && quickSustainFrames < minNucleusFrames) {
+                    int needed = minNucleusFrames - quickSustainFrames;
+                    int takeFromRelease = Math.Min(needed, quickReleaseFrames);
+                    quickReleaseFrames -= takeFromRelease;
+                    needed -= takeFromRelease;
+                    if (needed > 0 && quickOnsetFrames > 0) {
+                        int takeFromOnset = Math.Min(needed, quickOnsetFrames);
+                        quickOnsetFrames -= takeFromOnset;
+                        needed -= takeFromOnset;
+                    }
+                    quickSustainFrames = Math.Max(quickSustainFrames, minNucleusFrames - needed);
+                }
                 int quickSum = quickOnsetFrames + quickSustainFrames + quickReleaseFrames;
                 if (quickSum != targetTotalFrames) {
-                    quickSustainFrames += targetTotalFrames - quickSum;
+                    int diff = targetTotalFrames - quickSum;
+                    if (diff > 0) {
+                        quickSustainFrames += diff;
+                    } else {
+                        int reduce = -diff;
+                        int minRelease = targetTotalFrames <= 6 ? 0 : 1;
+                        int takeRelease = Math.Min(reduce, Math.Max(0, quickReleaseFrames - minRelease));
+                        quickReleaseFrames -= takeRelease;
+                        reduce -= takeRelease;
+                        int minOnset = sourceOnsetFrames > 0 ? 1 : 0;
+                        int takeOnset = Math.Min(reduce, Math.Max(0, quickOnsetFrames - minOnset));
+                        quickOnsetFrames -= takeOnset;
+                        reduce -= takeOnset;
+                        quickSustainFrames = Math.Max(0, quickSustainFrames - reduce);
+                    }
                 }
                 return (Math.Max(0, quickOnsetFrames), Math.Max(0, quickSustainFrames), Math.Max(0, quickReleaseFrames));
             }
-
-            int sourceTotal = Math.Max(1, sourceOnsetFrames + sourceSustainFrames + sourceReleaseFrames);
             double ratio = Math.Min(1.0, targetTotalFrames / (double)sourceTotal);
             int onsetFrames = Math.Clamp(
                 (int)Math.Round(sourceOnsetFrames * ratio),
@@ -509,36 +560,80 @@ namespace OpenUtau.Core.HifiNeural {
                 }
                 sustainFrames = Math.Max(0, targetTotalFrames - onsetFrames - releaseFrames);
             }
+            if (minNucleusFrames > 0 && sustainFrames < minNucleusFrames) {
+                int needed = minNucleusFrames - sustainFrames;
+                int minRelease = targetTotalFrames <= 10 ? 0 : (sourceReleaseFrames > 0 ? 1 : 0);
+                int reduceRelease = Math.Min(needed, Math.Max(0, releaseFrames - minRelease));
+                releaseFrames -= reduceRelease;
+                needed -= reduceRelease;
+                int minOnset = sourceOnsetFrames > 0 ? 1 : 0;
+                int reduceOnset = Math.Min(needed, Math.Max(0, onsetFrames - minOnset));
+                onsetFrames -= reduceOnset;
+                needed -= reduceOnset;
+                sustainFrames = Math.Max(sustainFrames, minNucleusFrames - needed);
+            }
             int sum = onsetFrames + sustainFrames + releaseFrames;
             if (sum != targetTotalFrames) {
                 sustainFrames += targetTotalFrames - sum;
             }
+            if (minNucleusFrames > 0 && sustainFrames < minNucleusFrames) {
+                int stillNeed = minNucleusFrames - sustainFrames;
+                int takeRelease = Math.Min(stillNeed, releaseFrames);
+                releaseFrames -= takeRelease;
+                stillNeed -= takeRelease;
+                int minOnset = sourceOnsetFrames > 0 ? 1 : 0;
+                int takeOnset = Math.Min(stillNeed, Math.Max(0, onsetFrames - minOnset));
+                onsetFrames -= takeOnset;
+                stillNeed -= takeOnset;
+                sustainFrames += (minNucleusFrames - sustainFrames - stillNeed);
+            }
             return (Math.Max(0, onsetFrames), Math.Max(0, sustainFrames), Math.Max(0, releaseFrames));
         }
 
-        static void WriteSustainWithNaturalTimeMap(
+        static int ResolveShortNoteNucleusFloor(int sourceSustainFrames, int sourceTotalFrames, int targetTotalFrames, bool compressed) {
+            if (!compressed || sourceSustainFrames <= 0) {
+                return 0;
+            }
+            if (targetTotalFrames <= 2) {
+                return 1;
+            }
+            if (targetTotalFrames <= 5) {
+                return 2;
+            }
+            if (targetTotalFrames <= 10) {
+                return 3;
+            }
+            if (targetTotalFrames <= 14 && targetTotalFrames < sourceTotalFrames) {
+                return 2;
+            }
+            return 0;
+        }
+
+        static bool WriteSustainWithNaturalTimeMap(
             float[,] sourceMel,
             int sourceStart,
             int sourceFrames,
             float[,] output,
             int outputStart,
             int outputFrames,
-            TransientAnchorPlan transientAnchor) {
+            TransientAnchorPlan transientAnchor,
+            bool allowMicroVariation) {
             if (outputFrames <= 0) {
-                return;
+                return false;
             }
             if (sourceFrames <= 2 || outputFrames <= sourceFrames) {
                 WriteMappedRegion(sourceMel, sourceStart, sourceFrames, output, outputStart, outputFrames);
-                return;
+                return false;
             }
-            WriteMappedRegionNaturalStretch(
+            return WriteMappedRegionNaturalStretch(
                 sourceMel,
                 sourceStart,
                 sourceFrames,
                 output,
                 outputStart,
                 outputFrames,
-                transientAnchor);
+                transientAnchor,
+                allowMicroVariation);
         }
 
         static TransientAnchorPlan DetectTransientAnchor(
@@ -613,28 +708,33 @@ namespace OpenUtau.Core.HifiNeural {
                 string.Empty);
         }
 
-        static void WriteMappedRegionNaturalStretch(
+        static bool WriteMappedRegionNaturalStretch(
             float[,] sourceMel,
             int sourceStart,
             int sourceFrames,
             float[,] output,
             int outputStart,
             int outputFrames,
-            TransientAnchorPlan transientAnchor) {
+            TransientAnchorPlan transientAnchor,
+            bool allowMicroVariation) {
             int bins = sourceMel.GetLength(0);
             int totalSourceFrames = sourceMel.GetLength(1);
             sourceStart = Math.Clamp(sourceStart, 0, Math.Max(0, totalSourceFrames - 1));
             sourceFrames = Math.Max(1, Math.Min(sourceFrames, totalSourceFrames - sourceStart));
             outputFrames = Math.Min(outputFrames, output.GetLength(1) - outputStart);
             if (outputFrames <= 0) {
-                return;
+                return false;
             }
             double stretchRatio = sourceFrames > 0
                 ? outputFrames / (double)sourceFrames
                 : 1.0;
+            bool microVariationEnabled = allowMicroVariation && EnableSustainMicroVariation(stretchRatio, sourceFrames, outputFrames);
             for (int t = 0; t < outputFrames; t++) {
                 double targetNorm = outputFrames == 1 ? 0 : t / (double)(outputFrames - 1);
                 double sourceNorm = MapSourceNormalized(targetNorm, stretchRatio, transientAnchor, sourceFrames, outputFrames);
+                if (microVariationEnabled) {
+                    sourceNorm += SourceNormalizedMicroVariation(targetNorm, stretchRatio, sourceFrames, outputFrames);
+                }
                 sourceNorm = Math.Clamp(sourceNorm, 0, 1);
                 double sourceIndex = sourceNorm * Math.Max(0, sourceFrames - 1);
                 int left = sourceStart + (int)Math.Floor(sourceIndex);
@@ -646,6 +746,29 @@ namespace OpenUtau.Core.HifiNeural {
                     output[m, outputStart + t] = v0 + (v1 - v0) * alpha;
                 }
             }
+            return microVariationEnabled;
+        }
+
+        static bool EnableSustainMicroVariation(double stretchRatio, int sourceFrames, int targetFrames) {
+            return HifiNeuralConfig.EnableSustainMicroVariation
+                && stretchRatio >= HifiNeuralConfig.SustainMicroVariationMinStretchRatio
+                && sourceFrames >= HifiNeuralConfig.SustainMicroVariationMinSourceFrames
+                && targetFrames >= HifiNeuralConfig.SustainMicroVariationMinTargetFrames;
+        }
+
+        static double SourceNormalizedMicroVariation(double targetNorm, double stretchRatio, int sourceFrames, int targetFrames) {
+            if (sourceFrames <= 1 || targetFrames <= 1) {
+                return 0;
+            }
+            double phase = 2.0 * Math.PI * HifiNeuralConfig.SustainMicroVariationCycles * targetNorm;
+            double lfo = Math.Sin(phase) + 0.35 * Math.Sin(phase * 2.31 + 0.85);
+            double edge = SmoothStep(Math.Clamp(targetNorm / 0.22, 0, 1))
+                * SmoothStep(Math.Clamp((1.0 - targetNorm) / 0.22, 0, 1));
+            double ratioScale = Math.Clamp(Math.Log(stretchRatio, 2.0), 0, 2.0) / 2.0;
+            double ampFrames = HifiNeuralConfig.SustainMicroVariationAmpFrames * (0.65 + 0.35 * ratioScale);
+            ampFrames = Math.Min(ampFrames, 0.45);
+            double sourceFrameOffset = ampFrames * edge * lfo;
+            return sourceFrameOffset / Math.Max(1, sourceFrames - 1);
         }
 
         static double MapSourceNormalized(
@@ -747,7 +870,7 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         static VowelMapReport EmptyVowelMapReport(string strategy) {
-            return new VowelMapReport(0, 0, 0, 0, strategy, 0, 0, 0, 0);
+            return new VowelMapReport(0, 0, 0, 0, strategy, 0, 0, 0, 0, 0, 0, 0);
         }
 
         static StretchEnergyReport ApplyStretchEnergyCompensation(
@@ -1034,13 +1157,16 @@ namespace OpenUtau.Core.HifiNeural {
                 debug.CrossfadeFrames,
                 debug.FallbackReason);
             Log.Information(
-                "HifiPhoneMelStretcher lock phoneme={Phoneme} source_consonant_frames={SourceConsonantFrames} target_consonant_frames={TargetConsonantFrames} stretch_ratio_consonant={StretchRatioConsonant:F4} source_vowel_frames={SourceVowelFrames} target_vowel_frames={TargetVowelFrames} stretch_ratio_vowel={StretchRatioVowel:F4} consonant_lock_mode={ConsonantLockMode} borrowed_frames={BorrowedFrames} borrowed_frames_applied_to={BorrowedFramesAppliedTo}",
+                "HifiPhoneMelStretcher lock phoneme={Phoneme} source_consonant_frames={SourceConsonantFrames} target_consonant_frames={TargetConsonantFrames} stretch_ratio_consonant={StretchRatioConsonant:F4} source_vowel_frames={SourceVowelFrames} target_vowel_frames={TargetVowelFrames} target_vowel_onset_frames={TargetVowelOnsetFrames} target_vowel_sustain_frames={TargetVowelSustainFrames} target_vowel_release_frames={TargetVowelReleaseFrames} stretch_ratio_vowel={StretchRatioVowel:F4} consonant_lock_mode={ConsonantLockMode} borrowed_frames={BorrowedFrames} borrowed_frames_applied_to={BorrowedFramesAppliedTo}",
                 debug.Phoneme,
                 debug.SourceConsonantFrames,
                 debug.TargetConsonantFrames,
                 debug.StretchRatioConsonant,
                 debug.SourceVowelFrames,
                 debug.TargetVowelFrames,
+                debug.TargetVowelOnsetFrames,
+                debug.TargetVowelSustainFrames,
+                debug.TargetVowelReleaseFrames,
                 debug.StretchRatioVowel,
                 debug.ConsonantLockMode,
                 debug.BorrowedFrames,
@@ -1095,7 +1221,7 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         public static string CacheKey() {
-            return $"v5-sync2-{StretchModeName(StretchMode)}-lock{ConsonantLockModeName(ConsonantLockMode)}-borrow{EnableDurationBorrow}-pmc{EnablePitchMelCompensation}-se{EnableStretchEnergyCompensation}-aenv{EnableAudioEnvelopeNormalization}-{AudioEnvelopeMaxCutDb:0.0}-{AudioEnvelopeHeadroomDb:0.0}-{AudioEnvelopeStrength:0.00}-out{OutputTargetVoicedRmsDb:0.0}-{OutputMaxMakeupDb:0.0}-{OutputPeakLimit:0.00}-exc{EnableOutputExciter}-{OutputExciterDrive:0.00}-{OutputExciterMix:0.00}";
+            return $"v5-sync3-{StretchModeName(StretchMode)}-lock{ConsonantLockModeName(ConsonantLockMode)}-borrow{EnableDurationBorrow}-pmc{EnablePitchMelCompensation}-se{EnableStretchEnergyCompensation}-mv{EnableSustainMicroVariation}-{SustainMicroVariationAmpFrames:0.00}-{SustainMicroVariationCycles:0.00}-aenv{EnableAudioEnvelopeNormalization}-{AudioEnvelopeMaxCutDb:0.0}-{AudioEnvelopeHeadroomDb:0.0}-{AudioEnvelopeStrength:0.00}-out{OutputTargetVoicedRmsDb:0.0}-{OutputMaxMakeupDb:0.0}-{OutputPeakLimit:0.00}-exc{EnableOutputExciter}-{OutputExciterDrive:0.00}-{OutputExciterMix:0.00}";
         }
         public const string LockPreserve = "preserve";
         public const string LockReadable = "readable";
@@ -1241,6 +1367,23 @@ namespace OpenUtau.Core.HifiNeural {
         public static double F0AwareMaxSlopeCentsPerFrame => 45;
 
         public static int F0AwareMinStableFrames => 5;
+
+        public static bool EnableSustainMicroVariation {
+            get {
+                string value = Environment.GetEnvironmentVariable("HIFI_NEURAL_ENABLE_SUSTAIN_MICRO_VARIATION");
+                return !bool.TryParse(value, out bool enabled) || enabled;
+            }
+        }
+
+        public static double SustainMicroVariationMinStretchRatio => 1.18;
+
+        public static int SustainMicroVariationMinSourceFrames => 8;
+
+        public static int SustainMicroVariationMinTargetFrames => 12;
+
+        public static double SustainMicroVariationAmpFrames => 0.22;
+
+        public static double SustainMicroVariationCycles => 1.15;
 
         public static bool EnableF0AwareBoundaryCompose {
             get {

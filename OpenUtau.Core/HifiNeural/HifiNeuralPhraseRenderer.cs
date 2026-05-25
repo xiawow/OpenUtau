@@ -16,7 +16,7 @@ using Serilog;
 
 namespace OpenUtau.Core.HifiNeural {
     public sealed class HifiNeuralPhraseRenderer : IRenderer {
-        public const string RendererId = "HIFI-NEURAL-PHRASE";
+        public const string RendererId = "HIFI-NEURA";
 
         static readonly object lockObj = new object();
         readonly HifiPhraseFeatureBuilder featureBuilder = new HifiPhraseFeatureBuilder();
