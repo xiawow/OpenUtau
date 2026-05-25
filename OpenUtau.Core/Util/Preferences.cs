@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 using Newtonsoft.Json;
+using OpenUtau.Core.HifiNeural;
 using OpenUtau.Core.Render;
 using Serilog;
 
@@ -113,31 +114,7 @@ namespace OpenUtau.Core.Util {
                     if (!ValidString(new Action(() => CultureInfo.GetCultureInfo(Default.SortingOrder)))) Default.SortingOrder = string.Empty;
                     if (!Renderers.getRendererOptions().Contains(Default.DefaultRenderer)) Default.DefaultRenderer = string.Empty;
                     if (!Onnx.getRunnerOptions().Contains(Default.OnnxRunner)) Default.OnnxRunner = string.Empty;
-                    if (Default.HifiNeuralStretchMode != "simple" && Default.HifiNeuralStretchMode != "consonant_vowel_split") {
-                        Default.HifiNeuralStretchMode = "simple";
-                    }
-                    if (Default.HifiNeuralConsonantLockMode != "preserve"
-                        && Default.HifiNeuralConsonantLockMode != "readable"
-                        && Default.HifiNeuralConsonantLockMode != "off") {
-                        Default.HifiNeuralConsonantLockMode = "preserve";
-                    }
-                    if (Default.HifiNeuralMinConsonantMs <= 0) Default.HifiNeuralMinConsonantMs = 40;
-                    if (Default.HifiNeuralMinVowelMs <= 0) Default.HifiNeuralMinVowelMs = 30;
-                    if (Default.HifiNeuralMaxBorrowMs <= 0) Default.HifiNeuralMaxBorrowMs = 30;
-                    if (Default.HifiNeuralMaxBorrowRatio <= 0 || Default.HifiNeuralMaxBorrowRatio > 1) Default.HifiNeuralMaxBorrowRatio = 0.5;
-                    if (Default.HifiNeuralMinCodaMs <= 0) Default.HifiNeuralMinCodaMs = 40;
-                    if (Default.HifiNeuralBoundaryCrossfadeFrames <= 0) Default.HifiNeuralBoundaryCrossfadeFrames = 2;
-                    if (Default.HifiNeuralBoundarySmoothFrames < 0) Default.HifiNeuralBoundarySmoothFrames = 2;
-                    if (Default.HifiNeuralDurationBorrowSmoothFrames < 0) Default.HifiNeuralDurationBorrowSmoothFrames = 3;
-                    if (Default.HifiNeuralBoundaryEnergyPreset != "energy_off"
-                        && Default.HifiNeuralBoundaryEnergyPreset != "energy_conservative") {
-                        Default.HifiNeuralBoundaryEnergyPreset = "energy_off";
-                    }
-                    if (Default.HifiNeuralBoundaryEnergyMaxGainDb <= 0) Default.HifiNeuralBoundaryEnergyMaxGainDb = 0.8;
-                    if (Default.HifiNeuralBoundaryEnergyWindowFrames <= 0) Default.HifiNeuralBoundaryEnergyWindowFrames = 12;
-                    if (Default.HifiNeuralTailReleaseFrames < 0) Default.HifiNeuralTailReleaseFrames = 0;
-                    if (Default.HifiNeuralTailReleaseGainDb > 0 || Default.HifiNeuralTailReleaseGainDb < -18) Default.HifiNeuralTailReleaseGainDb = 0;
-                    if (Default.HifiNeuralTailReleaseF0Frames < 0) Default.HifiNeuralTailReleaseF0Frames = 2;
+                    Default.HifiNeuralMelEnhanceMode = HifiRenderConfig.NormalizeMelEnhanceMode(Default.HifiNeuralMelEnhanceMode);
                     if (Default.Theme != null) {
                         Default.ThemeName = Default.Theme switch {
                             1 => "Dark",
@@ -191,29 +168,8 @@ namespace OpenUtau.Core.Util {
             public int DiffSingerStepsPitch = 10;
             public bool DiffSingerTensorCache = true;
             public bool DiffSingerLangCodeHide = false;
-            public string HifiNeuralStretchMode = "simple";
-            public string HifiNeuralConsonantLockMode = "preserve";
-            public bool HifiNeuralEnableDurationBorrow = false;
-            public double HifiNeuralMinConsonantMs = 40;
-            public double HifiNeuralMinVowelMs = 30;
-            public double HifiNeuralMaxBorrowMs = 30;
-            public double HifiNeuralMaxBorrowRatio = 0.5;
-            public bool HifiNeuralEnableCodaProtection = true;
-            public double HifiNeuralMinCodaMs = 40;
-            public int HifiNeuralBoundaryCrossfadeFrames = 2;
-            public int HifiNeuralBoundarySmoothFrames = 2;
-            public int HifiNeuralDurationBorrowSmoothFrames = 3;
-            public bool HifiNeuralEnableSourceLeadingSanitizer = false;
-            public bool HifiNeuralEnableF0AwareStretch = true;
-            public bool HifiNeuralEnableF0AwareBoundaryCompose = true;
-            public bool HifiNeuralEnablePitchMelCompensation = true;
-            public bool HifiNeuralEnableBoundaryEnergyMatching = false;
-            public string HifiNeuralBoundaryEnergyPreset = "energy_off";
-            public double HifiNeuralBoundaryEnergyMaxGainDb = 0.8;
-            public int HifiNeuralBoundaryEnergyWindowFrames = 12;
-            public int HifiNeuralTailReleaseFrames = 0;
-            public double HifiNeuralTailReleaseGainDb = 0;
-            public int HifiNeuralTailReleaseF0Frames = 2;
+            public string HifiNeuralMelEnhanceMode = HifiRenderConfig.MelEnhanceNone;
+            public bool HifiNeuralDebugExportEnabled = false;
             public bool SkipRenderingMutedTracks = false;
             public string Language = string.Empty;
             public string? SortingOrder = null;

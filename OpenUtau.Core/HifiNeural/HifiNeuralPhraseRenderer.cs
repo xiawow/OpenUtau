@@ -19,8 +19,7 @@ namespace OpenUtau.Core.HifiNeural {
         public const string RendererId = "HIFI-NEURA";
 
         static readonly object lockObj = new object();
-        readonly HifiPhraseFeatureBuilder featureBuilder = new HifiPhraseFeatureBuilder();
-        readonly IHifiTransitionRefiner refiner = new IdentityHifiTransitionRefiner();
+        readonly HifiRoughPhraseSynthesizer roughSynthesizer = new HifiRoughPhraseSynthesizer();
 
         public USingerType SingerType => USingerType.Classic;
         public bool SupportsRenderPitch => false;
@@ -57,7 +56,7 @@ namespace OpenUtau.Core.HifiNeural {
 
                     bool hasModel = HifiOnnxVocoder.TryResolveModelPath(out var modelPath, out var modelDiagnostic);
                     string? wavPath = hasModel
-                        ? GetCachePath(phrase.hash, HifiNeuralConfig.CacheKey(), modelPath)
+                        ? GetCachePath(phrase.hash, HifiRenderConfig.CacheKey(), modelPath)
                         : null;
                     if (wavPath != null) {
                         phrase.AddCacheFile(wavPath);
@@ -81,11 +80,19 @@ namespace OpenUtau.Core.HifiNeural {
         float[] RenderInternal(RenderPhrase phrase, RenderResult layout, CancellationTokenSource cancellation, string? wavPath, string modelPath, string modelDiagnostic) {
             Log.Information("HifiNeuralPhraseRenderer phrase notes={Notes} phones={Phones} durationMs={Duration:F1} sampleRate={SampleRate}",
                 phrase.notes.Length, phrase.phones.Length, layout.estimatedLengthMs, HifiMelExtractor.SampleRate);
-            var features = featureBuilder.Build(phrase, layout);
-            var refined = refiner.Refine(features);
+            float[] rough = roughSynthesizer.Synthesize(phrase, cancellation);
+            if (rough.Length == 0) {
+                return Array.Empty<float>();
+            }
+            Log.Information(
+                "HifiNeuralPhraseRenderer rough ready mode=overlap_only rough_samples={RoughSamples}",
+                rough.Length);
+            var featureBuilder = new HifiRoughFeatureBuilder(HifiRenderConfig.CreateMelEnhancer());
+            var features = featureBuilder.Build(phrase, layout, rough);
             string debugKey = $"{phrase.hash:x16}";
-            HifiDebugExporter.Export(debugKey, refined);
-            HifiTransitionDatasetExporter.Export(debugKey, refined);
+            if (HifiRenderConfig.DebugExportEnabled) {
+                HifiDebugExporter.Export(debugKey, features);
+            }
 
             if (cancellation.IsCancellationRequested) {
                 return Array.Empty<float>();
@@ -101,40 +108,41 @@ namespace OpenUtau.Core.HifiNeural {
             }
 
             using var vocoder = new HifiOnnxVocoder(modelPath);
-            float[] samples = vocoder.Infer(refined);
-            if (HifiNeuralConfig.EnableAudioEnvelopeNormalization) {
-                HifiAudioEnvelopeNormalizer.Apply(
-                    samples,
-                    refined,
-                    HifiNeuralConfig.AudioEnvelopeMaxCutDb,
-                    HifiNeuralConfig.AudioEnvelopeHeadroomDb,
-                    HifiNeuralConfig.AudioEnvelopeStrength);
+            float[] samples = vocoder.Infer(features);
+            ApplyPhraseEdgeGuard(samples, HifiMelExtractor.SampleRate, fadeInMs: 14, fadeOutMs: 32);
+            if (HifiRenderConfig.DebugExportEnabled) {
+                HifiClickDiagnostic.Export(debugKey, features, samples);
             }
-            if (HifiNeuralConfig.EnableInternalClickSuppression) {
-                HifiInternalClickSuppressor.Apply(
-                    samples,
-                    refined.Metadata,
-                    HifiMelExtractor.SampleRate,
-                    HifiNeuralConfig.InternalClickSuppressorWindowMs,
-                    HifiNeuralConfig.InternalClickSuppressorThresholdRatio);
-            }
-            ApplyClickGuard(samples, HifiMelExtractor.SampleRate, 5);
-            HifiClickDiagnostic.Export(debugKey, refined, samples);
             if (wavPath != null) {
                 SaveCache(wavPath, samples);
             }
             return samples;
         }
 
-        static void ApplyClickGuard(float[] samples, int sampleRate, double fadeMs) {
-            int fadeSamples = Math.Min(samples.Length / 2, Math.Max(1, (int)Math.Round(sampleRate * fadeMs / 1000.0)));
+        static void ApplyPhraseEdgeGuard(float[] samples, int sampleRate, double fadeInMs, double fadeOutMs) {
+            int maxFade = Math.Max(1, samples.Length / 2);
+            int fadeInSamples = Math.Min(maxFade, Math.Max(1, (int)Math.Round(sampleRate * fadeInMs / 1000.0)));
+            int fadeOutSamples = Math.Min(maxFade, Math.Max(1, (int)Math.Round(sampleRate * fadeOutMs / 1000.0)));
+            ApplyFadeIn(samples, fadeInSamples);
+            ApplyFadeOut(samples, fadeOutSamples);
+        }
+
+        static void ApplyFadeIn(float[] samples, int fadeSamples) {
+            fadeSamples = Math.Clamp(fadeSamples, 0, samples.Length);
             for (int i = 0; i < fadeSamples; i++) {
-                float gain = (float)(0.5 - 0.5 * Math.Cos(Math.PI * (i + 1) / (fadeSamples + 1)));
+                float t = fadeSamples <= 1 ? 1f : i / (float)(fadeSamples - 1);
+                float gain = (float)(0.5 - 0.5 * Math.Cos(Math.PI * t));
                 samples[i] *= gain;
-                int tail = samples.Length - 1 - i;
-                if (tail > i) {
-                    samples[tail] *= gain;
-                }
+            }
+        }
+
+        static void ApplyFadeOut(float[] samples, int fadeSamples) {
+            fadeSamples = Math.Clamp(fadeSamples, 0, samples.Length);
+            for (int i = 0; i < fadeSamples; i++) {
+                int index = samples.Length - 1 - i;
+                float t = fadeSamples <= 1 ? 1f : i / (float)(fadeSamples - 1);
+                float gain = (float)(0.5 - 0.5 * Math.Cos(Math.PI * t));
+                samples[index] *= gain;
             }
         }
 

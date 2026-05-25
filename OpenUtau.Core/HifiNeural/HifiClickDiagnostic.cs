@@ -50,6 +50,8 @@ namespace OpenUtau.Core.HifiNeural {
     }
 
     public static class HifiClickDiagnostic {
+        const double MelBoundaryDeltaThreshold = 1.2;
+
         public static HifiPhoneFeatureDiagnostic BuildPhoneFeatureDiagnostic(
             int index,
             string phoneme,
@@ -200,7 +202,7 @@ namespace OpenUtau.Core.HifiNeural {
             if (localRms > 1e-5 && wavJump > Math.Max(0.02, localRms * 0.9)) {
                 reasons.Add("wav_jump");
             }
-            if (melDelta > HifiNeuralConfig.ClickDiagnosticMelDeltaThreshold) {
+            if (melDelta > MelBoundaryDeltaThreshold) {
                 reasons.Add("phrase_mel_boundary_delta");
             }
             if (f0VoicedOnset) {
@@ -213,7 +215,7 @@ namespace OpenUtau.Core.HifiNeural {
                 if (Math.Abs(feature.SourceOnsetDc) > 0.03) {
                     reasons.Add("source_onset_dc");
                 }
-                if (feature.StretchedMelOnsetDelta > HifiNeuralConfig.ClickDiagnosticMelDeltaThreshold) {
+                if (feature.StretchedMelOnsetDelta > MelBoundaryDeltaThreshold) {
                     reasons.Add("stretched_mel_onset_delta");
                 }
             }

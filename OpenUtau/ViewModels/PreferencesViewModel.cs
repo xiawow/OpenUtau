@@ -90,32 +90,9 @@ namespace OpenUtau.App.ViewModels {
         [Reactive] public bool ClearCacheOnQuit { get; set; }
         public List<string> OnnxRunnerOptions { get; set; }
         [Reactive] public string OnnxRunner { get; set; }
-        public List<string> HifiNeuralStretchModeOptions { get; set; }
-        [Reactive] public string HifiNeuralStretchMode { get; set; }
-        public List<string> HifiNeuralConsonantLockModeOptions { get; set; }
-        [Reactive] public string HifiNeuralConsonantLockMode { get; set; }
-        [Reactive] public bool HifiNeuralEnableDurationBorrow { get; set; }
-        [Reactive] public double HifiNeuralMinConsonantMs { get; set; }
-        [Reactive] public double HifiNeuralMinVowelMs { get; set; }
-        [Reactive] public double HifiNeuralMaxBorrowMs { get; set; }
-        [Reactive] public double HifiNeuralMaxBorrowRatio { get; set; }
-        [Reactive] public bool HifiNeuralEnableCodaProtection { get; set; }
-        [Reactive] public double HifiNeuralMinCodaMs { get; set; }
-        [Reactive] public int HifiNeuralBoundaryCrossfadeFrames { get; set; }
-        [Reactive] public int HifiNeuralBoundarySmoothFrames { get; set; }
-        [Reactive] public int HifiNeuralDurationBorrowSmoothFrames { get; set; }
-        [Reactive] public bool HifiNeuralEnableSourceLeadingSanitizer { get; set; }
-        [Reactive] public bool HifiNeuralEnableF0AwareStretch { get; set; }
-        [Reactive] public bool HifiNeuralEnableF0AwareBoundaryCompose { get; set; }
-        [Reactive] public bool HifiNeuralEnablePitchMelCompensation { get; set; }
-        [Reactive] public bool HifiNeuralEnableBoundaryEnergyMatching { get; set; }
-        public List<string> HifiNeuralBoundaryEnergyPresetOptions { get; set; }
-        [Reactive] public string HifiNeuralBoundaryEnergyPreset { get; set; }
-        [Reactive] public double HifiNeuralBoundaryEnergyMaxGainDb { get; set; }
-        [Reactive] public int HifiNeuralBoundaryEnergyWindowFrames { get; set; }
-        [Reactive] public int HifiNeuralTailReleaseFrames { get; set; }
-        [Reactive] public double HifiNeuralTailReleaseGainDb { get; set; }
-        [Reactive] public int HifiNeuralTailReleaseF0Frames { get; set; }
+        public List<string> HifiNeuralMelEnhanceModeOptions { get; set; }
+        [Reactive] public string HifiNeuralMelEnhanceMode { get; set; }
+        [Reactive] public bool HifiNeuralDebugExportEnabled { get; set; }
         public List<GpuInfo> OnnxGpuOptions { get; set; }
         [Reactive] public GpuInfo OnnxGpu { get; set; }
         [Reactive] public bool ShowOnnxGpu { get; set; }
@@ -193,48 +170,12 @@ namespace OpenUtau.App.ViewModels {
             OnnxRunnerOptions = Onnx.getRunnerOptions();
             OnnxRunner = String.IsNullOrEmpty(Preferences.Default.OnnxRunner) ?
                OnnxRunnerOptions[0] : Preferences.Default.OnnxRunner;
-            HifiNeuralStretchModeOptions = new List<string> {
-                HifiNeuralConfig.Simple,
-                HifiNeuralConfig.ConsonantVowelSplit,
+            HifiNeuralMelEnhanceModeOptions = new List<string> {
+                HifiRenderConfig.MelEnhanceNone,
+                HifiRenderConfig.MelEnhanceLight,
             };
-            HifiNeuralStretchMode = HifiNeuralStretchModeOptions.Contains(Preferences.Default.HifiNeuralStretchMode)
-                ? Preferences.Default.HifiNeuralStretchMode
-                : HifiNeuralConfig.Simple;
-            HifiNeuralConsonantLockModeOptions = new List<string> {
-                HifiNeuralConfig.LockPreserve,
-                HifiNeuralConfig.LockReadable,
-                HifiNeuralConfig.LockOff,
-            };
-            HifiNeuralConsonantLockMode = HifiNeuralConsonantLockModeOptions.Contains(Preferences.Default.HifiNeuralConsonantLockMode)
-                ? Preferences.Default.HifiNeuralConsonantLockMode
-                : HifiNeuralConfig.LockPreserve;
-            HifiNeuralEnableDurationBorrow = Preferences.Default.HifiNeuralEnableDurationBorrow;
-            HifiNeuralMinConsonantMs = Preferences.Default.HifiNeuralMinConsonantMs;
-            HifiNeuralMinVowelMs = Preferences.Default.HifiNeuralMinVowelMs;
-            HifiNeuralMaxBorrowMs = Preferences.Default.HifiNeuralMaxBorrowMs;
-            HifiNeuralMaxBorrowRatio = Preferences.Default.HifiNeuralMaxBorrowRatio * 100;
-            HifiNeuralEnableCodaProtection = Preferences.Default.HifiNeuralEnableCodaProtection;
-            HifiNeuralMinCodaMs = Preferences.Default.HifiNeuralMinCodaMs;
-            HifiNeuralBoundaryCrossfadeFrames = Preferences.Default.HifiNeuralBoundaryCrossfadeFrames;
-            HifiNeuralBoundarySmoothFrames = Preferences.Default.HifiNeuralBoundarySmoothFrames;
-            HifiNeuralDurationBorrowSmoothFrames = Preferences.Default.HifiNeuralDurationBorrowSmoothFrames;
-            HifiNeuralEnableSourceLeadingSanitizer = Preferences.Default.HifiNeuralEnableSourceLeadingSanitizer;
-            HifiNeuralEnableF0AwareStretch = Preferences.Default.HifiNeuralEnableF0AwareStretch;
-            HifiNeuralEnableF0AwareBoundaryCompose = Preferences.Default.HifiNeuralEnableF0AwareBoundaryCompose;
-            HifiNeuralEnablePitchMelCompensation = Preferences.Default.HifiNeuralEnablePitchMelCompensation;
-            HifiNeuralEnableBoundaryEnergyMatching = Preferences.Default.HifiNeuralEnableBoundaryEnergyMatching;
-            HifiNeuralBoundaryEnergyPresetOptions = new List<string> {
-                HifiNeuralConfig.EnergyOff,
-                HifiNeuralConfig.EnergyConservative,
-            };
-            HifiNeuralBoundaryEnergyPreset = HifiNeuralBoundaryEnergyPresetOptions.Contains(Preferences.Default.HifiNeuralBoundaryEnergyPreset)
-                ? Preferences.Default.HifiNeuralBoundaryEnergyPreset
-                : HifiNeuralConfig.EnergyConservative;
-            HifiNeuralBoundaryEnergyMaxGainDb = Preferences.Default.HifiNeuralBoundaryEnergyMaxGainDb;
-            HifiNeuralBoundaryEnergyWindowFrames = Preferences.Default.HifiNeuralBoundaryEnergyWindowFrames;
-            HifiNeuralTailReleaseFrames = Preferences.Default.HifiNeuralTailReleaseFrames;
-            HifiNeuralTailReleaseGainDb = Preferences.Default.HifiNeuralTailReleaseGainDb;
-            HifiNeuralTailReleaseF0Frames = Preferences.Default.HifiNeuralTailReleaseF0Frames;
+            HifiNeuralMelEnhanceMode = HifiRenderConfig.NormalizeMelEnhanceMode(Preferences.Default.HifiNeuralMelEnhanceMode);
+            HifiNeuralDebugExportEnabled = Preferences.Default.HifiNeuralDebugExportEnabled;
             OnnxGpuOptions = Onnx.getGpuInfo();
             OnnxGpu = OnnxGpuOptions.FirstOrDefault(x => x.deviceId == Preferences.Default.OnnxGpu, OnnxGpuOptions[0]);
             ShowOnnxGpu = OnnxRunner == "DirectML";
@@ -412,125 +353,14 @@ namespace OpenUtau.App.ViewModels {
                     Preferences.Save();
                     ToggleOnnxGpuDisplay(index == "DirectML");
                 });
-            this.WhenAnyValue(vm => vm.HifiNeuralStretchMode)
+            this.WhenAnyValue(vm => vm.HifiNeuralMelEnhanceMode)
                 .Subscribe(mode => {
-                    Preferences.Default.HifiNeuralStretchMode = HifiNeuralStretchModeOptions.Contains(mode)
-                        ? mode
-                        : HifiNeuralConfig.Simple;
+                    Preferences.Default.HifiNeuralMelEnhanceMode = HifiRenderConfig.NormalizeMelEnhanceMode(mode);
                     Preferences.Save();
                 });
-            this.WhenAnyValue(vm => vm.HifiNeuralConsonantLockMode)
-                .Subscribe(mode => {
-                    Preferences.Default.HifiNeuralConsonantLockMode = HifiNeuralConsonantLockModeOptions.Contains(mode)
-                        ? mode
-                        : HifiNeuralConfig.LockPreserve;
-                    Preferences.Save();
-                });
-            this.WhenAnyValue(vm => vm.HifiNeuralEnableDurationBorrow)
+            this.WhenAnyValue(vm => vm.HifiNeuralDebugExportEnabled)
                 .Subscribe(enabled => {
-                    Preferences.Default.HifiNeuralEnableDurationBorrow = enabled;
-                    Preferences.Save();
-                });
-            this.WhenAnyValue(vm => vm.HifiNeuralMinConsonantMs)
-                .Subscribe(value => {
-                    Preferences.Default.HifiNeuralMinConsonantMs = Math.Max(1, value);
-                    Preferences.Save();
-                });
-            this.WhenAnyValue(vm => vm.HifiNeuralMinVowelMs)
-                .Subscribe(value => {
-                    Preferences.Default.HifiNeuralMinVowelMs = Math.Max(1, value);
-                    Preferences.Save();
-                });
-            this.WhenAnyValue(vm => vm.HifiNeuralMaxBorrowMs)
-                .Subscribe(value => {
-                    Preferences.Default.HifiNeuralMaxBorrowMs = Math.Max(1, value);
-                    Preferences.Save();
-                });
-            this.WhenAnyValue(vm => vm.HifiNeuralMaxBorrowRatio)
-                .Subscribe(value => {
-                    Preferences.Default.HifiNeuralMaxBorrowRatio = Math.Clamp(value / 100, 0, 1);
-                    Preferences.Save();
-                });
-            this.WhenAnyValue(vm => vm.HifiNeuralEnableCodaProtection)
-                .Subscribe(value => {
-                    Preferences.Default.HifiNeuralEnableCodaProtection = value;
-                    Preferences.Save();
-                });
-            this.WhenAnyValue(vm => vm.HifiNeuralMinCodaMs)
-                .Subscribe(value => {
-                    Preferences.Default.HifiNeuralMinCodaMs = Math.Max(1, value);
-                    Preferences.Save();
-                });
-            this.WhenAnyValue(vm => vm.HifiNeuralBoundaryCrossfadeFrames)
-                .Subscribe(value => {
-                    Preferences.Default.HifiNeuralBoundaryCrossfadeFrames = Math.Max(0, value);
-                    Preferences.Save();
-                });
-            this.WhenAnyValue(vm => vm.HifiNeuralBoundarySmoothFrames)
-                .Subscribe(value => {
-                    Preferences.Default.HifiNeuralBoundarySmoothFrames = Math.Max(0, value);
-                    Preferences.Save();
-                });
-            this.WhenAnyValue(vm => vm.HifiNeuralDurationBorrowSmoothFrames)
-                .Subscribe(value => {
-                    Preferences.Default.HifiNeuralDurationBorrowSmoothFrames = Math.Max(0, value);
-                    Preferences.Save();
-                });
-            this.WhenAnyValue(vm => vm.HifiNeuralEnableSourceLeadingSanitizer)
-                .Subscribe(value => {
-                    Preferences.Default.HifiNeuralEnableSourceLeadingSanitizer = value;
-                    Preferences.Save();
-                });
-            this.WhenAnyValue(vm => vm.HifiNeuralEnableF0AwareStretch)
-                .Subscribe(value => {
-                    Preferences.Default.HifiNeuralEnableF0AwareStretch = value;
-                    Preferences.Save();
-                });
-            this.WhenAnyValue(vm => vm.HifiNeuralEnableF0AwareBoundaryCompose)
-                .Subscribe(value => {
-                    Preferences.Default.HifiNeuralEnableF0AwareBoundaryCompose = value;
-                    Preferences.Save();
-                });
-            this.WhenAnyValue(vm => vm.HifiNeuralEnablePitchMelCompensation)
-                .Subscribe(value => {
-                    Preferences.Default.HifiNeuralEnablePitchMelCompensation = value;
-                    Preferences.Save();
-                });
-            this.WhenAnyValue(vm => vm.HifiNeuralEnableBoundaryEnergyMatching)
-                .Subscribe(value => {
-                    Preferences.Default.HifiNeuralEnableBoundaryEnergyMatching = value;
-                    Preferences.Save();
-                });
-            this.WhenAnyValue(vm => vm.HifiNeuralBoundaryEnergyPreset)
-                .Subscribe(value => {
-                    Preferences.Default.HifiNeuralBoundaryEnergyPreset = HifiNeuralBoundaryEnergyPresetOptions.Contains(value)
-                        ? value
-                        : HifiNeuralConfig.EnergyConservative;
-                    Preferences.Save();
-                });
-            this.WhenAnyValue(vm => vm.HifiNeuralBoundaryEnergyMaxGainDb)
-                .Subscribe(value => {
-                    Preferences.Default.HifiNeuralBoundaryEnergyMaxGainDb = Math.Clamp(value, 0.5, 1.0);
-                    Preferences.Save();
-                });
-            this.WhenAnyValue(vm => vm.HifiNeuralBoundaryEnergyWindowFrames)
-                .Subscribe(value => {
-                    Preferences.Default.HifiNeuralBoundaryEnergyWindowFrames = Math.Clamp(value, 8, 16);
-                    Preferences.Save();
-                });
-            this.WhenAnyValue(vm => vm.HifiNeuralTailReleaseFrames)
-                .Subscribe(value => {
-                    Preferences.Default.HifiNeuralTailReleaseFrames = Math.Clamp(value, 0, 24);
-                    Preferences.Save();
-                });
-            this.WhenAnyValue(vm => vm.HifiNeuralTailReleaseGainDb)
-                .Subscribe(value => {
-                    Preferences.Default.HifiNeuralTailReleaseGainDb = Math.Clamp(value, -18, 0);
-                    Preferences.Save();
-                });
-            this.WhenAnyValue(vm => vm.HifiNeuralTailReleaseF0Frames)
-                .Subscribe(value => {
-                    Preferences.Default.HifiNeuralTailReleaseF0Frames = Math.Clamp(value, 0, 8);
+                    Preferences.Default.HifiNeuralDebugExportEnabled = enabled;
                     Preferences.Save();
                 });
             this.WhenAnyValue(vm => vm.OnnxGpu)
