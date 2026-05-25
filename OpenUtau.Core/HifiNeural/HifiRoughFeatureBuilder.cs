@@ -282,10 +282,10 @@ namespace OpenUtau.Core.HifiNeural {
             var durationWeights = new double[phoneCount];
             double previousMs = phraseStartMs;
             for (int i = 0; i < phoneCount; i++) {
-                double currentMs = i == 0 ? phraseStartMs : PhoneBodyStartMs(phrase.phones[i]);
+                double currentMs = i == 0 ? phraseStartMs : PhoneSegmentStartMs(phrase.phones[i]);
                 currentMs = Math.Max(currentMs, previousMs);
                 double nextMs = i + 1 < phoneCount
-                    ? Math.Max(currentMs, PhoneBodyStartMs(phrase.phones[i + 1]))
+                    ? Math.Max(currentMs, PhoneSegmentStartMs(phrase.phones[i + 1]))
                     : phraseStartMs + totalFrames * frameMs;
                 durationWeights[i] = Math.Max(0, nextMs - currentMs) / frameMs;
                 previousMs = currentMs;
@@ -900,8 +900,8 @@ namespace OpenUtau.Core.HifiNeural {
             return consonantMs > 0 ? consonantMs : null;
         }
 
-        static double PhoneBodyStartMs(RenderPhone phone) {
-            return phone.positionMs;
+        static double PhoneSegmentStartMs(RenderPhone phone) {
+            return phone.positionMs - Math.Max(0, phone.leadingMs);
         }
 
         static bool HasFastF0Motion(float[] f0, int start, int frames) {
