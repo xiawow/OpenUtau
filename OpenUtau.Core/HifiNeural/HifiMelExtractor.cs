@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Numerics;
 using System.Linq;
 using NAudio.Wave;
@@ -73,6 +74,83 @@ namespace OpenUtau.Core.HifiNeural {
             return mel;
         }
 
+        public float[,] ExtractAtPositions(float[] samples, IReadOnlyList<double> centerSamplePositions) {
+            int frames = centerSamplePositions.Count;
+            var mel = new float[NMels, frames];
+            if (frames == 0) {
+                LogStats(mel);
+                return mel;
+            }
+            if (samples.Length == 0) {
+                FillConstant(mel, (float)Math.Log(1e-5));
+                LogStats(mel);
+                return mel;
+            }
+
+            var fft = new Complex[Nfft];
+            for (int frame = 0; frame < frames; frame++) {
+                double center = centerSamplePositions[frame];
+                if (double.IsNaN(center) || double.IsInfinity(center)) {
+                    center = 0;
+                }
+                center = Math.Clamp(center, 0, samples.Length - 1);
+                double start = center - (WinSize - 1) * 0.5;
+
+                Array.Clear(fft, 0, fft.Length);
+                for (int n = 0; n < WinSize; n++) {
+                    fft[n] = new Complex(SampleReflectedLinear(samples, start + n) * hann[n], 0);
+                }
+                ForwardFft(fft);
+                WriteMelFrame(fft, mel, frame);
+            }
+
+            Log.Information(
+                "HifiMelExtractor variable_position_mel shape=[{MelBins},{Frames}] source_samples={SourceSamples}",
+                NMels,
+                frames,
+                samples.Length);
+            LogStats(mel);
+            return mel;
+        }
+
+        void WriteMelFrame(Complex[] fft, float[,] mel, int frame) {
+            for (int m = 0; m < NMels; m++) {
+                double value = 0;
+                for (int k = 0; k <= Nfft / 2; k++) {
+                    value += melFilterbank[m, k] * fft[k].Magnitude;
+                }
+                mel[m, frame] = (float)Math.Log(Math.Max(value, 1e-5));
+            }
+        }
+
+        static float SampleReflectedLinear(float[] samples, double index) {
+            if (samples.Length == 0) {
+                return 0;
+            }
+            if (samples.Length == 1) {
+                return samples[0];
+            }
+            int left = (int)Math.Floor(index);
+            double alpha = index - left;
+            float v0 = samples[ReflectIndex(left, samples.Length)];
+            float v1 = samples[ReflectIndex(left + 1, samples.Length)];
+            return (float)(v0 + (v1 - v0) * alpha);
+        }
+
+        static int ReflectIndex(int index, int length) {
+            if (length <= 1) {
+                return 0;
+            }
+            while (index < 0 || index >= length) {
+                if (index < 0) {
+                    index = -index;
+                } else {
+                    index = 2 * length - 2 - index;
+                }
+            }
+            return index;
+        }
+
         static void ForwardFft(Complex[] buffer) {
             int n = buffer.Length;
             for (int i = 1, j = 0; i < n; i++) {
@@ -113,6 +191,14 @@ namespace OpenUtau.Core.HifiNeural {
                 padded[left + samples.Length + i] = samples[source];
             }
             return padded;
+        }
+
+        static void FillConstant(float[,] values, float value) {
+            for (int m = 0; m < values.GetLength(0); m++) {
+                for (int t = 0; t < values.GetLength(1); t++) {
+                    values[m, t] = value;
+                }
+            }
         }
 
         static double HzToMel(double hz) {

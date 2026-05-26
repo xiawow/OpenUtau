@@ -105,6 +105,84 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
+        public void TrimInactiveTailRemovesRoughSilenceGap() {
+            var method = typeof(HifiRoughFeatureBuilder)
+                .GetMethod("TrimInactiveTailFrames", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.NotNull(method);
+
+            var mel = new float[2, 20];
+            for (int t = 0; t < 20; t++) {
+                float value = t < 10 ? -3f : -11f;
+                mel[0, t] = value;
+                mel[1, t] = value;
+            }
+
+            int frames = (int)method!.Invoke(null, new object[] { mel, 0, 20, 2, "a" })!;
+            Assert.Equal(16, frames);
+        }
+
+        [Fact]
+        public void SustainTemplateHandlesTwoFrameOutput() {
+            var method = typeof(HifiRoughFeatureBuilder)
+                .GetMethod("WriteSustainTemplateExtension", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.NotNull(method);
+
+            var source = new float[HifiMelExtractor.NMels, 3];
+            for (int m = 0; m < source.GetLength(0); m++) {
+                for (int t = 0; t < source.GetLength(1); t++) {
+                    source[m, t] = -5f + m * 0.001f + t * 0.02f;
+                }
+            }
+            var output = new float[HifiMelExtractor.NMels, 2];
+
+            bool applied = (bool)method!.Invoke(null, new object[] { source, 0, 3, output, 0, 2 })!;
+
+            Assert.True(applied);
+            foreach (float value in output) {
+                Assert.False(float.IsNaN(value));
+                Assert.False(float.IsInfinity(value));
+            }
+        }
+
+        [Fact]
+        public void VariablePositionMelExtractorReturnsRequestedFrames() {
+            var samples = new float[HifiMelExtractor.SampleRate / 8];
+            for (int i = 0; i < samples.Length; i++) {
+                samples[i] = (float)(0.15 * Math.Sin(2.0 * Math.PI * 220.0 * i / HifiMelExtractor.SampleRate));
+            }
+            double[] positions = {
+                0,
+                64.5,
+                512,
+                1536.25,
+                samples.Length - 1,
+                samples.Length + 400,
+            };
+
+            var mel = new HifiMelExtractor().ExtractAtPositions(samples, positions);
+
+            Assert.Equal(HifiMelExtractor.NMels, mel.GetLength(0));
+            Assert.Equal(positions.Length, mel.GetLength(1));
+            foreach (var value in mel) {
+                Assert.False(float.IsNaN(value));
+                Assert.False(float.IsInfinity(value));
+            }
+        }
+
+        [Fact]
+        public void LoudnessNormalizerBoostsQuietActiveAudioWithoutClipping() {
+            var samples = new float[HifiMelExtractor.SampleRate / 2];
+            for (int i = 0; i < samples.Length; i++) {
+                samples[i] = (float)(0.02 * Math.Sin(2.0 * Math.PI * 220.0 * i / HifiMelExtractor.SampleRate));
+            }
+
+            double gain = HifiLoudnessNormalizer.NormalizeInPlace(samples, HifiMelExtractor.SampleRate);
+
+            Assert.True(gain > 1.0);
+            Assert.True(samples.Max(Math.Abs) <= 0.9701f);
+        }
+
+        [Fact]
         public void CacheKeyReflectsMinimalConfig() {
             string oldMode = Environment.GetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE");
             string oldDebug = Environment.GetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT");
@@ -112,7 +190,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE", "none");
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT", "false");
                 string key = HifiRenderConfig.CacheKey();
-                Assert.Contains("v13-overlaponly-acousticstarts", key);
+                Assert.Contains("v17-variablepositionmel-loudness-acousticstarts", key);
                 Assert.Contains("enhnone", key);
                 Assert.Contains("dbgFalse", key);
             } finally {

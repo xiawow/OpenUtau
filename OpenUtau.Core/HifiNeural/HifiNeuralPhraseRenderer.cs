@@ -110,6 +110,7 @@ namespace OpenUtau.Core.HifiNeural {
             using var vocoder = new HifiOnnxVocoder(modelPath);
             float[] samples = vocoder.Infer(features);
             ApplyPhraseEdgeGuard(samples, HifiMelExtractor.SampleRate, fadeInMs: 14, fadeOutMs: 32);
+            HifiLoudnessNormalizer.NormalizeInPlace(samples, HifiMelExtractor.SampleRate);
             if (HifiRenderConfig.DebugExportEnabled) {
                 HifiClickDiagnostic.Export(debugKey, features, samples);
             }
