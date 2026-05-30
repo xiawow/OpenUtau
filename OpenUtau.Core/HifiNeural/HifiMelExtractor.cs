@@ -2,9 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Linq;
+using System.Threading.Tasks;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
 using OpenUtau.Core.Format;
+using OpenUtau.Core.Util;
 using Serilog;
 
 namespace OpenUtau.Core.HifiNeural {
@@ -76,6 +78,21 @@ namespace OpenUtau.Core.HifiNeural {
             return Extract(LoadMono(path));
         }
 
+        // Below this frame count the Parallel.For scheduling overhead outweighs the work, so we
+        // run the STFT loop serially.
+        const int ParallelFrameThreshold = 16;
+
+        sealed class FftScratch {
+            public readonly Complex[] Fft = new Complex[Nfft];
+            public readonly float[] Magnitude = new float[Nfft / 2 + 1];
+        }
+
+        static ParallelOptions MelParallelOptions() {
+            return new ParallelOptions {
+                MaxDegreeOfParallelism = Math.Max(1, Preferences.Default.NumRenderThreads),
+            };
+        }
+
         public float[,] Extract(float[] samples) {
             if (samples.Length == 0) {
                 return new float[NMels, 0];
@@ -84,22 +101,42 @@ namespace OpenUtau.Core.HifiNeural {
             var padded = ReflectPad(samples, (WinSize - OriginHopSize) / 2, (WinSize - OriginHopSize + 1) / 2);
             int frames = Math.Max(1, 1 + Math.Max(0, padded.Length - WinSize) / OriginHopSize);
             var mel = new float[NMels, frames];
-            var fft = new Complex[Nfft];
-            var magnitude = new float[Nfft / 2 + 1];
 
-            for (int frame = 0; frame < frames; frame++) {
-                int start = frame * OriginHopSize;
-                Array.Clear(fft, 0, fft.Length);
-                for (int n = 0; n < WinSize; n++) {
-                    fft[n] = new Complex(padded[start + n] * hann[n], 0);
+            // Each STFT frame is independent and writes its own column of `mel`, and the filterbank /
+            // hann / bin ranges are read-only after construction, so the frame loop parallelizes
+            // cleanly. Thread-local FFT scratch avoids per-frame allocation and write contention.
+            if (frames < ParallelFrameThreshold) {
+                var scratch = new FftScratch();
+                for (int frame = 0; frame < frames; frame++) {
+                    ExtractFrame(padded, frame, mel, scratch);
                 }
-                ForwardFft(fft);
-                ComputeMagnitudes(fft, magnitude);
-                ProjectMel(magnitude, mel, frame);
+            } else {
+                Parallel.For(
+                    0,
+                    frames,
+                    MelParallelOptions(),
+                    () => new FftScratch(),
+                    (frame, _, scratch) => {
+                        ExtractFrame(padded, frame, mel, scratch);
+                        return scratch;
+                    },
+                    _ => { });
             }
 
             LogStats(mel);
             return mel;
+        }
+
+        void ExtractFrame(float[] padded, int frame, float[,] mel, FftScratch scratch) {
+            int start = frame * OriginHopSize;
+            var fft = scratch.Fft;
+            Array.Clear(fft, 0, fft.Length);
+            for (int n = 0; n < WinSize; n++) {
+                fft[n] = new Complex(padded[start + n] * hann[n], 0);
+            }
+            ForwardFft(fft);
+            ComputeMagnitudes(fft, scratch.Magnitude);
+            ProjectMel(scratch.Magnitude, mel, frame);
         }
 
         public float[,] ExtractAtPositions(float[] samples, IReadOnlyList<double> centerSamplePositions) {
@@ -115,23 +152,22 @@ namespace OpenUtau.Core.HifiNeural {
                 return mel;
             }
 
-            var fft = new Complex[Nfft];
-            var magnitude = new float[Nfft / 2 + 1];
-            for (int frame = 0; frame < frames; frame++) {
-                double center = centerSamplePositions[frame];
-                if (double.IsNaN(center) || double.IsInfinity(center)) {
-                    center = 0;
+            if (frames < ParallelFrameThreshold) {
+                var scratch = new FftScratch();
+                for (int frame = 0; frame < frames; frame++) {
+                    ExtractFrameAtPosition(samples, centerSamplePositions[frame], frame, mel, scratch);
                 }
-                center = Math.Clamp(center, 0, samples.Length - 1);
-                double start = center - (WinSize - 1) * 0.5;
-
-                Array.Clear(fft, 0, fft.Length);
-                for (int n = 0; n < WinSize; n++) {
-                    fft[n] = new Complex(SampleReflectedLinear(samples, start + n) * hann[n], 0);
-                }
-                ForwardFft(fft);
-                ComputeMagnitudes(fft, magnitude);
-                ProjectMel(magnitude, mel, frame);
+            } else {
+                Parallel.For(
+                    0,
+                    frames,
+                    MelParallelOptions(),
+                    () => new FftScratch(),
+                    (frame, _, scratch) => {
+                        ExtractFrameAtPosition(samples, centerSamplePositions[frame], frame, mel, scratch);
+                        return scratch;
+                    },
+                    _ => { });
             }
 
             Log.Debug(
@@ -141,6 +177,22 @@ namespace OpenUtau.Core.HifiNeural {
                 samples.Length);
             LogStats(mel);
             return mel;
+        }
+
+        void ExtractFrameAtPosition(float[] samples, double center, int frame, float[,] mel, FftScratch scratch) {
+            if (double.IsNaN(center) || double.IsInfinity(center)) {
+                center = 0;
+            }
+            center = Math.Clamp(center, 0, samples.Length - 1);
+            double start = center - (WinSize - 1) * 0.5;
+            var fft = scratch.Fft;
+            Array.Clear(fft, 0, fft.Length);
+            for (int n = 0; n < WinSize; n++) {
+                fft[n] = new Complex(SampleReflectedLinear(samples, start + n) * hann[n], 0);
+            }
+            ForwardFft(fft);
+            ComputeMagnitudes(fft, scratch.Magnitude);
+            ProjectMel(scratch.Magnitude, mel, frame);
         }
 
         void ComputeMagnitudes(Complex[] fft, float[] magnitude) {
