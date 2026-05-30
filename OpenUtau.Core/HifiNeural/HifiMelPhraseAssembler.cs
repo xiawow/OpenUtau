@@ -30,18 +30,26 @@ namespace OpenUtau.Core.HifiNeural {
             public int StartFrame;
             public int FrameCount;
             public int OverlapFramesWithPrev;
+            public int ConsonantFrames;
             public string Strategy = string.Empty;
         }
 
         /// <summary>
         /// Build the full phrase mel [NMels, targetFrames] from per-phone source slices.
+        /// <paramref name="consonantFrameRanges"/> receives, per phone that has a fixed consonant
+        /// region, the absolute phrase frame span [start, end) of that consonant — used by the
+        /// caller to mask F0 to 0 there (the NSF vocoder then drives the consonant with noise
+        /// excitation instead of harmonic, which is correct for unvoiced consonants and avoids the
+        /// buzzy/stretched feel on Japanese-VCV consonants).
         /// </summary>
         public float[,] Build(
             RenderPhrase phrase,
             double phraseStartMs,
             int targetFrames,
             float[] targetF0,
-            Dictionary<string, float[]> sourceCache) {
+            Dictionary<string, float[]> sourceCache,
+            out List<(int Start, int End)> consonantFrameRanges) {
+            consonantFrameRanges = new List<(int Start, int End)>();
             var output = new float[HifiMelExtractor.NMels, Math.Max(0, targetFrames)];
             FillConstant(output, LogFloor);
             if (targetFrames <= 0 || phrase.phones.Length == 0) {
@@ -49,9 +57,12 @@ namespace OpenUtau.Core.HifiNeural {
             }
 
             var segments = new List<PhoneMelSegment>(phrase.phones.Length);
+            // Source mels are cached per oto slice (File + Offset + Cutoff) so a phone/oto that
+            // recurs within the phrase reuses its STFT instead of re-extracting it.
+            var sliceMelCache = new Dictionary<string, float[,]>(StringComparer.Ordinal);
             for (int i = 0; i < phrase.phones.Length; i++) {
                 var phone = phrase.phones[i];
-                var segment = BuildPhoneSegment(phrase, phone, i, phraseStartMs, targetFrames, targetF0, sourceCache);
+                var segment = BuildPhoneSegment(phrase, phone, i, phraseStartMs, targetFrames, targetF0, sourceCache, sliceMelCache);
                 if (segment != null) {
                     segments.Add(segment);
                 }
@@ -62,6 +73,15 @@ namespace OpenUtau.Core.HifiNeural {
             }
 
             AssembleWithOverlapCrossfade(output, segments, targetFrames);
+            foreach (var seg in segments) {
+                if (seg.ConsonantFrames > 0) {
+                    int start = Math.Clamp(seg.StartFrame, 0, targetFrames);
+                    int end = Math.Clamp(seg.StartFrame + seg.ConsonantFrames, start, targetFrames);
+                    if (end > start) {
+                        consonantFrameRanges.Add((start, end));
+                    }
+                }
+            }
             LogSummary(phrase, segments, targetFrames);
             return output;
         }
@@ -73,17 +93,13 @@ namespace OpenUtau.Core.HifiNeural {
             double phraseStartMs,
             int targetFrames,
             float[] targetF0,
-            Dictionary<string, float[]> sourceCache) {
+            Dictionary<string, float[]> sourceCache,
+            Dictionary<string, float[,]> sliceMelCache) {
             if (phone.oto == null || string.IsNullOrWhiteSpace(phone.oto.File)) {
                 return null;
             }
 
-            float[] sourceSamples = LoadSourceSlice(phone, sourceCache);
-            if (sourceSamples.Length == 0) {
-                return null;
-            }
-
-            float[,] sourceMel = melExtractor.Extract(sourceSamples);
+            float[,] sourceMel = LoadSliceMel(phone, sourceCache, sliceMelCache);
             int sourceFrames = sourceMel.GetLength(1);
             if (sourceFrames <= 0) {
                 return null;
@@ -141,6 +157,7 @@ namespace OpenUtau.Core.HifiNeural {
                 Mel = phoneMel,
                 StartFrame = startFrame,
                 FrameCount = frameCount,
+                ConsonantFrames = report.ConsonantTargetFrames,
                 Strategy = report.Strategy,
             };
         }
@@ -200,6 +217,36 @@ namespace OpenUtau.Core.HifiNeural {
             return (float)Math.Log(Math.Max(mixed, 1e-5));
         }
 
+        float[,] LoadSliceMel(
+            RenderPhone phone,
+            Dictionary<string, float[]> sourceCache,
+            Dictionary<string, float[,]> sliceMelCache) {
+            string key = SliceCacheKey(phone);
+            if (key.Length > 0 && sliceMelCache.TryGetValue(key, out var cachedMel)) {
+                return cachedMel;
+            }
+            float[] sourceSamples = LoadSourceSlice(phone, sourceCache);
+            float[,] mel = sourceSamples.Length == 0
+                ? new float[HifiMelExtractor.NMels, 0]
+                : melExtractor.Extract(sourceSamples);
+            if (key.Length > 0) {
+                sliceMelCache[key] = mel;
+            }
+            return mel;
+        }
+
+        static string SliceCacheKey(RenderPhone phone) {
+            if (phone.oto == null || string.IsNullOrWhiteSpace(phone.oto.File)) {
+                return string.Empty;
+            }
+            // Offset+Cutoff fully determine the sample slice taken from the file, so two phones
+            // sharing them (same oto entry) share the extracted mel.
+            return string.Concat(
+                phone.oto.File,
+                "|", phone.oto.Offset.ToString("R"),
+                "|", phone.oto.Cutoff.ToString("R"));
+        }
+
         static float[] LoadSourceSlice(RenderPhone phone, Dictionary<string, float[]> sourceCache) {
             string file = phone.oto.File;
             if (string.IsNullOrWhiteSpace(file) || !System.IO.File.Exists(file)) {
@@ -256,13 +303,13 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         static void LogSummary(RenderPhrase phrase, List<PhoneMelSegment> segments, int targetFrames) {
-            Log.Information(
+            Log.Debug(
                 "HifiMelPhraseAssembler mel_domain_concat phones={Phones} segments={Segments} target_frames={TargetFrames}",
                 phrase.phones.Length,
                 segments.Count,
                 targetFrames);
             foreach (var seg in segments) {
-                Log.Information(
+                Log.Debug(
                     "HifiMelPhraseAssembler segment phone_index={Index} phoneme={Phoneme} start_frame={Start} frame_count={Count} overlap_prev={Overlap} strategy={Strategy}",
                     seg.PhoneIndex,
                     seg.Phoneme,

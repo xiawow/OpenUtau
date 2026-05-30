@@ -19,12 +19,45 @@ namespace OpenUtau.Core.HifiNeural {
 
         readonly float[] hann;
         readonly float[,] melFilterbank;
+        // Sparse projection ranges: each mel triangular filter is non-zero only over a small,
+        // contiguous span of FFT bins. Precomputing [start, end] per mel turns the projection
+        // inner loop from O(NMels * Nfft/2) into O(sum of band widths) ~ a few thousand vs 130k.
+        readonly int[] melBinStart;
+        readonly int[] melBinEnd; // inclusive
 
         public HifiMelExtractor() {
             hann = Enumerable.Range(0, WinSize)
                 .Select(i => (float)(0.5 - 0.5 * Math.Cos(2.0 * Math.PI * i / WinSize)))
                 .ToArray();
             melFilterbank = BuildMelFilterbank();
+            (melBinStart, melBinEnd) = BuildMelBinRanges(melFilterbank);
+        }
+
+        static (int[] Start, int[] End) BuildMelBinRanges(float[,] filterbank) {
+            int bins = filterbank.GetLength(1);
+            var start = new int[NMels];
+            var end = new int[NMels];
+            for (int m = 0; m < NMels; m++) {
+                int first = -1;
+                int last = -1;
+                for (int k = 0; k < bins; k++) {
+                    if (filterbank[m, k] > 0f) {
+                        if (first < 0) {
+                            first = k;
+                        }
+                        last = k;
+                    }
+                }
+                if (first < 0) {
+                    // Degenerate empty band: keep an empty range (start > end) so the loop skips it.
+                    start[m] = 1;
+                    end[m] = 0;
+                } else {
+                    start[m] = first;
+                    end[m] = last;
+                }
+            }
+            return (start, end);
         }
 
         public float[] LoadMono(string path) {
@@ -52,6 +85,7 @@ namespace OpenUtau.Core.HifiNeural {
             int frames = Math.Max(1, 1 + Math.Max(0, padded.Length - WinSize) / OriginHopSize);
             var mel = new float[NMels, frames];
             var fft = new Complex[Nfft];
+            var magnitude = new float[Nfft / 2 + 1];
 
             for (int frame = 0; frame < frames; frame++) {
                 int start = frame * OriginHopSize;
@@ -60,14 +94,8 @@ namespace OpenUtau.Core.HifiNeural {
                     fft[n] = new Complex(padded[start + n] * hann[n], 0);
                 }
                 ForwardFft(fft);
-
-                for (int m = 0; m < NMels; m++) {
-                    double value = 0;
-                    for (int k = 0; k <= Nfft / 2; k++) {
-                        value += melFilterbank[m, k] * fft[k].Magnitude;
-                    }
-                    mel[m, frame] = (float)Math.Log(Math.Max(value, 1e-5));
-                }
+                ComputeMagnitudes(fft, magnitude);
+                ProjectMel(magnitude, mel, frame);
             }
 
             LogStats(mel);
@@ -88,6 +116,7 @@ namespace OpenUtau.Core.HifiNeural {
             }
 
             var fft = new Complex[Nfft];
+            var magnitude = new float[Nfft / 2 + 1];
             for (int frame = 0; frame < frames; frame++) {
                 double center = centerSamplePositions[frame];
                 if (double.IsNaN(center) || double.IsInfinity(center)) {
@@ -101,10 +130,11 @@ namespace OpenUtau.Core.HifiNeural {
                     fft[n] = new Complex(SampleReflectedLinear(samples, start + n) * hann[n], 0);
                 }
                 ForwardFft(fft);
-                WriteMelFrame(fft, mel, frame);
+                ComputeMagnitudes(fft, magnitude);
+                ProjectMel(magnitude, mel, frame);
             }
 
-            Log.Information(
+            Log.Debug(
                 "HifiMelExtractor variable_position_mel shape=[{MelBins},{Frames}] source_samples={SourceSamples}",
                 NMels,
                 frames,
@@ -113,11 +143,21 @@ namespace OpenUtau.Core.HifiNeural {
             return mel;
         }
 
-        void WriteMelFrame(Complex[] fft, float[,] mel, int frame) {
+        void ComputeMagnitudes(Complex[] fft, float[] magnitude) {
+            for (int k = 0; k < magnitude.Length; k++) {
+                double re = fft[k].Real;
+                double im = fft[k].Imaginary;
+                magnitude[k] = (float)Math.Sqrt(re * re + im * im);
+            }
+        }
+
+        void ProjectMel(float[] magnitude, float[,] mel, int frame) {
             for (int m = 0; m < NMels; m++) {
+                int kStart = melBinStart[m];
+                int kEnd = melBinEnd[m];
                 double value = 0;
-                for (int k = 0; k <= Nfft / 2; k++) {
-                    value += melFilterbank[m, k] * fft[k].Magnitude;
+                for (int k = kStart; k <= kEnd; k++) {
+                    value += melFilterbank[m, k] * magnitude[k];
                 }
                 mel[m, frame] = (float)Math.Log(Math.Max(value, 1e-5));
             }
@@ -256,7 +296,7 @@ namespace OpenUtau.Core.HifiNeural {
 
         static void LogStats(float[,] mel) {
             if (mel.Length == 0) {
-                Log.Information("HifiMelExtractor mel shape=[128,0]");
+                Log.Debug("HifiMelExtractor mel shape=[128,0]");
                 return;
             }
             float min = float.PositiveInfinity;
@@ -270,7 +310,7 @@ namespace OpenUtau.Core.HifiNeural {
                 max = Math.Max(max, v);
                 sum += v;
             }
-            Log.Information("HifiMelExtractor mel shape=[{MelBins},{Frames}] min={Min:F4} max={Max:F4} mean={Mean:F4}",
+            Log.Debug("HifiMelExtractor mel shape=[{MelBins},{Frames}] min={Min:F4} max={Max:F4} mean={Mean:F4}",
                 mel.GetLength(0), mel.GetLength(1), min, max, sum / mel.Length);
         }
     }

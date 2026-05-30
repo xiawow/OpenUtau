@@ -9,13 +9,21 @@ namespace OpenUtau.Core.HifiNeural {
         const int MinSourceFrames = 8;
         const int MinVowelSourceFrames = 4;
         const int MinVowelTargetFrames = 1;
+        // Absolute ceiling on how many leading frames get F0-masked (noise excitation). ~5 frames
+        // at ~11.6ms/frame ≈ 58ms covers a plosive/fricative burst without reaching the vowel.
+        const int ConsonantF0MaskMaxFrames = 5;
         const int PhraseEdgeMelFadeInFrames = 3;
         const int PhraseEdgeMelFadeOutFrames = 5;
         const double PhraseEdgeMelMinGain = 0.18;
         const int InactiveTailGuardFrames = 6;
         const double InactiveTailLogDrop = 2.8;
         const double TemplateEnergyClamp = 0.70;
-        const double TemplateTrajectoryMinBlend = 0.38;
+        // At larger stretch ratios the source is "scanned" more slowly; if the slow-scanned source
+        // trajectory keeps a high weight, every micro-motion inside the vowel (formant drift,
+        // vibrato) gets stretched proportionally and the note audibly slows down — most noticeable
+        // on long Japanese-VCV sustains. Driving the trajectory weight low for big stretches makes
+        // the steady-state template dominate, so the sustain holds rather than slow-scans.
+        const double TemplateTrajectoryMinBlend = 0.12;
         const double TemplateTrajectoryMaxBlend = 0.70;
         const double SourceFrameMs = 1000.0 * HifiMelExtractor.OriginHopSize / HifiMelExtractor.SampleRate;
         const double SourceSampleMs = 1000.0 / HifiMelExtractor.SampleRate;
@@ -61,7 +69,12 @@ namespace OpenUtau.Core.HifiNeural {
             // overlap cross-fades. Replaces the previous SharpWavtool rough + variable-position
             // mel sampling, which broke VCV/CVVC vowel boundaries under stretch.
             var sourceCache = new Dictionary<string, float[]>(StringComparer.OrdinalIgnoreCase);
-            float[,] alignedMel = melAssembler.Build(phrase, phraseStartMs, targetFrames, f0, sourceCache);
+            float[,] alignedMel = melAssembler.Build(phrase, phraseStartMs, targetFrames, f0, sourceCache, out _);
+
+            // NOTE: F0 is kept continuous across consonants on purpose. This NSF vocoder produces
+            // silence (not noise) when F0 == 0, so masking the consonant F0 made those frames go
+            // dead/mute. The consonant's unvoiced character comes from its mel spectrum; the F0
+            // there just needs to be a smooth continuation of the neighbouring vowels' pitch.
 
             double targetDurationMs = targetFrames * HifiF0Builder.FrameMs;
             Log.Information(
@@ -559,7 +572,7 @@ namespace OpenUtau.Core.HifiNeural {
             return output;
         }
 
-        internal readonly record struct PhoneMapReport(bool SplitApplied, string Strategy);
+        internal readonly record struct PhoneMapReport(bool SplitApplied, string Strategy, int ConsonantTargetFrames);
 
         internal static PhoneMapReport WritePhoneMappedSegment(
             float[,] sourceMel,
@@ -580,16 +593,16 @@ namespace OpenUtau.Core.HifiNeural {
             sourceConsonantFrames = NormalizeSourceConsonantFrames(sourceConsonantFrames, sourceFrames, phone.phoneme);
             if (outputFrames <= 2) {
                 WriteCompactPhoneRegion(sourceMel, sourceStart, sourceFrames, output, outputStart, outputFrames, sourceConsonantFrames);
-                return new PhoneMapReport(false, "compact_short_target");
+                return new PhoneMapReport(false, "compact_short_target", 0);
             }
             if (sourceFrames < MinSourceFrames) {
                 WriteMappedRegion(sourceMel, sourceStart, sourceFrames, output, outputStart, outputFrames);
-                return new PhoneMapReport(false, "simple_short_source");
+                return new PhoneMapReport(false, "simple_short_source", 0);
             }
             int vowelSourceFrames = sourceFrames - sourceConsonantFrames;
             if (vowelSourceFrames < MinVowelSourceFrames) {
                 WriteMappedRegion(sourceMel, sourceStart, sourceFrames, output, outputStart, outputFrames);
-                return new PhoneMapReport(false, "simple_no_vowel_room");
+                return new PhoneMapReport(false, "simple_no_vowel_room", 0);
             }
 
             int targetConsonantFrames = consonantMs.HasValue
@@ -620,7 +633,7 @@ namespace OpenUtau.Core.HifiNeural {
                 ? (targetConsonantFrames * HifiF0Builder.FrameMs) / Math.Max(SourceFrameMs, sourceConsonantFrames * SourceFrameMs)
                 : 0;
             double vowelRatio = (vowelTargetFrames * HifiF0Builder.FrameMs) / Math.Max(SourceFrameMs, vowelSourceFrames * SourceFrameMs);
-            Log.Information(
+            Log.Debug(
                 "HifiRoughFeatureBuilder phone_timewarp phoneme={Phoneme} source_frames={SourceFrames} target_frames={TargetFrames} source_consonant_frames={SourceConsonantFrames} target_consonant_frames={TargetConsonantFrames} source_vowel_frames={SourceVowelFrames} target_vowel_frames={TargetVowelFrames} consonant_ratio={ConsonantRatio:F4} vowel_ratio={VowelRatio:F4} strategy={Strategy}",
                 phone.phoneme,
                 sourceFrames,
@@ -632,7 +645,13 @@ namespace OpenUtau.Core.HifiNeural {
                 consonantRatio,
                 vowelRatio,
                 vowelMap.Strategy);
-            return new PhoneMapReport(true, vowelMap.Strategy);
+            // F0 mask is intentionally NARROWER than the fixed consonant region. The consonant
+            // region (targetConsonantFrames) also contains the onset of the target vowel, which is
+            // voiced — zeroing F0 over the whole region made that vowel onset lose its harmonic
+            // source and the note sounded muffled/"dead". So we only mask the leading pure-consonant
+            // portion, bounded by min(preutter, consonant) and kept strictly inside the region.
+            int f0MaskFrames = ResolveConsonantF0MaskFrames(phone, consonantMs, targetConsonantFrames);
+            return new PhoneMapReport(true, vowelMap.Strategy, f0MaskFrames);
         }
 
         static int[] BuildPhoneStarts(RenderPhrase phrase, double phraseStartMs, int totalFrames, double frameMs) {
@@ -1079,7 +1098,7 @@ namespace OpenUtau.Core.HifiNeural {
             }
             SmoothInternalSustain(output, outputStart, outputFrames, strength: 0.16f);
 
-            Log.Information(
+            Log.Debug(
                 "HifiRoughFeatureBuilder sustain_template_extension source_frames={SourceFrames} output_frames={OutputFrames} stable_frames={StableFrames} edge_frames={EdgeFrames} smooth_radius={SmoothRadius} trajectory_blend={TrajectoryBlend:F3}",
                 sourceFrames,
                 outputFrames,
@@ -1129,7 +1148,9 @@ namespace OpenUtau.Core.HifiNeural {
             if (!IsFinite(stretchRatio) || stretchRatio <= 1.0) {
                 return TemplateTrajectoryMaxBlend;
             }
-            double amount = Math.Clamp((stretchRatio - 1.0) / 3.0, 0, 1);
+            // Reach the (low) min blend by ~2x stretch so moderately-held notes already freeze the
+            // steady state instead of slow-scanning it.
+            double amount = Math.Clamp((stretchRatio - 1.0) / 1.0, 0, 1);
             return TemplateTrajectoryMaxBlend + (TemplateTrajectoryMinBlend - TemplateTrajectoryMaxBlend) * amount;
         }
 
@@ -1516,14 +1537,32 @@ namespace OpenUtau.Core.HifiNeural {
             return sourceConsonantFrames;
         }
 
+        // Frames at the START of a phone's fixed region that were previously F0-masked. Kept for
+        // reference / potential reuse, but no longer applied: this vocoder muted F0==0 frames, so
+        // F0 is now kept continuous across consonants (see Build).
+        static int ResolveConsonantF0MaskFrames(RenderPhone phone, double? consonantMs, int targetConsonantFrames) {
+            if (!consonantMs.HasValue || targetConsonantFrames <= 0) {
+                return 0;
+            }
+            double maskMs = consonantMs.Value;
+            if (phone.preutterMs > 0) {
+                maskMs = Math.Min(maskMs, phone.preutterMs);
+            }
+            int maskFrames = (int)Math.Round(maskMs / HifiF0Builder.FrameMs);
+            int upper = Math.Min(targetConsonantFrames - 1, ConsonantF0MaskMaxFrames);
+            return Math.Clamp(maskFrames, 0, Math.Max(0, upper));
+        }
+
         static double? EffectiveConsonantMs(RenderPhone phone) {
             if (phone.oto == null || phone.oto.Consonant <= 0) {
                 return null;
             }
+            // The oto Consonant marks the fixed (non-stretched) region: the leading vowel tail,
+            // the consonant, and the onset of the target vowel. It is almost always LONGER than
+            // preutter (which is only the timing-alignment lead), so we must NOT clamp it down to
+            // preutter — doing that pushed the consonant/transition into the vowel stretch region,
+            // which is exactly why long Japanese-VCV notes audibly stretched their consonants.
             double consonantMs = phone.oto.Consonant;
-            if (phone.preutterMs > 0 && consonantMs > phone.preutterMs) {
-                consonantMs = phone.preutterMs;
-            }
             double durationCapMs = Math.Max(HifiF0Builder.FrameMs * 3.0, phone.durationMs * 0.80);
             if (durationCapMs > 0 && consonantMs > durationCapMs) {
                 consonantMs = durationCapMs;
