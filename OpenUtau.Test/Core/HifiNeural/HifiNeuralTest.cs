@@ -190,12 +190,60 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE", "none");
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT", "false");
                 string key = HifiRenderConfig.CacheKey();
-                Assert.Contains("v17-variablepositionmel-loudness-acousticstarts", key);
+                Assert.Contains("v18-meldomainconcat-overlapcrossfade-loudness", key);
                 Assert.Contains("enhnone", key);
                 Assert.Contains("dbgFalse", key);
             } finally {
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE", oldMode);
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT", oldDebug);
+            }
+        }
+
+        static float CrossfadeLogMel(float logOld, float logNew, double u) {
+            var method = typeof(HifiMelPhraseAssembler)
+                .GetMethod("CrossfadeLogMel", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.NotNull(method);
+            return (float)method!.Invoke(null, new object[] { logOld, logNew, u })!;
+        }
+
+        [Fact]
+        public void OverlapCrossfadeEndpointsArePure() {
+            // u=0 -> fully old, u=1 -> fully new. Endpoints must not be contaminated by the blend.
+            float old = -2.0f;
+            float @new = -7.0f;
+            Assert.Equal(old, CrossfadeLogMel(old, @new, 0.0), 4);
+            Assert.Equal(@new, CrossfadeLogMel(old, @new, 1.0), 4);
+        }
+
+        [Fact]
+        public void OverlapCrossfadePreservesEnergyForEqualVowels() {
+            // The core of the VCV/CVVC fix: when two voiced segments of equal energy overlap, the
+            // equal-power cross-fade must keep energy flat across the whole overlap instead of
+            // dipping (which sounded like the boundary "breaking" under stretch).
+            float level = -1.5f;
+            double expectedPower = Math.Exp(level);
+            for (double u = 0.0; u <= 1.0001; u += 0.1) {
+                float mixed = CrossfadeLogMel(level, level, u);
+                double power = Math.Exp(mixed);
+                Assert.False(float.IsNaN(mixed));
+                Assert.False(float.IsInfinity(mixed));
+                // cos^2 + sin^2 = 1, so equal-level equal-power blend is exactly the input level.
+                Assert.Equal(expectedPower, power, 4);
+            }
+        }
+
+        [Fact]
+        public void OverlapCrossfadeIsMonotonicBetweenLevels() {
+            // Blending from a high level down to a low level should move monotonically with u and
+            // never overshoot below the lower endpoint or above the higher one (no jump artifacts).
+            float high = -1.0f;
+            float low = -6.0f;
+            float prev = CrossfadeLogMel(high, low, 0.0);
+            for (double u = 0.1; u <= 1.0001; u += 0.1) {
+                float cur = CrossfadeLogMel(high, low, u);
+                Assert.True(cur <= prev + 1e-4, $"non-monotonic at u={u}: {prev} -> {cur}");
+                Assert.True(cur >= low - 1e-3 && cur <= high + 1e-3, $"out of range at u={u}: {cur}");
+                prev = cur;
             }
         }
     }

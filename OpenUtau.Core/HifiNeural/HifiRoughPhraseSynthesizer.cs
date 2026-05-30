@@ -11,6 +11,14 @@ using OpenUtau.Core.Util;
 using Serilog;
 
 namespace OpenUtau.Core.HifiNeural {
+    /// <summary>
+    /// DEPRECATED / unused by the live render path. Previously this used SharpWavtool to
+    /// concatenate per-phone slices into one continuous rough wav, which was then re-analyzed by
+    /// variable-position mel sampling. As of the mel-domain refactor (CacheKey v18), each phone's
+    /// oto slice is turned into mel independently and the mels are concatenated with overlap
+    /// cross-fades (see <see cref="HifiMelPhraseAssembler"/>), so this class is no longer called.
+    /// Kept for reference / A-B comparison only.
+    /// </summary>
     public sealed class HifiRoughPhraseSynthesizer {
         const int SampleRate = 44100;
 

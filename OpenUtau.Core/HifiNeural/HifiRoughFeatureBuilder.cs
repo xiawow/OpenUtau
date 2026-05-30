@@ -26,6 +26,7 @@ namespace OpenUtau.Core.HifiNeural {
 
         readonly HifiMelExtractor melExtractor = new HifiMelExtractor();
         readonly HifiF0Builder f0Builder = new HifiF0Builder();
+        readonly HifiMelPhraseAssembler melAssembler = new HifiMelPhraseAssembler();
         readonly IHifiMelEnhancer melEnhancer;
 
         readonly record struct VowelMapReport(
@@ -50,35 +51,24 @@ namespace OpenUtau.Core.HifiNeural {
             this.melEnhancer = melEnhancer;
         }
 
-        public HifiPhraseFeatures Build(RenderPhrase phrase, RenderResult layout, float[] roughSamples) {
+        public HifiPhraseFeatures Build(RenderPhrase phrase, RenderResult layout) {
             double phraseStartMs = layout.positionMs - layout.leadingMs;
             int targetFrames = Math.Max(1, (int)Math.Ceiling(layout.estimatedLengthMs / HifiF0Builder.FrameMs));
             float[] f0 = f0Builder.Build(phrase, targetFrames, phraseStartMs);
-            double[] sourcePositions = BuildVariableSourcePositions(phrase, phraseStartMs, roughSamples, targetFrames);
-            float[,] alignedMel = melExtractor.ExtractAtPositions(roughSamples, sourcePositions);
 
-            double roughDurationMs = roughSamples.Length * 1000.0 / HifiMelExtractor.SampleRate;
+            // Mel-domain assembly: extract each phone's oto slice into its own mel, stretch it per
+            // phone with the existing warp logic, then concatenate onto the phrase grid with
+            // overlap cross-fades. Replaces the previous SharpWavtool rough + variable-position
+            // mel sampling, which broke VCV/CVVC vowel boundaries under stretch.
+            var sourceCache = new Dictionary<string, float[]>(StringComparer.OrdinalIgnoreCase);
+            float[,] alignedMel = melAssembler.Build(phrase, phraseStartMs, targetFrames, f0, sourceCache);
+
             double targetDurationMs = targetFrames * HifiF0Builder.FrameMs;
-            double stretchRatio = roughDurationMs > 1e-6 ? targetDurationMs / roughDurationMs : 1.0;
-            int nominalSourceFrames = roughSamples.Length <= 0
-                ? 0
-                : Math.Max(1, (int)Math.Ceiling(roughSamples.Length / (double)HifiF0Builder.HopSize));
             Log.Information(
-                "HifiRoughFeatureBuilder variable_position_mel mode=overlap_neural rough_duration_ms={RoughDurationMs:F3} target_duration_ms={TargetDurationMs:F3} stretch_ratio={StretchRatio:F4} nominal_source_frames={Before} mel_frames_after={After} source_pos_min={SourcePosMin:F1} source_pos_max={SourcePosMax:F1}",
-                roughDurationMs,
+                "HifiRoughFeatureBuilder mel_domain_concat mode=overlap_neural target_duration_ms={TargetDurationMs:F3} target_frames={TargetFrames} phones={Phones}",
                 targetDurationMs,
-                stretchRatio,
-                nominalSourceFrames,
                 targetFrames,
-                sourcePositions.Length == 0 ? 0 : sourcePositions.Min(),
-                sourcePositions.Length == 0 ? 0 : sourcePositions.Max());
-            if (stretchRatio > 1.5 || stretchRatio < 0.67) {
-                Log.Warning(
-                    "HifiRoughFeatureBuilder variable_position_mel ratio_out_of_range mode=overlap_neural stretch_ratio={StretchRatio:F4} rough_duration_ms={RoughDurationMs:F3} target_duration_ms={TargetDurationMs:F3}",
-                    stretchRatio,
-                    roughDurationMs,
-                    targetDurationMs);
-            }
+                phrase.phones.Length);
 
             float[,] enhancedMel = melEnhancer.Enhance(alignedMel, f0);
             ApplyPhraseEdgeMelGuard(enhancedMel);
@@ -569,9 +559,9 @@ namespace OpenUtau.Core.HifiNeural {
             return output;
         }
 
-        readonly record struct PhoneMapReport(bool SplitApplied, string Strategy);
+        internal readonly record struct PhoneMapReport(bool SplitApplied, string Strategy);
 
-        static PhoneMapReport WritePhoneMappedSegment(
+        internal static PhoneMapReport WritePhoneMappedSegment(
             float[,] sourceMel,
             int sourceStart,
             int sourceFrames,

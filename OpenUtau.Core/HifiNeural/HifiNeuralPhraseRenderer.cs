@@ -19,7 +19,6 @@ namespace OpenUtau.Core.HifiNeural {
         public const string RendererId = "HIFI-NEURA";
 
         static readonly object lockObj = new object();
-        readonly HifiRoughPhraseSynthesizer roughSynthesizer = new HifiRoughPhraseSynthesizer();
 
         public USingerType SingerType => USingerType.Classic;
         public bool SupportsRenderPitch => false;
@@ -80,15 +79,12 @@ namespace OpenUtau.Core.HifiNeural {
         float[] RenderInternal(RenderPhrase phrase, RenderResult layout, CancellationTokenSource cancellation, string? wavPath, string modelPath, string modelDiagnostic) {
             Log.Information("HifiNeuralPhraseRenderer phrase notes={Notes} phones={Phones} durationMs={Duration:F1} sampleRate={SampleRate}",
                 phrase.notes.Length, phrase.phones.Length, layout.estimatedLengthMs, HifiMelExtractor.SampleRate);
-            float[] rough = roughSynthesizer.Synthesize(phrase, cancellation);
-            if (rough.Length == 0) {
+            if (phrase.phones.Length == 0) {
                 return Array.Empty<float>();
             }
-            Log.Information(
-                "HifiNeuralPhraseRenderer rough ready mode=overlap_only rough_samples={RoughSamples}",
-                rough.Length);
+            Log.Information("HifiNeuralPhraseRenderer mel_domain_concat mode=overlap_only phones={Phones}", phrase.phones.Length);
             var featureBuilder = new HifiRoughFeatureBuilder(HifiRenderConfig.CreateMelEnhancer());
-            var features = featureBuilder.Build(phrase, layout, rough);
+            var features = featureBuilder.Build(phrase, layout);
             string debugKey = $"{phrase.hash:x16}";
             if (HifiRenderConfig.DebugExportEnabled) {
                 HifiDebugExporter.Export(debugKey, features);
