@@ -26,6 +26,7 @@ namespace OpenUtau.Core.HifiNeural {
         sealed class PhoneMelSegment {
             public int PhoneIndex;
             public string Phoneme = string.Empty;
+            public RenderPhone Phone = null!;
             public float[,] Mel = new float[HifiMelExtractor.NMels, 0];
             public int StartFrame;
             public int FrameCount;
@@ -48,8 +49,8 @@ namespace OpenUtau.Core.HifiNeural {
             int targetFrames,
             float[] targetF0,
             Dictionary<string, float[]> sourceCache,
-            out List<(int Start, int End)> consonantFrameRanges) {
-            consonantFrameRanges = new List<(int Start, int End)>();
+            out HifiMelAssemblyReport report) {
+            report = new HifiMelAssemblyReport();
             var output = new float[HifiMelExtractor.NMels, Math.Max(0, targetFrames)];
             FillConstant(output, LogFloor);
             if (targetFrames <= 0 || phrase.phones.Length == 0) {
@@ -73,12 +74,13 @@ namespace OpenUtau.Core.HifiNeural {
             }
 
             AssembleWithOverlapCrossfade(output, segments, targetFrames);
+            BuildAssemblyReport(segments, targetFrames, phraseStartMs, report);
             foreach (var seg in segments) {
                 if (seg.ConsonantFrames > 0) {
                     int start = Math.Clamp(seg.StartFrame, 0, targetFrames);
                     int end = Math.Clamp(seg.StartFrame + seg.ConsonantFrames, start, targetFrames);
                     if (end > start) {
-                        consonantFrameRanges.Add((start, end));
+                        report.ConsonantFrameRanges.Add((start, end));
                     }
                 }
             }
@@ -154,6 +156,7 @@ namespace OpenUtau.Core.HifiNeural {
             return new PhoneMelSegment {
                 PhoneIndex = phoneIndex,
                 Phoneme = phone.phoneme,
+                Phone = phone,
                 Mel = phoneMel,
                 StartFrame = startFrame,
                 FrameCount = frameCount,
@@ -197,6 +200,45 @@ namespace OpenUtau.Core.HifiNeural {
                     }
                 }
                 occupiedUntil[0] = Math.Max(prevEnd, segEnd);
+            }
+        }
+
+        static void BuildAssemblyReport(
+            List<PhoneMelSegment> segments,
+            int targetFrames,
+            double phraseStartMs,
+            HifiMelAssemblyReport report) {
+            for (int i = 0; i < segments.Count; i++) {
+                var seg = segments[i];
+                var phone = seg.Phone;
+                int start = Math.Clamp(seg.StartFrame, 0, targetFrames);
+                int end = Math.Clamp(seg.StartFrame + seg.FrameCount, start + 1, Math.Max(start + 1, targetFrames));
+                report.Phones.Add(new HifiPhoneMetadata {
+                    Index = seg.PhoneIndex,
+                    Phoneme = phone.phoneme,
+                    Tone = phone.tone,
+                    SourceFile = phone.oto?.File ?? string.Empty,
+                    PositionMs = phone.positionMs,
+                    DurationMs = phone.durationMs,
+                    LeadingMs = phone.leadingMs,
+                    StartFrame = start,
+                    FrameCount = Math.Max(1, end - start),
+                    SourceSkipOverMs = 0,
+                    SourceStartOffsetFrames = 0,
+                });
+                if (i > 0) {
+                    var left = segments[i - 1];
+                    report.Boundaries.Add(new HifiBoundaryMetadata {
+                        Index = i - 1,
+                        LeftPhoneIndex = left.PhoneIndex,
+                        RightPhoneIndex = seg.PhoneIndex,
+                        LeftPhone = left.Phoneme,
+                        RightPhone = seg.Phoneme,
+                        Frame = start,
+                        PositionMs = phraseStartMs + start * HifiF0Builder.FrameMs,
+                        TransitionType = seg.OverlapFramesWithPrev > 0 ? "oto-overlap" : "phone",
+                    });
+                }
             }
         }
 

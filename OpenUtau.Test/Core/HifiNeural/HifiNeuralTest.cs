@@ -280,7 +280,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE", "none");
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT", "false");
                 string key = HifiRenderConfig.CacheKey();
-                Assert.Contains("v29-meldomainconcat-overlapcrossfade-stablepool-dualboundary-f0continuous-postleveler-loud17-vowelalign-cbound", key);
+                Assert.Contains("v30-meldomainconcat-realmeta-f0melcomp-sustainenergy-postleveler-loud17", key);
                 Assert.Contains("enhnone", key);
                 Assert.Contains("dbgFalse", key);
             } finally {

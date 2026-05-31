@@ -39,6 +39,11 @@ namespace OpenUtau.Core.HifiNeural {
         // spectral motion to avoid the loop without bringing back the slow-down.
         const double TemplateTrajectoryMinBlend = 0.28;
         const double TemplateTrajectoryMaxBlend = 0.70;
+        const double F0MelCompDbPerOctave = 0.95;
+        const double F0MelCompHighBandExtra = 0.30;
+        const double F0MelCompMaxCutDb = 2.4;
+        const double F0MelCompReferenceCapHz = 330.0;
+        const int F0MelCompSmoothHalfFrames = 4;
         const double SourceFrameMs = 1000.0 * HifiMelExtractor.OriginHopSize / HifiMelExtractor.SampleRate;
         const double SourceSampleMs = 1000.0 / HifiMelExtractor.SampleRate;
         const int MinSourceSamples = MinSourceFrames * HifiMelExtractor.OriginHopSize;
@@ -88,12 +93,13 @@ namespace OpenUtau.Core.HifiNeural {
             // overlap cross-fades. Replaces the previous SharpWavtool rough + variable-position
             // mel sampling, which broke VCV/CVVC vowel boundaries under stretch.
             var sourceCache = new Dictionary<string, float[]>(StringComparer.OrdinalIgnoreCase);
-            float[,] alignedMel = melAssembler.Build(phrase, phraseStartMs, targetFrames, f0, sourceCache, out _);
+            float[,] alignedMel = melAssembler.Build(phrase, phraseStartMs, targetFrames, f0, sourceCache, out var assemblyReport);
 
             // NOTE: F0 is kept continuous across consonants on purpose. This NSF vocoder produces
             // silence (not noise) when F0 == 0, so masking the consonant F0 made those frames go
             // dead/mute. The consonant's unvoiced character comes from its mel spectrum; the F0
             // there just needs to be a smooth continuation of the neighbouring vowels' pitch.
+            ApplyF0MelCompensation(alignedMel, f0);
 
             double targetDurationMs = targetFrames * HifiF0Builder.FrameMs;
             Log.Information(
@@ -109,7 +115,7 @@ namespace OpenUtau.Core.HifiNeural {
             return new HifiPhraseFeatures {
                 Mel = enhancedMel,
                 F0 = f0,
-                Metadata = BuildMetadata(phrase, layout, targetFrames, phraseStartMs),
+                Metadata = BuildMetadata(phrase, layout, targetFrames, phraseStartMs, assemblyReport),
             };
         }
 
@@ -925,6 +931,97 @@ namespace OpenUtau.Core.HifiNeural {
             ResolveVowelSections(vowelSourceFrames, preferredOnsetFrames: -1, out onsetFrames, out releaseFrames, out sustainFrames);
         }
 
+        static void ApplyF0MelCompensation(float[,] mel, float[] f0) {
+            int frames = Math.Min(mel.GetLength(1), f0.Length);
+            if (frames <= 0) {
+                return;
+            }
+
+            var voiced = new List<double>(frames);
+            for (int i = 0; i < frames; i++) {
+                float hz = f0[i];
+                if (hz >= 55 && hz <= 1400 && !float.IsNaN(hz) && !float.IsInfinity(hz)) {
+                    voiced.Add(hz);
+                }
+            }
+            if (voiced.Count < 4) {
+                return;
+            }
+
+            double referenceF0 = Math.Min(Percentile(voiced, 0.45), F0MelCompReferenceCapHz);
+            if (referenceF0 <= 0 || !IsFinite(referenceF0)) {
+                return;
+            }
+
+            var desiredCutDb = new double[frames];
+            for (int t = 0; t < frames; t++) {
+                float hz = f0[t];
+                if (hz <= referenceF0 * 1.04 || hz < 55 || hz > 1400 || float.IsNaN(hz) || float.IsInfinity(hz)) {
+                    continue;
+                }
+                double octaves = Math.Log(hz / referenceF0, 2.0);
+                desiredCutDb[t] = Math.Clamp(octaves * F0MelCompDbPerOctave, 0, F0MelCompMaxCutDb);
+            }
+
+            double[] cutDb = SmoothPositiveEnvelope(desiredCutDb, F0MelCompSmoothHalfFrames);
+            int bins = mel.GetLength(0);
+            int cutFrames = 0;
+            double maxCut = 0;
+            for (int t = 0; t < frames; t++) {
+                double baseCut = cutDb[t];
+                if (baseCut <= 1e-4) {
+                    continue;
+                }
+                cutFrames++;
+                maxCut = Math.Max(maxCut, baseCut);
+                for (int m = 0; m < bins; m++) {
+                    double highWeight = SmoothStep((m - 42) / (double)Math.Max(1, bins - 42));
+                    double totalCutDb = Math.Min(F0MelCompMaxCutDb + 0.6, baseCut * (1.0 + F0MelCompHighBandExtra * highWeight));
+                    mel[m, t] -= (float)(totalCutDb * Math.Log(10.0) / 20.0);
+                }
+            }
+            if (cutFrames > 0) {
+                Log.Information(
+                    "HifiRoughFeatureBuilder f0_mel_compensation reference_f0={ReferenceF0:F2} cut_frames={CutFrames} max_cut_db={MaxCutDb:F2}",
+                    referenceF0,
+                    cutFrames,
+                    maxCut);
+            }
+        }
+
+        static double[] SmoothPositiveEnvelope(double[] values, int halfWindow) {
+            var output = new double[values.Length];
+            if (values.Length == 0) {
+                return output;
+            }
+            for (int i = 0; i < values.Length; i++) {
+                double sum = 0;
+                double weightSum = 0;
+                int start = Math.Max(0, i - halfWindow);
+                int end = Math.Min(values.Length - 1, i + halfWindow);
+                for (int j = start; j <= end; j++) {
+                    double distance = Math.Abs(i - j) / Math.Max(1.0, halfWindow + 1.0);
+                    double weight = 0.5 + 0.5 * Math.Cos(Math.PI * Math.Clamp(distance, 0, 1));
+                    sum += Math.Max(0, values[j]) * weight;
+                    weightSum += weight;
+                }
+                output[i] = weightSum > 0 ? sum / weightSum : Math.Max(0, values[i]);
+            }
+            return output;
+        }
+
+        static double Percentile(List<double> values, double percentile) {
+            if (values.Count == 0) {
+                return 0;
+            }
+            values.Sort();
+            double index = Math.Clamp(percentile, 0, 1) * (values.Count - 1);
+            int left = (int)Math.Floor(index);
+            int right = Math.Min(values.Count - 1, left + 1);
+            double alpha = index - left;
+            return values[left] + (values[right] - values[left]) * alpha;
+        }
+
         static void ResolveVowelSections(int vowelSourceFrames, int preferredOnsetFrames, out int onsetFrames, out int releaseFrames, out int sustainFrames) {
             if (vowelSourceFrames <= 3) {
                 onsetFrames = Math.Max(1, vowelSourceFrames - 1);
@@ -1150,9 +1247,10 @@ namespace OpenUtau.Core.HifiNeural {
                     : u * (sourceFrames - 1);
                 SampleInterpolatedFrame(sourceMel, sourceStart, sourceFrames, sourceIndex, directFrame);
                 SampleSmoothedFrame(sourceMel, sourceStart, sourceFrames, sourceIndex, smoothRadius, trajectoryFrame);
+                double sourceEnergy = FrameMean(trajectoryFrame) * (1.0 - anchorWeight) + FrameMean(directFrame) * anchorWeight;
                 double poolIndex = StablePoolIndex(u, t, stablePool.Frames.Length, seed);
                 SampleStablePoolFrame(sourceMel, stablePool.Frames, poolIndex, poolFrame);
-                double targetEnergy = stablePool.MeanEnergy;
+                double targetEnergy = ResolveSustainTargetEnergy(stablePool.MeanEnergy, sourceEnergy);
                 double currentEnergy = 0;
                 for (int m = 0; m < bins; m++) {
                     float value = (float)(poolFrame[m] * (1.0 - trajectoryBlend) + trajectoryFrame[m] * trajectoryBlend);
@@ -1289,6 +1387,30 @@ namespace OpenUtau.Core.HifiNeural {
             for (int m = 0; m < bins; m++) {
                 output[m] *= scale;
             }
+        }
+
+        static double ResolveSustainTargetEnergy(double stableMeanEnergy, double sourceEnergy) {
+            if (!IsFinite(stableMeanEnergy)) {
+                return sourceEnergy;
+            }
+            if (!IsFinite(sourceEnergy)) {
+                return stableMeanEnergy;
+            }
+            double delta = sourceEnergy - stableMeanEnergy;
+            // Stable pool supplies the spectral shape; slow source energy supplies the loudness
+            // contour. Limit boosts more than drops so long sustains do not inflate in volume.
+            return stableMeanEnergy + Math.Clamp(delta, -0.55, 0.16);
+        }
+
+        static double FrameMean(float[] frame) {
+            if (frame.Length == 0) {
+                return 0;
+            }
+            double sum = 0;
+            for (int i = 0; i < frame.Length; i++) {
+                sum += frame[i];
+            }
+            return sum / frame.Length;
         }
 
         static StableSustainPool BuildStableSustainPool(float[,] sourceMel, int start, int frames) {
@@ -1828,7 +1950,7 @@ namespace OpenUtau.Core.HifiNeural {
             }
         }
 
-        static HifiPhraseMetadata BuildMetadata(RenderPhrase phrase, RenderResult layout, int frames, double phraseStartMs) {
+        static HifiPhraseMetadata BuildMetadata(RenderPhrase phrase, RenderResult layout, int frames, double phraseStartMs, HifiMelAssemblyReport assemblyReport) {
             var metadata = new HifiPhraseMetadata {
                 SampleRate = HifiMelExtractor.SampleRate,
                 HopSize = HifiF0Builder.HopSize,
@@ -1846,39 +1968,8 @@ namespace OpenUtau.Core.HifiNeural {
                 DurationMs = n.durationMs,
             }));
 
-            int[] phoneStarts = BuildPhoneStarts(phrase, phraseStartMs, frames, HifiF0Builder.FrameMs);
-
-            for (int i = 0; i < phrase.phones.Length; i++) {
-                var p = phrase.phones[i];
-                int start = phoneStarts[i];
-                int end = i + 1 < phoneStarts.Length ? phoneStarts[i + 1] : frames;
-                end = Math.Clamp(end, start + 1, Math.Max(start + 1, frames));
-                metadata.Phones.Add(new HifiPhoneMetadata {
-                    Index = i,
-                    Phoneme = p.phoneme,
-                    Tone = p.tone,
-                    SourceFile = p.oto?.File ?? string.Empty,
-                    PositionMs = p.positionMs,
-                    DurationMs = p.durationMs,
-                    LeadingMs = p.leadingMs,
-                    StartFrame = start,
-                    FrameCount = Math.Max(1, end - start),
-                    SourceSkipOverMs = 0,
-                    SourceStartOffsetFrames = 0,
-                });
-                if (i > 0) {
-                    metadata.Boundaries.Add(new HifiBoundaryMetadata {
-                        Index = i - 1,
-                        LeftPhoneIndex = i - 1,
-                        RightPhoneIndex = i,
-                        LeftPhone = phrase.phones[i - 1].phoneme,
-                        RightPhone = p.phoneme,
-                        Frame = start,
-                        PositionMs = phraseStartMs + start * HifiF0Builder.FrameMs,
-                        TransitionType = "phone",
-                    });
-                }
-            }
+            metadata.Phones.AddRange(assemblyReport.Phones);
+            metadata.Boundaries.AddRange(assemblyReport.Boundaries);
             return metadata;
         }
 

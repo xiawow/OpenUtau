@@ -77,4 +77,10 @@ namespace OpenUtau.Core.HifiNeural {
         public double TargetF0OnsetJumpCents { get; init; }
         public string LeadingSanitizerReason { get; init; } = string.Empty;
     }
+
+    public sealed class HifiMelAssemblyReport {
+        public List<HifiPhoneMetadata> Phones { get; } = new List<HifiPhoneMetadata>();
+        public List<HifiBoundaryMetadata> Boundaries { get; } = new List<HifiBoundaryMetadata>();
+        public List<(int Start, int End)> ConsonantFrameRanges { get; } = new List<(int Start, int End)>();
+    }
 }
