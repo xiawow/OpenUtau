@@ -150,6 +150,50 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
+        public void VcvPreferredOnsetUsesConsonantBoundary() {
+            var method = typeof(HifiRoughFeatureBuilder)
+                .GetMethod(
+                    "ResolveVowelSections",
+                    BindingFlags.NonPublic | BindingFlags.Static,
+                    binder: null,
+                    types: new[] {
+                        typeof(int),
+                        typeof(int),
+                        typeof(int).MakeByRefType(),
+                        typeof(int).MakeByRefType(),
+                        typeof(int).MakeByRefType(),
+                    },
+                    modifiers: null);
+            Assert.NotNull(method);
+
+            object[] args = { 24, 10, 0, 0, 0 };
+            method!.Invoke(null, args);
+
+            Assert.Equal(10, (int)args[2]);
+            Assert.True((int)args[4] > 0);
+            Assert.Equal(24, (int)args[2] + (int)args[3] + (int)args[4]);
+        }
+
+        [Fact]
+        public void VcvShortTargetPreservesOnsetBeforeCompressingSustain() {
+            var method = typeof(HifiRoughFeatureBuilder)
+                .GetMethod(
+                    "AllocateVowelTargetSections",
+                    BindingFlags.NonPublic | BindingFlags.Static,
+                    binder: null,
+                    types: new[] { typeof(int), typeof(int), typeof(int), typeof(int) },
+                    modifiers: null);
+            Assert.NotNull(method);
+
+            var result = (ValueTuple<int, int, int>)method!.Invoke(null, new object[] { 24, 24, 4, 10 })!;
+
+            Assert.Equal(6, result.Item1);
+            Assert.Equal(3, result.Item2);
+            Assert.Equal(1, result.Item3);
+            Assert.Equal(10, result.Item1 + result.Item2 + result.Item3);
+        }
+
+        [Fact]
         public void VariablePositionMelExtractorReturnsRequestedFrames() {
             var samples = new float[HifiMelExtractor.SampleRate / 8];
             for (int i = 0; i < samples.Length; i++) {
@@ -236,7 +280,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE", "none");
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT", "false");
                 string key = HifiRenderConfig.CacheKey();
-                Assert.Contains("v28-meldomainconcat-overlapcrossfade-stablepool-consonantfix-f0continuous-postleveler-loud17-vowelalign-cbound", key);
+                Assert.Contains("v29-meldomainconcat-overlapcrossfade-stablepool-dualboundary-f0continuous-postleveler-loud17-vowelalign-cbound", key);
                 Assert.Contains("enhnone", key);
                 Assert.Contains("dbgFalse", key);
             } finally {

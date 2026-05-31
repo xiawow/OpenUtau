@@ -620,21 +620,25 @@ namespace OpenUtau.Core.HifiNeural {
             RenderPhone phone,
             float[] targetF0) {
             double? consonantMs = EffectiveConsonantMs(phone);
-            // Consonant/vowel boundary = PREUTTER, on BOTH source and target axes. preutter is the
-            // point where the vowel is meant to align to the note position, so splitting there (and
-            // keeping the same split on both axes) makes the consonant region map preutter->preutter
-            // 1:1 (no compression) and the vowel start correctly. Using `consonant` for the source
-            // split while the target used `preutter` compressed the consonant (metallic) and
-            // stretched the vowel for free. `consonant` is still used below only to gate whether a
-            // fixed region exists at all.
-            double boundaryMs = consonantMs.HasValue ? Math.Max(0, phone.preutterMs) : 0;
-            int sourceConsonantFrames = boundaryMs > 0
-                ? (int)Math.Round(boundaryMs / SourceFrameMs)
+            // VCV/CVVC timing has two important boundaries:
+            // - preutter: the alignment point where the target vowel begins on the note grid.
+            // - consonant: the end of the fixed transition/onset region in the source oto.
+            // Keep preutter-leading material fixed, keep preutter->consonant as vowel onset, and
+            // let only the stable vowel after consonant carry most stretch/compression.
+            double preutterMs = consonantMs.HasValue ? Math.Max(0, phone.preutterMs) : 0;
+            double stableStartMs = consonantMs.HasValue ? Math.Max(preutterMs, consonantMs.Value) : preutterMs;
+            int sourceConsonantFrames = preutterMs > 0
+                ? (int)Math.Round(preutterMs / SourceFrameMs)
                 : 0;
+            int sourceStableStartFrames = stableStartMs > 0
+                ? (int)Math.Round(stableStartMs / SourceFrameMs)
+                : sourceConsonantFrames;
             sourceFrames = Math.Max(1, Math.Min(sourceFrames, sourceMel.GetLength(1) - sourceStart));
             outputFrames = Math.Max(1, Math.Min(outputFrames, output.GetLength(1) - outputStart));
             sourceFrames = TrimInactiveTailFrames(sourceMel, sourceStart, sourceFrames, sourceConsonantFrames, phone.phoneme);
             sourceConsonantFrames = NormalizeSourceConsonantFrames(sourceConsonantFrames, sourceFrames, phone.phoneme);
+            sourceStableStartFrames = NormalizeSourceStableStartFrames(sourceStableStartFrames, sourceConsonantFrames, sourceFrames);
+            int sourceVowelOnsetFrames = Math.Max(0, sourceStableStartFrames - sourceConsonantFrames);
             if (outputFrames <= 2) {
                 WriteCompactPhoneRegion(sourceMel, sourceStart, sourceFrames, output, outputStart, outputFrames, sourceConsonantFrames);
                 return new PhoneMapReport(false, "compact_short_target", 0);
@@ -649,11 +653,10 @@ namespace OpenUtau.Core.HifiNeural {
                 return new PhoneMapReport(false, "simple_no_vowel_room", 0);
             }
 
-            // Target-axis consonant length uses the SAME preutter boundary as the source split, so
-            // the consonant region maps preutter(source) -> preutter(target) at ~1:1. The segment
-            // starts at (positionMs - preutter), so this lands the vowel exactly on positionMs.
-            int targetConsonantFrames = boundaryMs > 0
-                ? (int)Math.Round(boundaryMs / HifiF0Builder.FrameMs)
+            // Target-axis fixed length uses the SAME preutter boundary as the source fixed split.
+            // The segment starts at (positionMs - preutter), so this lands the vowel on positionMs.
+            int targetConsonantFrames = preutterMs > 0
+                ? (int)Math.Round(preutterMs / HifiF0Builder.FrameMs)
                 : 0;
             targetConsonantFrames = Math.Clamp(targetConsonantFrames, 0, Math.Max(0, outputFrames - MinVowelTargetFrames));
             int vowelTargetFrames = outputFrames - targetConsonantFrames;
@@ -674,19 +677,22 @@ namespace OpenUtau.Core.HifiNeural {
                 outputStart + targetConsonantFrames,
                 vowelTargetFrames,
                 targetF0,
-                phone.phoneme);
+                phone.phoneme,
+                sourceVowelOnsetFrames);
 
             double consonantRatio = sourceConsonantFrames > 0
                 ? (targetConsonantFrames * HifiF0Builder.FrameMs) / Math.Max(SourceFrameMs, sourceConsonantFrames * SourceFrameMs)
                 : 0;
             double vowelRatio = (vowelTargetFrames * HifiF0Builder.FrameMs) / Math.Max(SourceFrameMs, vowelSourceFrames * SourceFrameMs);
             Log.Debug(
-                "HifiRoughFeatureBuilder phone_timewarp phoneme={Phoneme} source_frames={SourceFrames} target_frames={TargetFrames} source_consonant_frames={SourceConsonantFrames} target_consonant_frames={TargetConsonantFrames} source_vowel_frames={SourceVowelFrames} target_vowel_frames={TargetVowelFrames} consonant_ratio={ConsonantRatio:F4} vowel_ratio={VowelRatio:F4} strategy={Strategy}",
+                "HifiRoughFeatureBuilder phone_timewarp phoneme={Phoneme} source_frames={SourceFrames} target_frames={TargetFrames} source_fixed_frames={SourceFixedFrames} target_fixed_frames={TargetFixedFrames} source_vowel_onset_frames={SourceVowelOnsetFrames} target_vowel_onset_frames={TargetVowelOnsetFrames} source_vowel_frames={SourceVowelFrames} target_vowel_frames={TargetVowelFrames} fixed_ratio={FixedRatio:F4} vowel_ratio={VowelRatio:F4} strategy={Strategy}",
                 phone.phoneme,
                 sourceFrames,
                 outputFrames,
                 sourceConsonantFrames,
                 targetConsonantFrames,
+                sourceVowelOnsetFrames,
+                vowelMap.TargetOnsetFrames,
                 vowelSourceFrames,
                 vowelTargetFrames,
                 consonantRatio,
@@ -846,12 +852,13 @@ namespace OpenUtau.Core.HifiNeural {
             int dstStart,
             int dstFrames,
             float[] targetF0,
-            string phoneme) {
+            string phoneme,
+            int preferredOnsetFrames = -1) {
             if (dstFrames <= 0) {
                 return new VowelMapReport(0, 0, 0, 0, "empty_vowel_target", 0, 0, 0);
             }
 
-            ResolveVowelSections(vowelSourceFrames, out int onsetFrames, out int releaseFrames, out int sourceSustainFrames);
+            ResolveVowelSections(vowelSourceFrames, preferredOnsetFrames, out int onsetFrames, out int releaseFrames, out int sourceSustainFrames);
             var (targetOnsetFrames, targetSustainFrames, targetReleaseFrames) = AllocateVowelTargetSections(
                 onsetFrames,
                 sourceSustainFrames,
@@ -915,14 +922,26 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         static void ResolveVowelSections(int vowelSourceFrames, out int onsetFrames, out int releaseFrames, out int sustainFrames) {
+            ResolveVowelSections(vowelSourceFrames, preferredOnsetFrames: -1, out onsetFrames, out releaseFrames, out sustainFrames);
+        }
+
+        static void ResolveVowelSections(int vowelSourceFrames, int preferredOnsetFrames, out int onsetFrames, out int releaseFrames, out int sustainFrames) {
             if (vowelSourceFrames <= 3) {
                 onsetFrames = Math.Max(1, vowelSourceFrames - 1);
                 releaseFrames = 0;
                 sustainFrames = Math.Max(1, vowelSourceFrames - onsetFrames);
                 return;
             }
-            onsetFrames = Math.Clamp((int)Math.Round(vowelSourceFrames * 0.10), 1, 5);
-            releaseFrames = Math.Clamp((int)Math.Round(vowelSourceFrames * 0.08), 1, 5);
+
+            if (preferredOnsetFrames >= 0) {
+                int maxOnset = Math.Max(0, vowelSourceFrames - 1);
+                onsetFrames = Math.Clamp(preferredOnsetFrames, 0, maxOnset);
+                int remaining = Math.Max(1, vowelSourceFrames - onsetFrames);
+                releaseFrames = Math.Clamp((int)Math.Round(remaining * 0.08), 0, Math.Min(5, remaining - 1));
+            } else {
+                onsetFrames = Math.Clamp((int)Math.Round(vowelSourceFrames * 0.10), 1, 5);
+                releaseFrames = Math.Clamp((int)Math.Round(vowelSourceFrames * 0.08), 1, 5);
+            }
             while (onsetFrames + releaseFrames > vowelSourceFrames - 2 && (onsetFrames > 1 || releaseFrames > 0)) {
                 if (onsetFrames >= releaseFrames && onsetFrames > 1) {
                     onsetFrames--;
@@ -974,32 +993,24 @@ namespace OpenUtau.Core.HifiNeural {
                 return (Math.Max(0, quickOnsetFrames), Math.Max(0, quickSustainFrames), Math.Max(0, quickReleaseFrames));
             }
 
-            double ratio = Math.Min(1.0, targetTotalFrames / (double)naturalTotalFrames);
-            int onsetFrames = Math.Clamp(
-                (int)Math.Round(naturalOnsetFrames * ratio),
-                sourceOnsetFrames > 0 ? 1 : 0,
-                Math.Min(naturalOnsetFrames, targetTotalFrames));
-            int releaseFrames = Math.Clamp(
-                (int)Math.Round(naturalReleaseFrames * ratio),
-                0,
-                Math.Min(naturalReleaseFrames, Math.Max(0, targetTotalFrames - onsetFrames)));
-
-            while (targetTotalFrames >= 3 && onsetFrames + releaseFrames > targetTotalFrames - 1) {
-                if (onsetFrames >= releaseFrames && onsetFrames > 1) {
-                    onsetFrames--;
-                } else if (releaseFrames > 0) {
-                    releaseFrames--;
-                } else {
-                    break;
-                }
-            }
+            // VCV/CVVC samples often have a real vowel onset between preutter and consonant
+            // boundaries. Keep that onset close to its natural duration and let the stable sustain
+            // absorb most length changes; scaling all three regions together makes the onset feel
+            // swallowed on short notes and over-stretched on long notes.
+            int minSustainFrames = sourceSustainFrames > 0 ? Math.Max(1, minNucleusFrames) : 0;
+            int onsetFrames = Math.Min(naturalOnsetFrames, Math.Max(0, targetTotalFrames - minSustainFrames));
+            int releaseFrames = Math.Min(naturalReleaseFrames, Math.Max(0, targetTotalFrames - onsetFrames - minSustainFrames));
             int sustainFrames = Math.Max(0, targetTotalFrames - onsetFrames - releaseFrames);
-            if (targetTotalFrames >= 3 && sourceSustainFrames > 0 && sustainFrames <= 0) {
-                if (releaseFrames > 0) {
-                    releaseFrames--;
-                } else if (onsetFrames > 1) {
-                    onsetFrames--;
-                }
+
+            if (minSustainFrames > 0 && sustainFrames < minSustainFrames) {
+                int needed = minSustainFrames - sustainFrames;
+                int takeRelease = Math.Min(needed, releaseFrames);
+                releaseFrames -= takeRelease;
+                needed -= takeRelease;
+                int minOnsetFrames = sourceOnsetFrames > 0 ? 1 : 0;
+                int takeOnset = Math.Min(needed, Math.Max(0, onsetFrames - minOnsetFrames));
+                onsetFrames -= takeOnset;
+                needed -= takeOnset;
                 sustainFrames = Math.Max(0, targetTotalFrames - onsetFrames - releaseFrames);
             }
             if (minNucleusFrames > 0 && sustainFrames < minNucleusFrames) {
@@ -1686,6 +1697,19 @@ namespace OpenUtau.Core.HifiNeural {
                 sourceConsonantFrames = maxConsonant;
             }
             return sourceConsonantFrames;
+        }
+
+        static int NormalizeSourceStableStartFrames(int sourceStableStartFrames, int sourceFixedFrames, int sourceFrames) {
+            if (sourceFrames <= 0) {
+                return 0;
+            }
+            sourceFixedFrames = Math.Clamp(sourceFixedFrames, 0, Math.Max(0, sourceFrames - 1));
+            sourceStableStartFrames = Math.Clamp(sourceStableStartFrames, sourceFixedFrames, sourceFrames);
+            int maxStableStart = Math.Max(sourceFixedFrames, sourceFrames - MinVowelSourceFrames);
+            if (sourceStableStartFrames > maxStableStart) {
+                sourceStableStartFrames = maxStableStart;
+            }
+            return Math.Clamp(sourceStableStartFrames, sourceFixedFrames, sourceFrames);
         }
 
         // Frames at the START of a phone's fixed region that were previously F0-masked. Kept for
