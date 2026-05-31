@@ -183,6 +183,47 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
+        public void PostVocoderLevelerReducesLocalLoudnessJump() {
+            int sampleRate = HifiMelExtractor.SampleRate;
+            var samples = new float[sampleRate * 2];
+            for (int i = 0; i < samples.Length; i++) {
+                double amp = i < sampleRate ? 0.08 : 0.32;
+                samples[i] = (float)(amp * Math.Sin(2.0 * Math.PI * 220.0 * i / sampleRate));
+            }
+            double beforeDb = SegmentRmsDb(samples, sampleRate, sampleRate) - SegmentRmsDb(samples, 0, sampleRate);
+            var features = CreateLevelerFeatures(samples.Length, 220f);
+
+            var report = HifiPostVocoderLeveler.LevelInPlace(samples, features, sampleRate);
+
+            double afterDb = SegmentRmsDb(samples, sampleRate, sampleRate) - SegmentRmsDb(samples, 0, sampleRate);
+            Assert.True(report.CutFrames > 0);
+            Assert.True(afterDb < beforeDb - 2.0, $"expected local jump reduction, before={beforeDb:F2}dB after={afterDb:F2}dB");
+            Assert.True(samples.Max(Math.Abs) < 0.33f);
+        }
+
+        [Fact]
+        public void PostVocoderLevelerAppliesConservativeHighF0Attenuation() {
+            int sampleRate = HifiMelExtractor.SampleRate;
+            var samples = new float[sampleRate * 2];
+            for (int i = 0; i < samples.Length; i++) {
+                samples[i] = (float)(0.16 * Math.Sin(2.0 * Math.PI * 220.0 * i / sampleRate));
+            }
+            int frames = Math.Max(1, (samples.Length + HifiOnnxVocoder.HopSize - 1) / HifiOnnxVocoder.HopSize);
+            var f0 = new float[frames];
+            for (int i = 0; i < f0.Length; i++) {
+                f0[i] = i < f0.Length / 2 ? 220f : 880f;
+            }
+            var features = CreateLevelerFeatures(samples.Length, f0);
+
+            var report = HifiPostVocoderLeveler.LevelInPlace(samples, features, sampleRate);
+
+            double lowF0Db = SegmentRmsDb(samples, sampleRate / 4, sampleRate / 2);
+            double highF0Db = SegmentRmsDb(samples, sampleRate + sampleRate / 4, sampleRate / 2);
+            Assert.True(report.MinGainDb < -0.5);
+            Assert.True(highF0Db < lowF0Db - 0.4, $"expected high-f0 attenuation, low={lowF0Db:F2}dB high={highF0Db:F2}dB");
+        }
+
+        [Fact]
         public void CacheKeyReflectsMinimalConfig() {
             string oldMode = Environment.GetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE");
             string oldDebug = Environment.GetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT");
@@ -190,7 +231,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE", "none");
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT", "false");
                 string key = HifiRenderConfig.CacheKey();
-                Assert.Contains("v26-meldomainconcat-overlapcrossfade-sustainfreeze-consonantfix-f0continuous-loudnessloud-microvar-vowelalign-cbound", key);
+                Assert.Contains("v27-meldomainconcat-overlapcrossfade-sustainfreeze-consonantfix-f0continuous-postleveler-microvar-vowelalign-cbound", key);
                 Assert.Contains("enhnone", key);
                 Assert.Contains("dbgFalse", key);
             } finally {
@@ -220,6 +261,36 @@ namespace OpenUtau.Core.Test.HifiNeural {
             Assert.Equal(2.0 / 3.0, CrossfadeProgress(2, 4), 6);
             Assert.Equal(1.0, CrossfadeProgress(3, 4), 6);
             Assert.Equal(0.5, CrossfadeProgress(0, 1), 6);
+        }
+
+        static HifiPhraseFeatures CreateLevelerFeatures(int sampleCount, float f0) {
+            int frames = Math.Max(1, (sampleCount + HifiOnnxVocoder.HopSize - 1) / HifiOnnxVocoder.HopSize);
+            return CreateLevelerFeatures(sampleCount, Enumerable.Repeat(f0, frames).ToArray());
+        }
+
+        static HifiPhraseFeatures CreateLevelerFeatures(int sampleCount, float[] f0) {
+            int frames = f0.Length;
+            return new HifiPhraseFeatures {
+                Mel = new float[HifiMelExtractor.NMels, frames],
+                F0 = f0,
+                Metadata = new HifiPhraseMetadata {
+                    SampleRate = HifiMelExtractor.SampleRate,
+                    HopSize = HifiOnnxVocoder.HopSize,
+                    FrameMs = 1000.0 * HifiOnnxVocoder.HopSize / HifiMelExtractor.SampleRate,
+                    EstimatedLengthMs = 1000.0 * sampleCount / HifiMelExtractor.SampleRate,
+                },
+            };
+        }
+
+        static double SegmentRmsDb(float[] samples, int start, int count) {
+            start = Math.Clamp(start, 0, samples.Length);
+            int end = Math.Clamp(start + count, start, samples.Length);
+            double sum = 0;
+            for (int i = start; i < end; i++) {
+                sum += samples[i] * samples[i];
+            }
+            double rms = Math.Sqrt(sum / Math.Max(1, end - start));
+            return 20.0 * Math.Log10(Math.Max(1e-7, rms));
         }
 
         [Fact]
