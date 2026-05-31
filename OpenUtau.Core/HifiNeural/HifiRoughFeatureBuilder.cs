@@ -12,6 +12,15 @@ namespace OpenUtau.Core.HifiNeural {
         // Absolute ceiling on how many leading frames get F0-masked (noise excitation). ~5 frames
         // at ~11.6ms/frame ≈ 58ms covers a plosive/fricative burst without reaching the vowel.
         const int ConsonantF0MaskMaxFrames = 5;
+        // Peak log-mel amplitude of the deterministic sustain micro-variation (~0.18 ≈ ±1.6 dB).
+        // Small enough to read as natural spectral wobble, large enough to break the loop.
+        const double SustainMicroVarLogAmp = 0.18;
+        // How many distinct slowly-drifting wobble bands modulate the mel bins. Each band covers a
+        // contiguous group of bins so neighbouring bins move together (formant-like), not as noise.
+        const int SustainMicroVarBands = 6;
+        // Peak F0 micro-jitter in cents (~±5). A slow deterministic drift that mimics natural pitch
+        // micro-instability and helps break the perfectly-periodic, synthetic sustain.
+        const double F0MicroJitterCents = 5.0;
         const int PhraseEdgeMelFadeInFrames = 3;
         const int PhraseEdgeMelFadeOutFrames = 5;
         const double PhraseEdgeMelMinGain = 0.18;
@@ -20,10 +29,11 @@ namespace OpenUtau.Core.HifiNeural {
         const double TemplateEnergyClamp = 0.70;
         // At larger stretch ratios the source is "scanned" more slowly; if the slow-scanned source
         // trajectory keeps a high weight, every micro-motion inside the vowel (formant drift,
-        // vibrato) gets stretched proportionally and the note audibly slows down — most noticeable
-        // on long Japanese-VCV sustains. Driving the trajectory weight low for big stretches makes
-        // the steady-state template dominate, so the sustain holds rather than slow-scans.
-        const double TemplateTrajectoryMinBlend = 0.12;
+        // vibrato) gets stretched proportionally and the note audibly slows down. But freezing it
+        // too hard (very low blend) collapses the sustain to a near-static template, which the
+        // vocoder turns into a perfectly periodic, mechanical-sounding loop. 0.28 keeps enough real
+        // spectral motion to avoid the loop without bringing back the slow-down.
+        const double TemplateTrajectoryMinBlend = 0.28;
         const double TemplateTrajectoryMaxBlend = 0.70;
         const double SourceFrameMs = 1000.0 * HifiMelExtractor.OriginHopSize / HifiMelExtractor.SampleRate;
         const double SourceSampleMs = 1000.0 / HifiMelExtractor.SampleRate;
@@ -63,6 +73,7 @@ namespace OpenUtau.Core.HifiNeural {
             double phraseStartMs = layout.positionMs - layout.leadingMs;
             int targetFrames = Math.Max(1, (int)Math.Ceiling(layout.estimatedLengthMs / HifiF0Builder.FrameMs));
             float[] f0 = f0Builder.Build(phrase, targetFrames, phraseStartMs);
+            ApplyF0MicroJitter(f0);
 
             // Mel-domain assembly: extract each phone's oto slice into its own mel, stretch it per
             // phone with the existing warp logic, then concatenate onto the phrase grid with
@@ -92,6 +103,23 @@ namespace OpenUtau.Core.HifiNeural {
                 F0 = f0,
                 Metadata = BuildMetadata(phrase, layout, targetFrames, phraseStartMs),
             };
+        }
+
+        // Adds a slow, deterministic ±F0MicroJitterCents drift to voiced (F0>0) frames. Unvoiced
+        // frames (F0==0) are left untouched. Deterministic so renders stay cache-stable.
+        static void ApplyF0MicroJitter(float[] f0) {
+            if (f0.Length == 0 || F0MicroJitterCents <= 0) {
+                return;
+            }
+            double seed = SeedFromInts(f0.Length, 0x5f3759df);
+            for (int i = 0; i < f0.Length; i++) {
+                float hz = f0[i];
+                if (hz <= 0 || float.IsNaN(hz) || float.IsInfinity(hz)) {
+                    continue;
+                }
+                double cents = F0MicroJitterCents * SmoothWobble(i * 0.13, seed);
+                f0[i] = (float)(hz * Math.Pow(2.0, cents / 1200.0));
+            }
         }
 
         static double[] BuildVariableSourcePositions(RenderPhrase phrase, double phraseStartMs, float[] roughSamples, int targetFrames) {
@@ -1092,8 +1120,20 @@ namespace OpenUtau.Core.HifiNeural {
                 }
                 currentEnergy /= Math.Max(1, bins);
                 float energyDelta = (float)Math.Clamp(targetEnergy - currentEnergy, -TemplateEnergyClamp, TemplateEnergyClamp);
+                // Deterministic, band-grouped spectral micro-variation. Faded out at the edges
+                // (where frames anchor to the real source) and ramped in with stretch so only
+                // genuinely held notes get it. Breaks the otherwise fixed period that the vocoder
+                // would render as a mechanical loop.
+                double microAmp = SustainMicroVarLogAmp * (1.0 - anchorWeight) * Math.Clamp(stretchRatio - 1.0, 0, 1);
+                double framePhase = t * 0.20; // slow drift across the sustain
                 for (int m = 0; m < bins; m++) {
-                    output[m, outputStart + t] = trajectoryFrame[m] + energyDelta;
+                    double micro = 0;
+                    if (microAmp > 1e-4) {
+                        int band = m * SustainMicroVarBands / Math.Max(1, bins);
+                        double seed = SeedFromInts(sourceStart, band);
+                        micro = microAmp * SmoothWobble(framePhase, seed);
+                    }
+                    output[m, outputStart + t] = trajectoryFrame[m] + energyDelta + (float)micro;
                 }
             }
             SmoothInternalSustain(output, outputStart, outputFrames, strength: 0.16f);
@@ -1148,9 +1188,9 @@ namespace OpenUtau.Core.HifiNeural {
             if (!IsFinite(stretchRatio) || stretchRatio <= 1.0) {
                 return TemplateTrajectoryMaxBlend;
             }
-            // Reach the (low) min blend by ~2x stretch so moderately-held notes already freeze the
-            // steady state instead of slow-scanning it.
-            double amount = Math.Clamp((stretchRatio - 1.0) / 1.0, 0, 1);
+            // Reach the min blend around ~2.5x stretch. Below that we keep more of the real source
+            // motion so moderately-held notes don't sound frozen/looped.
+            double amount = Math.Clamp((stretchRatio - 1.0) / 1.5, 0, 1);
             return TemplateTrajectoryMaxBlend + (TemplateTrajectoryMinBlend - TemplateTrajectoryMaxBlend) * amount;
         }
 
@@ -1598,6 +1638,28 @@ namespace OpenUtau.Core.HifiNeural {
         static double SmoothStep(double x) {
             x = Math.Clamp(x, 0, 1);
             return x * x * (3 - 2 * x);
+        }
+
+        // Deterministic, smooth, non-periodic wobble in roughly [-1, 1]. Built from a few sines at
+        // incommensurable (irrational-ratio) frequencies so the sum never repeats over the sustain,
+        // which is what keeps the stretched vowel from sounding like a fixed loop. Deterministic
+        // (seed-driven, no clock) so renders are reproducible and cache-stable.
+        static double SmoothWobble(double phase, double seed) {
+            // Irrational frequency ratios → no common period.
+            double a = Math.Sin(phase * 1.0 + seed * 1.7);
+            double b = Math.Sin(phase * 1.6180339887 + seed * 2.3 + 1.3);
+            double c = Math.Sin(phase * 2.7182818285 + seed * 0.7 + 2.6);
+            return (a * 0.5 + b * 0.33 + c * 0.17);
+        }
+
+        static double SeedFromInts(int a, int b) {
+            // Cheap deterministic hash → a stable fractional seed in [0, 2π).
+            unchecked {
+                uint h = 2166136261u;
+                h = (h ^ (uint)a) * 16777619u;
+                h = (h ^ (uint)b) * 16777619u;
+                return (h % 100000) / 100000.0 * (2.0 * Math.PI);
+            }
         }
 
         static bool IsFinite(double value) => !double.IsNaN(value) && !double.IsInfinity(value);
