@@ -612,8 +612,16 @@ namespace OpenUtau.Core.HifiNeural {
             RenderPhone phone,
             float[] targetF0) {
             double? consonantMs = EffectiveConsonantMs(phone);
-            int sourceConsonantFrames = consonantMs.HasValue
-                ? (int)Math.Round(consonantMs.Value / SourceFrameMs)
+            // Consonant/vowel boundary = PREUTTER, on BOTH source and target axes. preutter is the
+            // point where the vowel is meant to align to the note position, so splitting there (and
+            // keeping the same split on both axes) makes the consonant region map preutter->preutter
+            // 1:1 (no compression) and the vowel start correctly. Using `consonant` for the source
+            // split while the target used `preutter` compressed the consonant (metallic) and
+            // stretched the vowel for free. `consonant` is still used below only to gate whether a
+            // fixed region exists at all.
+            double boundaryMs = consonantMs.HasValue ? Math.Max(0, phone.preutterMs) : 0;
+            int sourceConsonantFrames = boundaryMs > 0
+                ? (int)Math.Round(boundaryMs / SourceFrameMs)
                 : 0;
             sourceFrames = Math.Max(1, Math.Min(sourceFrames, sourceMel.GetLength(1) - sourceStart));
             outputFrames = Math.Max(1, Math.Min(outputFrames, output.GetLength(1) - outputStart));
@@ -633,8 +641,11 @@ namespace OpenUtau.Core.HifiNeural {
                 return new PhoneMapReport(false, "simple_no_vowel_room", 0);
             }
 
-            int targetConsonantFrames = consonantMs.HasValue
-                ? (int)Math.Round(consonantMs.Value / HifiF0Builder.FrameMs)
+            // Target-axis consonant length uses the SAME preutter boundary as the source split, so
+            // the consonant region maps preutter(source) -> preutter(target) at ~1:1. The segment
+            // starts at (positionMs - preutter), so this lands the vowel exactly on positionMs.
+            int targetConsonantFrames = boundaryMs > 0
+                ? (int)Math.Round(boundaryMs / HifiF0Builder.FrameMs)
                 : 0;
             targetConsonantFrames = Math.Clamp(targetConsonantFrames, 0, Math.Max(0, outputFrames - MinVowelTargetFrames));
             int vowelTargetFrames = outputFrames - targetConsonantFrames;

@@ -62,7 +62,7 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         public static string CacheKey() {
-            return $"v24-meldomainconcat-overlapcrossfade-sustainfreeze-consonantfix-f0continuous-loudnessloud-microvar-enh{MelEnhanceMode}-dbg{DebugExportEnabled}";
+            return $"v26-meldomainconcat-overlapcrossfade-sustainfreeze-consonantfix-f0continuous-loudnessloud-microvar-vowelalign-cbound-enh{MelEnhanceMode}-dbg{DebugExportEnabled}";
         }
 
         public static IHifiMelEnhancer CreateMelEnhancer() {
