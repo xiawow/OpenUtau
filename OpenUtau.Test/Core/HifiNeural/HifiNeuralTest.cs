@@ -206,6 +206,22 @@ namespace OpenUtau.Core.Test.HifiNeural {
             return (float)method!.Invoke(null, new object[] { logOld, logNew, u })!;
         }
 
+        static double CrossfadeProgress(int overlapOffset, int overlapFrames) {
+            var method = typeof(HifiMelPhraseAssembler)
+                .GetMethod("CrossfadeProgress", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.NotNull(method);
+            return (double)method!.Invoke(null, new object[] { overlapOffset, overlapFrames })!;
+        }
+
+        [Fact]
+        public void OverlapCrossfadeProgressReachesBothEndpoints() {
+            Assert.Equal(0.0, CrossfadeProgress(0, 4), 6);
+            Assert.Equal(1.0 / 3.0, CrossfadeProgress(1, 4), 6);
+            Assert.Equal(2.0 / 3.0, CrossfadeProgress(2, 4), 6);
+            Assert.Equal(1.0, CrossfadeProgress(3, 4), 6);
+            Assert.Equal(0.5, CrossfadeProgress(0, 1), 6);
+        }
+
         [Fact]
         public void OverlapCrossfadeEndpointsArePure() {
             // u=0 -> fully old, u=1 -> fully new. Endpoints must not be contaminated by the blend.

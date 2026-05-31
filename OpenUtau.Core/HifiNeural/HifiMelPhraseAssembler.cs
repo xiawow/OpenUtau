@@ -186,7 +186,7 @@ namespace OpenUtau.Core.HifiNeural {
                     if (inOverlap) {
                         // Equal-power cross-fade in linear (power) domain. The previous segment is
                         // already written into output[t]; blend it with this segment.
-                        double u = overlapFrames <= 1 ? 1.0 : (t - overlapStart) / (double)(overlapFrames);
+                        double u = CrossfadeProgress(t - overlapStart, overlapFrames);
                         for (int m = 0; m < bins; m++) {
                             output[m, t] = CrossfadeLogMel(output[m, t], seg.Mel[m, local], u);
                         }
@@ -207,6 +207,13 @@ namespace OpenUtau.Core.HifiNeural {
         /// voiced segments preserves energy through the overlap — this is what keeps VCV/CVVC vowel
         /// boundaries from dipping or jumping under stretch.
         /// </summary>
+        internal static double CrossfadeProgress(int overlapOffset, int overlapFrames) {
+            if (overlapFrames <= 1) {
+                return 0.5;
+            }
+            return Math.Clamp(overlapOffset / (double)(overlapFrames - 1), 0.0, 1.0);
+        }
+
         internal static float CrossfadeLogMel(float logOld, float logNew, double u) {
             u = Math.Clamp(u, 0.0, 1.0);
             double wNew = Math.Sin(0.5 * Math.PI * u);
