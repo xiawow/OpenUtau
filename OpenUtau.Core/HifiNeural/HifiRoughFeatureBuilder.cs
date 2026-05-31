@@ -24,15 +24,17 @@ namespace OpenUtau.Core.HifiNeural {
         const double F0MicroJitterCents = 5.0;
         const double SustainTemplateStretchThreshold = 2.0;
         const double StableSustainEnergyClamp = 0.25;
-        const double StableSustainDeDenseMax = 0.24;
-        const int StableSustainDeDenseHighBandStart = 58;
-        const double StableSustainDeDenseHighBandExtra = 0.35;
         const int SustainTextureMinStableFrames = 4;
-        const double SustainTextureMaxStepFrames = 0.85;
+        const double SustainTextureNaturalStepFrames = HifiF0Builder.HopSize / (double)HifiMelExtractor.OriginHopSize;
+        const double SustainTextureMaxStepFrames = SustainTextureNaturalStepFrames * 1.35;
         const int WaveformSustainMinOutputFrames = 8;
+        const int WaveformSustainMinStableFrames = 8;
+        const double WaveformSustainEnergyOffsetClamp = 0.10;
+        const double WaveformSustainEnergyOutlierTolerance = 0.45;
+        const double WaveformSustainEnergyOutlierClamp = 0.14;
         const double F0MismatchHighBandStart = 54;
-        const double F0MismatchMaxCutDb = 1.35;
-        const double F0MismatchMaxContrast = 0.18;
+        const double F0MismatchMaxCutDb = 0.75;
+        const double F0MismatchMaxContrast = 0.06;
         const int PhraseEdgeMelFadeInFrames = 3;
         const int PhraseEdgeMelFadeOutFrames = 5;
         const double PhraseEdgeMelMinGain = 0.18;
@@ -1336,10 +1338,6 @@ namespace OpenUtau.Core.HifiNeural {
                     currentEnergy += textureFrame[m];
                 }
                 currentEnergy /= Math.Max(1, bins);
-                double deDenseAmount = ResolveSustainDeDenseAmount(t, outputFrames, edgeFrames, stretchRatio);
-                if (deDenseAmount > 1e-6) {
-                    currentEnergy = ApplySustainSpectralDeDensity(textureFrame, currentEnergy, deDenseAmount);
-                }
                 float energyDelta = (float)Math.Clamp(targetEnergy - currentEnergy, -StableSustainEnergyClamp, StableSustainEnergyClamp);
                 double coreWeight = SustainCoreTextureWeight(t, outputFrames, edgeFrames);
                 double microAmp = allowMicroVariation
@@ -1363,7 +1361,7 @@ namespace OpenUtau.Core.HifiNeural {
                     sourceTone,
                     coreWeight);
             }
-            SmoothInternalSustain(output, outputStart, outputFrames, strength: 0.10f);
+            SmoothInternalSustain(output, outputStart, outputFrames, strength: 0.04f);
 
             Log.Debug(
                 "HifiRoughFeatureBuilder sustain_texture_trajectory source_frames={SourceFrames} output_frames={OutputFrames} stable_frames={StableFrames} edge_frames={EdgeFrames} direct_smooth_radius={DirectSmoothRadius} texture_smooth_radius={TextureSmoothRadius} micro_variation={MicroVariation}",
@@ -1397,7 +1395,7 @@ namespace OpenUtau.Core.HifiNeural {
             if (sourceSamples == null
                     || sourceSamples.Length < HifiMelExtractor.WinSize
                     || outputFrames < WaveformSustainMinOutputFrames
-                    || stableFrames < SustainTextureMinStableFrames) {
+                    || stableFrames < WaveformSustainMinStableFrames) {
                 return false;
             }
 
@@ -1429,6 +1427,13 @@ namespace OpenUtau.Core.HifiNeural {
             var directFrame = new float[bins];
             var directContourFrame = new float[bins];
             var textureFrame = new float[bins];
+            double globalEnergyOffset = ResolveWaveformSustainGlobalEnergyOffset(
+                sourceMel,
+                sourceStart,
+                sourceFrames,
+                waveformTextureMel,
+                outputFrames,
+                directSmoothRadius);
             for (int t = 0; t < outputFrames; t++) {
                 double u = outputFrames == 1 ? 0 : t / (double)(outputFrames - 1);
                 double sourceIndex = outputFrames == 1 || sourceFrames == 1
@@ -1440,11 +1445,7 @@ namespace OpenUtau.Core.HifiNeural {
 
                 double targetEnergy = FrameMean(directContourFrame);
                 double currentEnergy = FrameMean(textureFrame);
-                double deDenseAmount = ResolveSustainDeDenseAmount(t, outputFrames, edgeFrames, stretchRatio);
-                if (deDenseAmount > 1e-6) {
-                    currentEnergy = ApplySustainSpectralDeDensity(textureFrame, currentEnergy, deDenseAmount);
-                }
-                float energyDelta = (float)Math.Clamp(targetEnergy - currentEnergy, -StableSustainEnergyClamp, StableSustainEnergyClamp);
+                float energyDelta = (float)ResolveWaveformSustainEnergyDelta(targetEnergy, currentEnergy, globalEnergyOffset);
                 double coreWeight = SustainCoreTextureWeight(t, outputFrames, edgeFrames);
                 double microAmp = allowMicroVariation
                     ? SustainMicroVarLogAmp * coreWeight * Math.Clamp(stretchRatio - 1.0, 0, 1)
@@ -1467,16 +1468,62 @@ namespace OpenUtau.Core.HifiNeural {
                     sourceTone,
                     coreWeight);
             }
-            SmoothInternalSustain(output, outputStart, outputFrames, strength: 0.08f);
             Log.Debug(
-                "HifiRoughFeatureBuilder sustain_waveform_texture source_frames={SourceFrames} output_frames={OutputFrames} stable_frames={StableFrames} edge_frames={EdgeFrames} stretch_ratio={StretchRatio:F3} source_samples={SourceSamples}",
+                "HifiRoughFeatureBuilder sustain_waveform_texture source_frames={SourceFrames} output_frames={OutputFrames} stable_frames={StableFrames} edge_frames={EdgeFrames} stretch_ratio={StretchRatio:F3} source_samples={SourceSamples} global_energy_offset={GlobalEnergyOffset:F3}",
                 sourceFrames,
                 outputFrames,
                 stableFrames,
                 edgeFrames,
                 stretchRatio,
-                sourceSamples.Length);
+                sourceSamples.Length,
+                globalEnergyOffset);
             return true;
+        }
+
+        static double ResolveWaveformSustainGlobalEnergyOffset(
+            float[,] sourceMel,
+            int sourceStart,
+            int sourceFrames,
+            float[,] waveformTextureMel,
+            int outputFrames,
+            int directSmoothRadius) {
+            if (outputFrames <= 0 || waveformTextureMel.GetLength(1) <= 0) {
+                return 0;
+            }
+            int bins = sourceMel.GetLength(0);
+            var directContourFrame = new float[bins];
+            double directSum = 0;
+            double textureSum = 0;
+            int count = Math.Min(outputFrames, waveformTextureMel.GetLength(1));
+            for (int t = 0; t < count; t++) {
+                double u = count == 1 ? 0 : t / (double)(count - 1);
+                double sourceIndex = sourceFrames <= 1 ? 0 : u * (sourceFrames - 1);
+                SampleSmoothedFrame(sourceMel, sourceStart, sourceFrames, sourceIndex, directSmoothRadius, directContourFrame);
+                directSum += FrameMean(directContourFrame);
+                textureSum += FrameMean(waveformTextureMel, t);
+            }
+            double directMean = directSum / count;
+            double textureMean = textureSum / count;
+            if (!IsFinite(directMean) || !IsFinite(textureMean)) {
+                return 0;
+            }
+            return Math.Clamp(directMean - textureMean, -WaveformSustainEnergyOffsetClamp, WaveformSustainEnergyOffsetClamp);
+        }
+
+        static double ResolveWaveformSustainEnergyDelta(double targetEnergy, double currentEnergy, double globalOffset) {
+            if (!IsFinite(targetEnergy) || !IsFinite(currentEnergy)) {
+                return globalOffset;
+            }
+            double correctedEnergy = currentEnergy + globalOffset;
+            double remaining = targetEnergy - correctedEnergy;
+            if (Math.Abs(remaining) <= WaveformSustainEnergyOutlierTolerance) {
+                return globalOffset;
+            }
+            double outlierCorrection = Math.Clamp(
+                remaining - Math.Sign(remaining) * WaveformSustainEnergyOutlierTolerance,
+                -WaveformSustainEnergyOutlierClamp,
+                WaveformSustainEnergyOutlierClamp);
+            return globalOffset + outlierCorrection;
         }
 
         static double MelFrameToSampleCenter(double frameIndex) {
@@ -1589,18 +1636,23 @@ namespace OpenUtau.Core.HifiNeural {
             if (stableFrames <= 1) {
                 return stableStart;
             }
-            double stretch = Math.Clamp((stretchRatio - SustainTemplateStretchThreshold) / 3.0, 0, 1);
-            double center = stableStart + (stableFrames - 1) * 0.5;
-            double range = (stableFrames - 1) * (0.34 + 0.12 * stretch);
-            double slowPhase = targetFrame * (0.020 + 0.010 * stretch);
-            double fastPhase = targetFrame * (0.007 + 0.004 * stretch) + 1.73;
-            double wander = SmoothWobble(slowPhase, seed) * 0.72
-                + SmoothWobble(fastPhase, seed + 0.913) * 0.28;
-            return Math.Clamp(center + range * Math.Clamp(wander, -1.0, 1.0), stableStart, stableStart + stableFrames - 1);
+            double span = stableFrames - 1;
+            double cycle = Math.Max(1.0, span * 2.0);
+            double seedFraction = seed / (2.0 * Math.PI);
+            double stepMod = 1.0 + 0.06 * SmoothWobble(targetFrame * 0.017, seed + 0.37);
+            double phase = targetFrame * SustainTextureNaturalStepFrames * stepMod
+                + seedFraction * cycle
+                + 0.35 * SmoothWobble(targetFrame * 0.173, seed + 1.11);
+            phase %= cycle;
+            if (phase < 0) {
+                phase += cycle;
+            }
+            double local = phase <= span ? phase : cycle - phase;
+            return Math.Clamp(stableStart + local, stableStart, stableStart + span);
         }
 
         static double LimitTextureIndexStep(double previous, double current, double stretchRatio) {
-            double maxStep = SustainTextureMaxStepFrames + Math.Clamp((stretchRatio - 2.0) * 0.08, 0, 0.35);
+            double maxStep = SustainTextureMaxStepFrames + Math.Clamp((stretchRatio - 2.0) * 0.12, 0, 0.55);
             return previous + Math.Clamp(current - previous, -maxStep, maxStep);
         }
 
@@ -1666,41 +1718,6 @@ namespace OpenUtau.Core.HifiNeural {
             // Stable pool supplies the spectral shape; slow source energy supplies the loudness
             // contour. Limit boosts more than drops so long sustains do not inflate in volume.
             return stableMeanEnergy + Math.Clamp(delta, -0.55, 0.16);
-        }
-
-        static double ResolveSustainDeDenseAmount(int frame, int totalFrames, int edgeFrames, double stretchRatio) {
-            if (totalFrames < 32 || stretchRatio <= 1.6 || edgeFrames <= 0) {
-                return 0;
-            }
-            int distance = Math.Min(frame, totalFrames - 1 - frame);
-            if (distance <= edgeFrames) {
-                return 0;
-            }
-            double interior = Math.Clamp((distance - edgeFrames) / (double)Math.Max(1, edgeFrames * 2), 0, 1);
-            double stretch = Math.Clamp(Math.Log(stretchRatio / 1.6, 2.0) / 1.8, 0, 1);
-            return StableSustainDeDenseMax * SmoothStep(interior) * stretch;
-        }
-
-        static double ApplySustainSpectralDeDensity(float[] frame, double frameMean, double amount) {
-            if (frame.Length == 0 || amount <= 0) {
-                return frameMean;
-            }
-            int bins = frame.Length;
-            double newMean = 0;
-            for (int m = 0; m < bins; m++) {
-                double highWeight = HighBandWeight(m, bins, StableSustainDeDenseHighBandStart);
-                double binAmount = Math.Clamp(amount * (1.0 + StableSustainDeDenseHighBandExtra * highWeight), 0, 0.55);
-                frame[m] = (float)(frameMean + (frame[m] - frameMean) * (1.0 - binAmount));
-                newMean += frame[m];
-            }
-            newMean /= bins;
-            float correction = (float)(frameMean - newMean);
-            double correctedMean = 0;
-            for (int m = 0; m < bins; m++) {
-                frame[m] += correction;
-                correctedMean += frame[m];
-            }
-            return correctedMean / bins;
         }
 
         static double HighBandWeight(int bin, int bins, int startBin) {

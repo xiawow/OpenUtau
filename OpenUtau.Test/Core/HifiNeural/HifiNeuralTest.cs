@@ -250,6 +250,36 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
+        public void WaveformSustainEnergyDeltaDoesNotFlattenNormalVariation() {
+            var method = typeof(HifiRoughFeatureBuilder)
+                .GetMethod("ResolveWaveformSustainEnergyDelta", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.NotNull(method);
+
+            double delta = (double)method!.Invoke(null, new object[] {
+                -4.0, // targetEnergy
+                -4.22, // currentEnergy, normal local variation
+                0.03, // global offset
+            })!;
+
+            Assert.Equal(0.03, delta, 6);
+        }
+
+        [Fact]
+        public void SustainTextureStepAllowsNaturalHopRate() {
+            var method = typeof(HifiRoughFeatureBuilder)
+                .GetMethod("LimitTextureIndexStep", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.NotNull(method);
+
+            double limited = (double)method!.Invoke(null, new object[] {
+                10.0,
+                14.0,
+                3.0,
+            })!;
+
+            Assert.True(limited > 13.5, $"expected near-natural texture step, got {limited}");
+        }
+
+        [Fact]
         public void VcvPreferredOnsetUsesConsonantBoundary() {
             var method = typeof(HifiRoughFeatureBuilder)
                 .GetMethod(
@@ -380,7 +410,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE", "none");
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT", "false");
                 string key = HifiRenderConfig.CacheKey();
-                Assert.Contains("v36-meldomainconcat-waveformsustain-f0mismatch-postleveler-loud17", key);
+                Assert.Contains("v39-meldomainconcat-waveformsustain-naturalrate-pruned-postleveler-loud17", key);
                 Assert.Contains("enhnone", key);
                 Assert.Contains("dbgFalse", key);
             } finally {
