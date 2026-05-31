@@ -3,10 +3,9 @@ using Serilog;
 
 namespace OpenUtau.Core.HifiNeural {
     public static class HifiLoudnessNormalizer {
-        // Target active loudness. The mel-domain concat path inherits whatever level the source
-        // slices were recorded at, which is usually quiet; we lift it toward a commercial vocal
-        // mix level (~-14 dB active RMS) instead of the previous conservative -18 dB.
-        const double TargetActiveRmsDb = -14.0;
+        // Target active loudness. Keep this below mix-mastered loudness because OpenUtau dynamics
+        // and track mixing still run after HIFI-NEURA renders the phrase.
+        const double TargetActiveRmsDb = -17.0;
         const double MaxBoostDb = 15.0;
         const double MaxCutDb = 3.0;
         const double MaxPeak = 0.97;

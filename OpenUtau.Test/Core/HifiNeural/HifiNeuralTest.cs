@@ -124,7 +124,12 @@ namespace OpenUtau.Core.Test.HifiNeural {
         [Fact]
         public void SustainTemplateHandlesTwoFrameOutput() {
             var method = typeof(HifiRoughFeatureBuilder)
-                .GetMethod("WriteSustainTemplateExtension", BindingFlags.NonPublic | BindingFlags.Static);
+                .GetMethod(
+                    "WriteSustainTemplateExtension",
+                    BindingFlags.NonPublic | BindingFlags.Static,
+                    binder: null,
+                    types: new[] { typeof(float[,]), typeof(int), typeof(int), typeof(float[,]), typeof(int), typeof(int), typeof(bool) },
+                    modifiers: null);
             Assert.NotNull(method);
 
             var source = new float[HifiMelExtractor.NMels, 3];
@@ -135,7 +140,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
             }
             var output = new float[HifiMelExtractor.NMels, 2];
 
-            bool applied = (bool)method!.Invoke(null, new object[] { source, 0, 3, output, 0, 2 })!;
+            bool applied = (bool)method!.Invoke(null, new object[] { source, 0, 3, output, 0, 2, false })!;
 
             Assert.True(applied);
             foreach (float value in output) {
@@ -231,7 +236,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE", "none");
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT", "false");
                 string key = HifiRenderConfig.CacheKey();
-                Assert.Contains("v27-meldomainconcat-overlapcrossfade-sustainfreeze-consonantfix-f0continuous-postleveler-microvar-vowelalign-cbound", key);
+                Assert.Contains("v28-meldomainconcat-overlapcrossfade-stablepool-consonantfix-f0continuous-postleveler-loud17-vowelalign-cbound", key);
                 Assert.Contains("enhnone", key);
                 Assert.Contains("dbgFalse", key);
             } finally {
