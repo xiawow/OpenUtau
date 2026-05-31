@@ -26,6 +26,11 @@ namespace OpenUtau.Core.HifiNeural {
         const int StableSustainPoolMaxFrames = 32;
         const double StableSustainEnergyFloorLog = 1.20;
         const double StableSustainEnergyClamp = 0.25;
+        const double StableSustainResidualAmp = 0.11;
+        const double StableSustainResidualClamp = 0.018;
+        const double StableSustainDeDenseMax = 0.24;
+        const int StableSustainDeDenseHighBandStart = 58;
+        const double StableSustainDeDenseHighBandExtra = 0.35;
         const int PhraseEdgeMelFadeInFrames = 3;
         const int PhraseEdgeMelFadeOutFrames = 5;
         const double PhraseEdgeMelMinGain = 0.18;
@@ -1237,6 +1242,7 @@ namespace OpenUtau.Core.HifiNeural {
             var trajectoryFrame = new float[bins];
             var poolFrame = new float[bins];
             var directFrame = new float[bins];
+            var residualFrame = new float[bins];
             double seed = SeedFromInts(sourceStart, outputFrames);
 
             for (int t = 0; t < outputFrames; t++) {
@@ -1252,13 +1258,27 @@ namespace OpenUtau.Core.HifiNeural {
                 SampleStablePoolFrame(sourceMel, stablePool.Frames, poolIndex, poolFrame);
                 double targetEnergy = ResolveSustainTargetEnergy(stablePool.MeanEnergy, sourceEnergy);
                 double currentEnergy = 0;
+                double textureAmount = ResolveResidualTextureAmount(t, outputFrames, edgeFrames, stretchRatio);
                 for (int m = 0; m < bins; m++) {
-                    float value = (float)(poolFrame[m] * (1.0 - trajectoryBlend) + trajectoryFrame[m] * trajectoryBlend);
-                    value = (float)(value * (1.0 - anchorWeight) + directFrame[m] * anchorWeight);
+                    float stableValue = poolFrame[m];
+                    float edgeValue = (float)(poolFrame[m] * (1.0 - trajectoryBlend) + trajectoryFrame[m] * trajectoryBlend);
+                    edgeValue = (float)(edgeValue * (1.0 - anchorWeight) + directFrame[m] * anchorWeight);
+                    float value = (float)(stableValue * (1.0 - anchorWeight) + edgeValue * anchorWeight);
                     trajectoryFrame[m] = value;
                     currentEnergy += value;
                 }
                 currentEnergy /= Math.Max(1, bins);
+                double deDenseAmount = ResolveSustainDeDenseAmount(t, outputFrames, edgeFrames, stretchRatio);
+                if (deDenseAmount > 1e-6) {
+                    currentEnergy = ApplySustainSpectralDeDensity(trajectoryFrame, currentEnergy, deDenseAmount);
+                }
+                double residualMean = 0;
+                for (int m = 0; m < bins; m++) {
+                    float residual = (float)Math.Clamp(directFrame[m] - trajectoryFrame[m], -StableSustainResidualClamp, StableSustainResidualClamp);
+                    residualFrame[m] = residual;
+                    residualMean += residual;
+                }
+                residualMean /= Math.Max(1, bins);
                 float energyDelta = (float)Math.Clamp(targetEnergy - currentEnergy, -StableSustainEnergyClamp, StableSustainEnergyClamp);
                 // Deterministic, band-grouped spectral micro-variation. Faded out at the edges
                 // (where frames anchor to the real source) and ramped in with stretch so only
@@ -1275,7 +1295,8 @@ namespace OpenUtau.Core.HifiNeural {
                         double bandSeed = SeedFromInts(sourceStart, band);
                         micro = microAmp * SmoothWobble(framePhase, bandSeed);
                     }
-                    output[m, outputStart + t] = trajectoryFrame[m] + energyDelta + (float)micro;
+                    float residual = (float)((residualFrame[m] - residualMean) * textureAmount);
+                    output[m, outputStart + t] = trajectoryFrame[m] + energyDelta + residual + (float)micro;
                 }
             }
             SmoothInternalSustain(output, outputStart, outputFrames, strength: 0.16f);
@@ -1400,6 +1421,66 @@ namespace OpenUtau.Core.HifiNeural {
             // Stable pool supplies the spectral shape; slow source energy supplies the loudness
             // contour. Limit boosts more than drops so long sustains do not inflate in volume.
             return stableMeanEnergy + Math.Clamp(delta, -0.55, 0.16);
+        }
+
+        static double ResolveResidualTextureAmount(int frame, int totalFrames, int edgeFrames, double stretchRatio) {
+            if (totalFrames < 32 || stretchRatio < 2.0 || edgeFrames <= 0) {
+                return 0;
+            }
+            int distance = Math.Min(frame, totalFrames - 1 - frame);
+            if (distance <= edgeFrames) {
+                return 0;
+            }
+            double interior = Math.Clamp((distance - edgeFrames) / (double)Math.Max(1, edgeFrames), 0, 1);
+            double stretch = Math.Clamp((stretchRatio - 2.0) / 2.0, 0, 1);
+            return StableSustainResidualAmp * SmoothStep(interior) * stretch;
+        }
+
+        static double ResolveSustainDeDenseAmount(int frame, int totalFrames, int edgeFrames, double stretchRatio) {
+            if (totalFrames < 32 || stretchRatio <= 1.6 || edgeFrames <= 0) {
+                return 0;
+            }
+            int distance = Math.Min(frame, totalFrames - 1 - frame);
+            if (distance <= edgeFrames) {
+                return 0;
+            }
+            double interior = Math.Clamp((distance - edgeFrames) / (double)Math.Max(1, edgeFrames * 2), 0, 1);
+            double stretch = Math.Clamp(Math.Log(stretchRatio / 1.6, 2.0) / 1.8, 0, 1);
+            return StableSustainDeDenseMax * SmoothStep(interior) * stretch;
+        }
+
+        static double ApplySustainSpectralDeDensity(float[] frame, double frameMean, double amount) {
+            if (frame.Length == 0 || amount <= 0) {
+                return frameMean;
+            }
+            int bins = frame.Length;
+            double newMean = 0;
+            for (int m = 0; m < bins; m++) {
+                double highWeight = HighBandWeight(m, bins, StableSustainDeDenseHighBandStart);
+                double binAmount = Math.Clamp(amount * (1.0 + StableSustainDeDenseHighBandExtra * highWeight), 0, 0.55);
+                frame[m] = (float)(frameMean + (frame[m] - frameMean) * (1.0 - binAmount));
+                newMean += frame[m];
+            }
+            newMean /= bins;
+            float correction = (float)(frameMean - newMean);
+            double correctedMean = 0;
+            for (int m = 0; m < bins; m++) {
+                frame[m] += correction;
+                correctedMean += frame[m];
+            }
+            return correctedMean / bins;
+        }
+
+        static double HighBandWeight(int bin, int bins, int startBin) {
+            if (bins <= 1) {
+                return 0;
+            }
+            int start = Math.Clamp(startBin, 0, bins - 1);
+            if (bin <= start || start >= bins - 1) {
+                return 0;
+            }
+            double u = (bin - start) / (double)(bins - 1 - start);
+            return SmoothStep(Math.Clamp(u, 0, 1));
         }
 
         static double FrameMean(float[] frame) {
