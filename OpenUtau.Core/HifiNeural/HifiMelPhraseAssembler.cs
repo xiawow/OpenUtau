@@ -101,7 +101,8 @@ namespace OpenUtau.Core.HifiNeural {
                 return null;
             }
 
-            float[,] sourceMel = LoadSliceMel(phone, sourceCache, sliceMelCache);
+            float[] sourceSamples = LoadSourceSlice(phone, sourceCache);
+            float[,] sourceMel = LoadSliceMel(phone, sourceSamples, sliceMelCache);
             int sourceFrames = sourceMel.GetLength(1);
             if (sourceFrames <= 0) {
                 return null;
@@ -143,6 +144,7 @@ namespace OpenUtau.Core.HifiNeural {
 
             var phoneMel = new float[HifiMelExtractor.NMels, frameCount];
             // Local target F0 slice so the (F0-aware) stretch logic sees the right pitch motion.
+            float[] localTargetF0 = SliceTargetF0(targetF0, startFrame, frameCount);
             var report = HifiRoughFeatureBuilder.WritePhoneMappedSegment(
                 sourceMel,
                 0,
@@ -151,7 +153,8 @@ namespace OpenUtau.Core.HifiNeural {
                 0,
                 frameCount,
                 phone,
-                targetF0);
+                localTargetF0,
+                sourceSamples);
 
             return new PhoneMelSegment {
                 PhoneIndex = phoneIndex,
@@ -268,13 +271,12 @@ namespace OpenUtau.Core.HifiNeural {
 
         float[,] LoadSliceMel(
             RenderPhone phone,
-            Dictionary<string, float[]> sourceCache,
+            float[] sourceSamples,
             Dictionary<string, float[,]> sliceMelCache) {
             string key = SliceCacheKey(phone);
             if (key.Length > 0 && sliceMelCache.TryGetValue(key, out var cachedMel)) {
                 return cachedMel;
             }
-            float[] sourceSamples = LoadSourceSlice(phone, sourceCache);
             float[,] mel = sourceSamples.Length == 0
                 ? new float[HifiMelExtractor.NMels, 0]
                 : melExtractor.Extract(sourceSamples);
@@ -282,6 +284,18 @@ namespace OpenUtau.Core.HifiNeural {
                 sliceMelCache[key] = mel;
             }
             return mel;
+        }
+
+        static float[] SliceTargetF0(float[] targetF0, int startFrame, int frameCount) {
+            var result = new float[Math.Max(0, frameCount)];
+            if (targetF0.Length == 0 || result.Length == 0) {
+                return result;
+            }
+            for (int i = 0; i < result.Length; i++) {
+                int index = Math.Clamp(startFrame + i, 0, targetF0.Length - 1);
+                result[i] = targetF0[index];
+            }
+            return result;
         }
 
         static string SliceCacheKey(RenderPhone phone) {

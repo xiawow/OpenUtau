@@ -23,27 +23,21 @@ namespace OpenUtau.Core.HifiNeural {
         // Peak F0 micro-jitter in cents if EnableF0MicroJitter is turned on for A/B testing.
         const double F0MicroJitterCents = 5.0;
         const double SustainTemplateStretchThreshold = 2.0;
-        const int StableSustainPoolMaxFrames = 32;
-        const double StableSustainEnergyFloorLog = 1.20;
         const double StableSustainEnergyClamp = 0.25;
-        const double StableSustainResidualAmp = 0.11;
-        const double StableSustainResidualClamp = 0.018;
         const double StableSustainDeDenseMax = 0.24;
         const int StableSustainDeDenseHighBandStart = 58;
         const double StableSustainDeDenseHighBandExtra = 0.35;
+        const int SustainTextureMinStableFrames = 4;
+        const double SustainTextureMaxStepFrames = 0.85;
+        const int WaveformSustainMinOutputFrames = 8;
+        const double F0MismatchHighBandStart = 54;
+        const double F0MismatchMaxCutDb = 1.35;
+        const double F0MismatchMaxContrast = 0.18;
         const int PhraseEdgeMelFadeInFrames = 3;
         const int PhraseEdgeMelFadeOutFrames = 5;
         const double PhraseEdgeMelMinGain = 0.18;
         const int InactiveTailGuardFrames = 6;
         const double InactiveTailLogDrop = 2.8;
-        // At larger stretch ratios the source is "scanned" more slowly; if the slow-scanned source
-        // trajectory keeps a high weight, every micro-motion inside the vowel (formant drift,
-        // vibrato) gets stretched proportionally and the note audibly slows down. But freezing it
-        // too hard (very low blend) collapses the sustain to a near-static template, which the
-        // vocoder turns into a perfectly periodic, mechanical-sounding loop. 0.28 keeps enough real
-        // spectral motion to avoid the loop without bringing back the slow-down.
-        const double TemplateTrajectoryMinBlend = 0.28;
-        const double TemplateTrajectoryMaxBlend = 0.70;
         const double F0MelCompDbPerOctave = 0.95;
         const double F0MelCompHighBandExtra = 0.30;
         const double F0MelCompMaxCutDb = 2.4;
@@ -60,6 +54,7 @@ namespace OpenUtau.Core.HifiNeural {
         readonly HifiF0Builder f0Builder = new HifiF0Builder();
         readonly HifiMelPhraseAssembler melAssembler = new HifiMelPhraseAssembler();
         readonly IHifiMelEnhancer melEnhancer;
+        static readonly HifiMelExtractor sustainMelExtractor = new HifiMelExtractor();
 
         readonly record struct VowelMapReport(
             int LoopStartFrame,
@@ -78,8 +73,6 @@ namespace OpenUtau.Core.HifiNeural {
             double PeakFlux,
             double MedianFlux,
             string Reason);
-
-        readonly record struct StableSustainPool(int[] Frames, double MeanEnergy);
 
         public HifiRoughFeatureBuilder(IHifiMelEnhancer melEnhancer) {
             this.melEnhancer = melEnhancer;
@@ -630,6 +623,28 @@ namespace OpenUtau.Core.HifiNeural {
             int outputFrames,
             RenderPhone phone,
             float[] targetF0) {
+            return WritePhoneMappedSegment(
+                sourceMel,
+                sourceStart,
+                sourceFrames,
+                output,
+                outputStart,
+                outputFrames,
+                phone,
+                targetF0,
+                null);
+        }
+
+        internal static PhoneMapReport WritePhoneMappedSegment(
+            float[,] sourceMel,
+            int sourceStart,
+            int sourceFrames,
+            float[,] output,
+            int outputStart,
+            int outputFrames,
+            RenderPhone phone,
+            float[] targetF0,
+            float[]? sourceSamples) {
             double? consonantMs = EffectiveConsonantMs(phone);
             // VCV/CVVC timing has two important boundaries:
             // - preutter: the alignment point where the target vowel begins on the note grid.
@@ -689,7 +704,9 @@ namespace OpenUtau.Core.HifiNeural {
                 vowelTargetFrames,
                 targetF0,
                 phone.phoneme,
-                sourceVowelOnsetFrames);
+                sourceVowelOnsetFrames,
+                sourceSamples,
+                phone.tone);
 
             double consonantRatio = sourceConsonantFrames > 0
                 ? (targetConsonantFrames * HifiF0Builder.FrameMs) / Math.Max(SourceFrameMs, sourceConsonantFrames * SourceFrameMs)
@@ -864,7 +881,9 @@ namespace OpenUtau.Core.HifiNeural {
             int dstFrames,
             float[] targetF0,
             string phoneme,
-            int preferredOnsetFrames = -1) {
+            int preferredOnsetFrames = -1,
+            float[]? sourceSamples = null,
+            int sourceTone = 0) {
             if (dstFrames <= 0) {
                 return new VowelMapReport(0, 0, 0, 0, "empty_vowel_target", 0, 0, 0);
             }
@@ -890,7 +909,11 @@ namespace OpenUtau.Core.HifiNeural {
                     dstStart + targetOnsetFrames,
                     targetSustainFrames,
                     transientAnchor,
-                    allowMicroVariation: false);
+                    allowMicroVariation: false,
+                    sourceSamples: sourceSamples,
+                    targetF0: targetF0,
+                    targetF0Start: dstStart + targetOnsetFrames,
+                    sourceTone: sourceTone);
             }
             if (targetReleaseFrames > 0) {
                 WriteMappedRegion(
@@ -1172,7 +1195,11 @@ namespace OpenUtau.Core.HifiNeural {
             int outputStart,
             int outputFrames,
             TransientAnchorPlan transientAnchor,
-            bool allowMicroVariation) {
+            bool allowMicroVariation,
+            float[]? sourceSamples = null,
+            float[]? targetF0 = null,
+            int targetF0Start = 0,
+            int sourceTone = 0) {
             if (outputFrames <= 0) {
                 return false;
             }
@@ -1199,7 +1226,11 @@ namespace OpenUtau.Core.HifiNeural {
                 output,
                 outputStart,
                 outputFrames,
-                allowMicroVariation);
+                allowMicroVariation,
+                sourceSamples,
+                targetF0,
+                targetF0Start,
+                sourceTone);
         }
 
         static bool WriteSustainTemplateExtension(
@@ -1209,7 +1240,11 @@ namespace OpenUtau.Core.HifiNeural {
             float[,] output,
             int outputStart,
             int outputFrames,
-            bool allowMicroVariation) {
+            bool allowMicroVariation,
+            float[]? sourceSamples = null,
+            float[]? targetF0 = null,
+            int targetF0Start = 0,
+            int sourceTone = 0) {
             int bins = sourceMel.GetLength(0);
             int totalSourceFrames = sourceMel.GetLength(1);
             sourceStart = Math.Clamp(sourceStart, 0, Math.Max(0, totalSourceFrames - 1));
@@ -1222,6 +1257,10 @@ namespace OpenUtau.Core.HifiNeural {
                 WriteMappedRegion(sourceMel, sourceStart, sourceFrames, output, outputStart, outputFrames);
                 return false;
             }
+            if (outputFrames <= 2) {
+                WriteMappedRegion(sourceMel, sourceStart, sourceFrames, output, outputStart, outputFrames);
+                return true;
+            }
 
             int stableStart = sourceStart + Math.Max(0, sourceFrames / 5);
             int stableEnd = sourceStart + sourceFrames - Math.Max(0, sourceFrames / 5);
@@ -1230,62 +1269,81 @@ namespace OpenUtau.Core.HifiNeural {
                 stableEnd = sourceStart + sourceFrames;
             }
             int stableFrames = Math.Max(1, stableEnd - stableStart);
-            var stablePool = BuildStableSustainPool(sourceMel, stableStart, stableFrames);
-            if (stablePool.Frames.Length == 0) {
-                WriteMappedRegion(sourceMel, sourceStart, sourceFrames, output, outputStart, outputFrames);
+            if (stableFrames < SustainTextureMinStableFrames) {
+                WriteMappedRegionNaturalStretch(
+                    sourceMel,
+                    sourceStart,
+                    sourceFrames,
+                    output,
+                    outputStart,
+                    outputFrames,
+                    new TransientAnchorPlan(false, 0, 0, 0, 0, "sustain_texture_too_short"),
+                    allowMicroVariation);
                 return false;
             }
             double stretchRatio = SourceToTargetDurationRatio(sourceFrames, outputFrames);
-            double trajectoryBlend = ResolveTemplateTrajectoryBlend(stretchRatio);
-            int smoothRadius = Math.Clamp(sourceFrames / 5, 1, 10);
+            int directSmoothRadius = Math.Clamp(sourceFrames / 5, 1, 10);
+            int textureSmoothRadius = Math.Clamp(stableFrames / 10, 1, 3);
             int edgeFrames = ResolveSustainEdgeFrames(outputFrames);
-            var trajectoryFrame = new float[bins];
-            var poolFrame = new float[bins];
+            if (TryWriteWaveformSustainTexture(
+                    sourceMel,
+                    sourceSamples,
+                    sourceStart,
+                    sourceFrames,
+                    stableStart,
+                    stableFrames,
+                    output,
+                    outputStart,
+                    outputFrames,
+                    directSmoothRadius,
+                    edgeFrames,
+                    stretchRatio,
+                    allowMicroVariation,
+                    targetF0,
+                    targetF0Start,
+                    sourceTone)) {
+                return true;
+            }
             var directFrame = new float[bins];
-            var residualFrame = new float[bins];
+            var directContourFrame = new float[bins];
+            var textureFrame = new float[bins];
             double seed = SeedFromInts(sourceStart, outputFrames);
+            double previousTextureIndex = stableStart - sourceStart + (stableFrames - 1) * 0.5;
 
             for (int t = 0; t < outputFrames; t++) {
                 double u = outputFrames == 1 ? 0 : t / (double)(outputFrames - 1);
-                double anchorWeight = EdgeAnchorWeight(t, outputFrames, edgeFrames);
                 double sourceIndex = outputFrames == 1 || sourceFrames == 1
                     ? 0
                     : u * (sourceFrames - 1);
                 SampleInterpolatedFrame(sourceMel, sourceStart, sourceFrames, sourceIndex, directFrame);
-                SampleSmoothedFrame(sourceMel, sourceStart, sourceFrames, sourceIndex, smoothRadius, trajectoryFrame);
-                double sourceEnergy = FrameMean(trajectoryFrame) * (1.0 - anchorWeight) + FrameMean(directFrame) * anchorWeight;
-                double poolIndex = StablePoolIndex(u, t, stablePool.Frames.Length, seed);
-                SampleStablePoolFrame(sourceMel, stablePool.Frames, poolIndex, poolFrame);
-                double targetEnergy = ResolveSustainTargetEnergy(stablePool.MeanEnergy, sourceEnergy);
+                SampleSmoothedFrame(sourceMel, sourceStart, sourceFrames, sourceIndex, directSmoothRadius, directContourFrame);
+                double textureIndex = ResolveSustainTextureSourceIndex(
+                    t,
+                    outputFrames,
+                    stableStart - sourceStart,
+                    stableFrames,
+                    stretchRatio,
+                    seed);
+                if (t > 0) {
+                    textureIndex = LimitTextureIndexStep(previousTextureIndex, textureIndex, stretchRatio);
+                }
+                previousTextureIndex = textureIndex;
+                SampleSmoothedFrame(sourceMel, sourceStart, sourceFrames, textureIndex, textureSmoothRadius, textureFrame);
+
+                double targetEnergy = FrameMean(directContourFrame);
                 double currentEnergy = 0;
-                double textureAmount = ResolveResidualTextureAmount(t, outputFrames, edgeFrames, stretchRatio);
                 for (int m = 0; m < bins; m++) {
-                    float stableValue = poolFrame[m];
-                    float edgeValue = (float)(poolFrame[m] * (1.0 - trajectoryBlend) + trajectoryFrame[m] * trajectoryBlend);
-                    edgeValue = (float)(edgeValue * (1.0 - anchorWeight) + directFrame[m] * anchorWeight);
-                    float value = (float)(stableValue * (1.0 - anchorWeight) + edgeValue * anchorWeight);
-                    trajectoryFrame[m] = value;
-                    currentEnergy += value;
+                    currentEnergy += textureFrame[m];
                 }
                 currentEnergy /= Math.Max(1, bins);
                 double deDenseAmount = ResolveSustainDeDenseAmount(t, outputFrames, edgeFrames, stretchRatio);
                 if (deDenseAmount > 1e-6) {
-                    currentEnergy = ApplySustainSpectralDeDensity(trajectoryFrame, currentEnergy, deDenseAmount);
+                    currentEnergy = ApplySustainSpectralDeDensity(textureFrame, currentEnergy, deDenseAmount);
                 }
-                double residualMean = 0;
-                for (int m = 0; m < bins; m++) {
-                    float residual = (float)Math.Clamp(directFrame[m] - trajectoryFrame[m], -StableSustainResidualClamp, StableSustainResidualClamp);
-                    residualFrame[m] = residual;
-                    residualMean += residual;
-                }
-                residualMean /= Math.Max(1, bins);
                 float energyDelta = (float)Math.Clamp(targetEnergy - currentEnergy, -StableSustainEnergyClamp, StableSustainEnergyClamp);
-                // Deterministic, band-grouped spectral micro-variation. Faded out at the edges
-                // (where frames anchor to the real source) and ramped in with stretch so only
-                // genuinely held notes get it. Breaks the otherwise fixed period that the vocoder
-                // would render as a mechanical loop.
+                double coreWeight = SustainCoreTextureWeight(t, outputFrames, edgeFrames);
                 double microAmp = allowMicroVariation
-                    ? SustainMicroVarLogAmp * (1.0 - anchorWeight) * Math.Clamp(stretchRatio - 1.0, 0, 1)
+                    ? SustainMicroVarLogAmp * coreWeight * Math.Clamp(stretchRatio - 1.0, 0, 1)
                     : 0;
                 double framePhase = t * 0.20; // slow drift across the sustain
                 for (int m = 0; m < bins; m++) {
@@ -1295,23 +1353,184 @@ namespace OpenUtau.Core.HifiNeural {
                         double bandSeed = SeedFromInts(sourceStart, band);
                         micro = microAmp * SmoothWobble(framePhase, bandSeed);
                     }
-                    float residual = (float)((residualFrame[m] - residualMean) * textureAmount);
-                    output[m, outputStart + t] = trajectoryFrame[m] + energyDelta + residual + (float)micro;
+                    float textureValue = textureFrame[m] + energyDelta + (float)micro;
+                    output[m, outputStart + t] = directFrame[m] * (float)(1.0 - coreWeight) + textureValue * (float)coreWeight;
                 }
+                ApplySustainF0MelMismatchCompensation(
+                    output,
+                    outputStart + t,
+                    TargetF0At(targetF0, targetF0Start + t),
+                    sourceTone,
+                    coreWeight);
             }
-            SmoothInternalSustain(output, outputStart, outputFrames, strength: 0.16f);
+            SmoothInternalSustain(output, outputStart, outputFrames, strength: 0.10f);
 
             Log.Debug(
-                "HifiRoughFeatureBuilder sustain_stable_pool_extension source_frames={SourceFrames} output_frames={OutputFrames} stable_frames={StableFrames} pool_frames={PoolFrames} edge_frames={EdgeFrames} smooth_radius={SmoothRadius} trajectory_blend={TrajectoryBlend:F3} micro_variation={MicroVariation}",
+                "HifiRoughFeatureBuilder sustain_texture_trajectory source_frames={SourceFrames} output_frames={OutputFrames} stable_frames={StableFrames} edge_frames={EdgeFrames} direct_smooth_radius={DirectSmoothRadius} texture_smooth_radius={TextureSmoothRadius} micro_variation={MicroVariation}",
                 sourceFrames,
                 outputFrames,
                 stableFrames,
-                stablePool.Frames.Length,
                 edgeFrames,
-                smoothRadius,
-                trajectoryBlend,
+                directSmoothRadius,
+                textureSmoothRadius,
                 allowMicroVariation);
             return true;
+        }
+
+        static bool TryWriteWaveformSustainTexture(
+            float[,] sourceMel,
+            float[]? sourceSamples,
+            int sourceStart,
+            int sourceFrames,
+            int stableStart,
+            int stableFrames,
+            float[,] output,
+            int outputStart,
+            int outputFrames,
+            int directSmoothRadius,
+            int edgeFrames,
+            double stretchRatio,
+            bool allowMicroVariation,
+            float[]? targetF0,
+            int targetF0Start,
+            int sourceTone) {
+            if (sourceSamples == null
+                    || sourceSamples.Length < HifiMelExtractor.WinSize
+                    || outputFrames < WaveformSustainMinOutputFrames
+                    || stableFrames < SustainTextureMinStableFrames) {
+                return false;
+            }
+
+            int bins = sourceMel.GetLength(0);
+            var positions = new double[outputFrames];
+            double seed = SeedFromInts(sourceStart, outputFrames);
+            double previousTextureIndex = stableStart - sourceStart + (stableFrames - 1) * 0.5;
+            for (int t = 0; t < outputFrames; t++) {
+                double textureIndex = ResolveSustainTextureSourceIndex(
+                    t,
+                    outputFrames,
+                    stableStart - sourceStart,
+                    stableFrames,
+                    stretchRatio,
+                    seed);
+                if (t > 0) {
+                    textureIndex = LimitTextureIndexStep(previousTextureIndex, textureIndex, stretchRatio);
+                }
+                previousTextureIndex = textureIndex;
+                double absoluteSourceFrame = sourceStart + textureIndex;
+                positions[t] = Math.Clamp(MelFrameToSampleCenter(absoluteSourceFrame), 0, sourceSamples.Length - 1);
+            }
+
+            float[,] waveformTextureMel = sustainMelExtractor.ExtractAtPositions(sourceSamples, positions);
+            if (waveformTextureMel.GetLength(1) != outputFrames) {
+                return false;
+            }
+
+            var directFrame = new float[bins];
+            var directContourFrame = new float[bins];
+            var textureFrame = new float[bins];
+            for (int t = 0; t < outputFrames; t++) {
+                double u = outputFrames == 1 ? 0 : t / (double)(outputFrames - 1);
+                double sourceIndex = outputFrames == 1 || sourceFrames == 1
+                    ? 0
+                    : u * (sourceFrames - 1);
+                SampleInterpolatedFrame(sourceMel, sourceStart, sourceFrames, sourceIndex, directFrame);
+                SampleSmoothedFrame(sourceMel, sourceStart, sourceFrames, sourceIndex, directSmoothRadius, directContourFrame);
+                CopyMelColumn(waveformTextureMel, t, textureFrame);
+
+                double targetEnergy = FrameMean(directContourFrame);
+                double currentEnergy = FrameMean(textureFrame);
+                double deDenseAmount = ResolveSustainDeDenseAmount(t, outputFrames, edgeFrames, stretchRatio);
+                if (deDenseAmount > 1e-6) {
+                    currentEnergy = ApplySustainSpectralDeDensity(textureFrame, currentEnergy, deDenseAmount);
+                }
+                float energyDelta = (float)Math.Clamp(targetEnergy - currentEnergy, -StableSustainEnergyClamp, StableSustainEnergyClamp);
+                double coreWeight = SustainCoreTextureWeight(t, outputFrames, edgeFrames);
+                double microAmp = allowMicroVariation
+                    ? SustainMicroVarLogAmp * coreWeight * Math.Clamp(stretchRatio - 1.0, 0, 1)
+                    : 0;
+                double framePhase = t * 0.20;
+                for (int m = 0; m < bins; m++) {
+                    double micro = 0;
+                    if (microAmp > 1e-4) {
+                        int band = m * SustainMicroVarBands / Math.Max(1, bins);
+                        double bandSeed = SeedFromInts(sourceStart, band);
+                        micro = microAmp * SmoothWobble(framePhase, bandSeed);
+                    }
+                    float textureValue = textureFrame[m] + energyDelta + (float)micro;
+                    output[m, outputStart + t] = directFrame[m] * (float)(1.0 - coreWeight) + textureValue * (float)coreWeight;
+                }
+                ApplySustainF0MelMismatchCompensation(
+                    output,
+                    outputStart + t,
+                    TargetF0At(targetF0, targetF0Start + t),
+                    sourceTone,
+                    coreWeight);
+            }
+            SmoothInternalSustain(output, outputStart, outputFrames, strength: 0.08f);
+            Log.Debug(
+                "HifiRoughFeatureBuilder sustain_waveform_texture source_frames={SourceFrames} output_frames={OutputFrames} stable_frames={StableFrames} edge_frames={EdgeFrames} stretch_ratio={StretchRatio:F3} source_samples={SourceSamples}",
+                sourceFrames,
+                outputFrames,
+                stableFrames,
+                edgeFrames,
+                stretchRatio,
+                sourceSamples.Length);
+            return true;
+        }
+
+        static double MelFrameToSampleCenter(double frameIndex) {
+            return frameIndex * HifiMelExtractor.OriginHopSize + HifiMelExtractor.OriginHopSize * 0.5;
+        }
+
+        static void CopyMelColumn(float[,] mel, int frame, float[] output) {
+            int bins = mel.GetLength(0);
+            frame = Math.Clamp(frame, 0, Math.Max(0, mel.GetLength(1) - 1));
+            for (int m = 0; m < bins; m++) {
+                output[m] = mel[m, frame];
+            }
+        }
+
+        static float TargetF0At(float[]? targetF0, int frame) {
+            if (targetF0 == null || targetF0.Length == 0) {
+                return 0;
+            }
+            return targetF0[Math.Clamp(frame, 0, targetF0.Length - 1)];
+        }
+
+        static void ApplySustainF0MelMismatchCompensation(
+            float[,] output,
+            int frame,
+            float targetF0,
+            int sourceTone,
+            double strength) {
+            if (strength <= 1e-4 || sourceTone <= 0 || targetF0 < 55 || targetF0 > 1400 || !IsFinite(targetF0)) {
+                return;
+            }
+            double sourceF0 = MusicMath.ToneToFreq(sourceTone);
+            if (sourceF0 <= 0 || !IsFinite(sourceF0) || targetF0 <= sourceF0 * 1.06) {
+                return;
+            }
+
+            int bins = output.GetLength(0);
+            frame = Math.Clamp(frame, 0, Math.Max(0, output.GetLength(1) - 1));
+            double octaves = Math.Log(targetF0 / sourceF0, 2.0);
+            double highCutDb = Math.Clamp(octaves * 0.65, 0, F0MismatchMaxCutDb) * strength;
+            double contrast = Math.Clamp(octaves * 0.09, 0, F0MismatchMaxContrast) * strength;
+            double mean = FrameMean(output, frame);
+            double newMean = 0;
+            for (int m = 0; m < bins; m++) {
+                double highWeight = HighBandWeight(m, bins, (int)F0MismatchHighBandStart);
+                double value = mean + (output[m, frame] - mean) * (1.0 - contrast * (0.35 + 0.65 * highWeight));
+                value -= highCutDb * Math.Log(10.0) / 20.0 * highWeight;
+                output[m, frame] = (float)value;
+                newMean += value;
+            }
+            newMean /= Math.Max(1, bins);
+            float correction = (float)((mean - newMean) * 0.85);
+            for (int m = 0; m < bins; m++) {
+                output[m, frame] += correction;
+            }
         }
 
         static void SmoothInternalSustain(float[,] output, int outputStart, int outputFrames, float strength) {
@@ -1349,14 +1568,40 @@ namespace OpenUtau.Core.HifiNeural {
             return Math.Clamp(preferred, 1, maxEdgeFrames);
         }
 
-        static double ResolveTemplateTrajectoryBlend(double stretchRatio) {
-            if (!IsFinite(stretchRatio) || stretchRatio <= 1.0) {
-                return TemplateTrajectoryMaxBlend;
+        static double SustainCoreTextureWeight(int frame, int totalFrames, int edgeFrames) {
+            if (totalFrames <= 2 || edgeFrames <= 0) {
+                return 1.0;
             }
-            // Reach the min blend around ~2.5x stretch. Below that we keep more of the real source
-            // motion so moderately-held notes don't sound frozen/looped.
-            double amount = Math.Clamp((stretchRatio - 1.0) / 1.5, 0, 1);
-            return TemplateTrajectoryMaxBlend + (TemplateTrajectoryMinBlend - TemplateTrajectoryMaxBlend) * amount;
+            int distance = Math.Min(frame, totalFrames - 1 - frame);
+            if (distance >= edgeFrames) {
+                return 1.0;
+            }
+            return SmoothStep(distance / (double)Math.Max(1, edgeFrames));
+        }
+
+        static double ResolveSustainTextureSourceIndex(
+            int targetFrame,
+            int targetFrames,
+            int stableStart,
+            int stableFrames,
+            double stretchRatio,
+            double seed) {
+            if (stableFrames <= 1) {
+                return stableStart;
+            }
+            double stretch = Math.Clamp((stretchRatio - SustainTemplateStretchThreshold) / 3.0, 0, 1);
+            double center = stableStart + (stableFrames - 1) * 0.5;
+            double range = (stableFrames - 1) * (0.34 + 0.12 * stretch);
+            double slowPhase = targetFrame * (0.020 + 0.010 * stretch);
+            double fastPhase = targetFrame * (0.007 + 0.004 * stretch) + 1.73;
+            double wander = SmoothWobble(slowPhase, seed) * 0.72
+                + SmoothWobble(fastPhase, seed + 0.913) * 0.28;
+            return Math.Clamp(center + range * Math.Clamp(wander, -1.0, 1.0), stableStart, stableStart + stableFrames - 1);
+        }
+
+        static double LimitTextureIndexStep(double previous, double current, double stretchRatio) {
+            double maxStep = SustainTextureMaxStepFrames + Math.Clamp((stretchRatio - 2.0) * 0.08, 0, 0.35);
+            return previous + Math.Clamp(current - previous, -maxStep, maxStep);
         }
 
         static void SampleInterpolatedFrame(
@@ -1423,19 +1668,6 @@ namespace OpenUtau.Core.HifiNeural {
             return stableMeanEnergy + Math.Clamp(delta, -0.55, 0.16);
         }
 
-        static double ResolveResidualTextureAmount(int frame, int totalFrames, int edgeFrames, double stretchRatio) {
-            if (totalFrames < 32 || stretchRatio < 2.0 || edgeFrames <= 0) {
-                return 0;
-            }
-            int distance = Math.Min(frame, totalFrames - 1 - frame);
-            if (distance <= edgeFrames) {
-                return 0;
-            }
-            double interior = Math.Clamp((distance - edgeFrames) / (double)Math.Max(1, edgeFrames), 0, 1);
-            double stretch = Math.Clamp((stretchRatio - 2.0) / 2.0, 0, 1);
-            return StableSustainResidualAmp * SmoothStep(interior) * stretch;
-        }
-
         static double ResolveSustainDeDenseAmount(int frame, int totalFrames, int edgeFrames, double stretchRatio) {
             if (totalFrames < 32 || stretchRatio <= 1.6 || edgeFrames <= 0) {
                 return 0;
@@ -1494,101 +1726,6 @@ namespace OpenUtau.Core.HifiNeural {
             return sum / frame.Length;
         }
 
-        static StableSustainPool BuildStableSustainPool(float[,] sourceMel, int start, int frames) {
-            int totalFrames = sourceMel.GetLength(1);
-            if (totalFrames <= 0 || frames <= 0) {
-                return new StableSustainPool(Array.Empty<int>(), 0);
-            }
-            start = Math.Clamp(start, 0, Math.Max(0, totalFrames - 1));
-            frames = Math.Max(1, Math.Min(frames, totalFrames - start));
-
-            int margin = Math.Max(0, frames / 5);
-            int first = start + margin;
-            int end = start + frames - margin;
-            if (end <= first) {
-                first = start;
-                end = start + frames;
-            }
-
-            var candidates = new List<(int Frame, double Energy)>();
-            double maxEnergy = double.NegativeInfinity;
-            for (int frame = first; frame < end; frame++) {
-                double energy = FrameMean(sourceMel, frame);
-                if (!IsFinite(energy)) {
-                    continue;
-                }
-                candidates.Add((frame, energy));
-                maxEnergy = Math.Max(maxEnergy, energy);
-            }
-            if (candidates.Count == 0) {
-                return new StableSustainPool(Array.Empty<int>(), 0);
-            }
-
-            double floor = maxEnergy - StableSustainEnergyFloorLog;
-            var selected = candidates
-                .Where(candidate => candidate.Energy >= floor)
-                .OrderBy(candidate => candidate.Frame)
-                .ToList();
-            int minFrames = Math.Min(candidates.Count, Math.Max(4, Math.Min(8, candidates.Count)));
-            if (selected.Count < minFrames) {
-                selected = candidates
-                    .OrderByDescending(candidate => candidate.Energy)
-                    .Take(minFrames)
-                    .OrderBy(candidate => candidate.Frame)
-                    .ToList();
-            }
-            if (selected.Count > StableSustainPoolMaxFrames) {
-                selected = SelectEvenly(selected, StableSustainPoolMaxFrames);
-            }
-
-            double meanEnergy = selected.Average(candidate => candidate.Energy);
-            return new StableSustainPool(selected.Select(candidate => candidate.Frame).ToArray(), meanEnergy);
-        }
-
-        static List<(int Frame, double Energy)> SelectEvenly(List<(int Frame, double Energy)> frames, int count) {
-            if (frames.Count <= count) {
-                return frames;
-            }
-            var selected = new List<(int Frame, double Energy)>(count);
-            for (int i = 0; i < count; i++) {
-                int index = count == 1
-                    ? 0
-                    : (int)Math.Round(i * (frames.Count - 1) / (double)(count - 1));
-                selected.Add(frames[Math.Clamp(index, 0, frames.Count - 1)]);
-            }
-            return selected;
-        }
-
-        static double StablePoolIndex(double u, int targetFrame, int poolFrames, double seed) {
-            if (poolFrames <= 1) {
-                return 0;
-            }
-            double index = Math.Clamp(u, 0, 1) * (poolFrames - 1);
-            if (poolFrames > 3) {
-                index += 0.35 * SmoothWobble(targetFrame * 0.047, seed);
-            }
-            return Math.Clamp(index, 0, poolFrames - 1);
-        }
-
-        static void SampleStablePoolFrame(float[,] sourceMel, int[] poolFrames, double poolIndex, float[] output) {
-            int bins = sourceMel.GetLength(0);
-            if (poolFrames.Length == 0) {
-                Array.Clear(output, 0, output.Length);
-                return;
-            }
-            poolIndex = Math.Clamp(poolIndex, 0, Math.Max(0, poolFrames.Length - 1));
-            int leftIndex = (int)Math.Floor(poolIndex);
-            int rightIndex = Math.Min(poolFrames.Length - 1, leftIndex + 1);
-            float alpha = (float)(poolIndex - leftIndex);
-            int leftFrame = poolFrames[leftIndex];
-            int rightFrame = poolFrames[rightIndex];
-            for (int m = 0; m < bins; m++) {
-                float left = sourceMel[m, leftFrame];
-                float right = sourceMel[m, rightFrame];
-                output[m] = left + (right - left) * alpha;
-            }
-        }
-
         static double FrameMean(float[,] mel, int frame) {
             int bins = mel.GetLength(0);
             double sum = 0;
@@ -1596,18 +1733,6 @@ namespace OpenUtau.Core.HifiNeural {
                 sum += mel[m, frame];
             }
             return sum / Math.Max(1, bins);
-        }
-
-        static double EdgeAnchorWeight(int frame, int totalFrames, int edgeFrames) {
-            if (edgeFrames <= 0 || totalFrames <= 1) {
-                return 0;
-            }
-            int distance = Math.Min(frame, totalFrames - 1 - frame);
-            if (distance >= edgeFrames) {
-                return 0;
-            }
-            double edge = 1.0 - distance / (double)edgeFrames;
-            return 0.35 * SmoothStep(edge);
         }
 
         static TransientAnchorPlan DetectTransientAnchor(

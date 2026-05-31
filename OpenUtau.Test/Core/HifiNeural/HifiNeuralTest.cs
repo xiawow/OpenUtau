@@ -150,6 +150,106 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
+        public void SustainTextureTrajectoryAnchorsEdges() {
+            var method = typeof(HifiRoughFeatureBuilder)
+                .GetMethod(
+                    "WriteSustainTemplateExtension",
+                    BindingFlags.NonPublic | BindingFlags.Static,
+                    binder: null,
+                    types: new[] { typeof(float[,]), typeof(int), typeof(int), typeof(float[,]), typeof(int), typeof(int), typeof(bool) },
+                    modifiers: null);
+            Assert.NotNull(method);
+
+            var source = new float[HifiMelExtractor.NMels, 10];
+            for (int m = 0; m < source.GetLength(0); m++) {
+                for (int t = 0; t < source.GetLength(1); t++) {
+                    source[m, t] = -6f + m * 0.001f + t * 0.04f;
+                }
+            }
+            var output = new float[HifiMelExtractor.NMels, 40];
+
+            bool applied = (bool)method!.Invoke(null, new object[] { source, 0, 10, output, 0, 40, false })!;
+
+            Assert.True(applied);
+            Assert.Equal(source[0, 0], output[0, 0], 5);
+            Assert.Equal(source[0, 9], output[0, 39], 5);
+            foreach (float value in output) {
+                Assert.False(float.IsNaN(value));
+                Assert.False(float.IsInfinity(value));
+            }
+        }
+
+        [Fact]
+        public void WaveformSustainTextureWritesValidMelAndAnchorsEdges() {
+            var method = typeof(HifiRoughFeatureBuilder)
+                .GetMethod(
+                    "TryWriteWaveformSustainTexture",
+                    BindingFlags.NonPublic | BindingFlags.Static,
+                    binder: null,
+                    types: new[] {
+                        typeof(float[,]),
+                        typeof(float[]),
+                        typeof(int),
+                        typeof(int),
+                        typeof(int),
+                        typeof(int),
+                        typeof(float[,]),
+                        typeof(int),
+                        typeof(int),
+                        typeof(int),
+                        typeof(int),
+                        typeof(double),
+                        typeof(bool),
+                        typeof(float[]),
+                        typeof(int),
+                        typeof(int),
+                    },
+                    modifiers: null);
+            Assert.NotNull(method);
+
+            var sourceSamples = new float[HifiMelExtractor.SampleRate / 4];
+            for (int i = 0; i < sourceSamples.Length; i++) {
+                double carrier = Math.Sin(2.0 * Math.PI * 220.0 * i / HifiMelExtractor.SampleRate);
+                double slow = 0.8 + 0.15 * Math.Sin(2.0 * Math.PI * 5.0 * i / HifiMelExtractor.SampleRate);
+                sourceSamples[i] = (float)(0.12 * slow * carrier);
+            }
+            var sourceMel = new HifiMelExtractor().Extract(sourceSamples);
+            int sourceFrames = sourceMel.GetLength(1);
+            int stableStart = Math.Max(1, sourceFrames / 5);
+            int stableFrames = Math.Max(4, sourceFrames - stableStart * 2);
+            int outputFrames = sourceFrames * 3;
+            var output = new float[HifiMelExtractor.NMels, outputFrames];
+            var targetF0 = Enumerable.Repeat(880f, outputFrames).ToArray();
+
+            bool applied = (bool)method!.Invoke(null, new object[] {
+                sourceMel,
+                sourceSamples,
+                0,
+                sourceFrames,
+                stableStart,
+                stableFrames,
+                output,
+                0,
+                outputFrames,
+                3,
+                6,
+                3.0,
+                false,
+                targetF0,
+                0,
+                60,
+            })!;
+
+            Assert.True(applied);
+            Assert.Equal(sourceMel[0, 0], output[0, 0], 5);
+            Assert.Equal(sourceMel[0, sourceFrames - 1], output[0, outputFrames - 1], 5);
+            foreach (float value in output) {
+                Assert.False(float.IsNaN(value));
+                Assert.False(float.IsInfinity(value));
+            }
+        }
+
+        [Fact]
         public void VcvPreferredOnsetUsesConsonantBoundary() {
             var method = typeof(HifiRoughFeatureBuilder)
                 .GetMethod(
@@ -280,7 +380,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE", "none");
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT", "false");
                 string key = HifiRenderConfig.CacheKey();
-                Assert.Contains("v34-meldomainconcat-realmeta-f0melcomp-singleowner-dedense-noenergydrop-sustainenergy-postleveler-loud17", key);
+                Assert.Contains("v36-meldomainconcat-waveformsustain-f0mismatch-postleveler-loud17", key);
                 Assert.Contains("enhnone", key);
                 Assert.Contains("dbgFalse", key);
             } finally {
