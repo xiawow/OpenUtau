@@ -26,8 +26,6 @@ namespace OpenUtau.Core.HifiNeural {
         const double BoostStrength = 0.22;
         const double MaxCutDb = 5.5;
         const double MaxBoostDb = 1.2;
-        const double F0CutDbPerOctave = 0.9;
-        const double MaxF0CutDb = 2.7;
         const int PhoneStartNoBoostFrames = 4;
         const int PhraseEdgeNoBoostFrames = 5;
         const int SmoothHalfFrames = 4;
@@ -88,11 +86,6 @@ namespace OpenUtau.Core.HifiNeural {
                     if (quietDeficit > 0) {
                         gainDb += Math.Min(MaxBoostDb, quietDeficit * BoostStrength);
                     }
-                }
-
-                if (referenceF0 > 0 && voiced && frameF0[i] > referenceF0 * 1.04) {
-                    double octaves = Math.Log(frameF0[i] / referenceF0, 2.0);
-                    gainDb -= Math.Min(MaxF0CutDb, Math.Max(0, octaves) * F0CutDbPerOctave);
                 }
 
                 desiredGainDb[i] = Math.Clamp(gainDb, -MaxCutDb, MaxBoostDb);

@@ -9,8 +9,8 @@ namespace OpenUtau.Core.HifiNeural {
         const int MinSourceFrames = 8;
         const int MinVowelSourceFrames = 4;
         const int MinVowelTargetFrames = 1;
-        // Absolute ceiling on how many leading frames get F0-masked (noise excitation). ~5 frames
-        // at ~11.6ms/frame covers a plosive/fricative burst without reaching the vowel.
+        // Historical diagnostic ceiling for the old F0-mask span. The mask is not applied because
+        // this NSF vocoder treats F0=0 as silence.
         const int ConsonantF0MaskMaxFrames = 5;
         // Disabled by default: OpenUtau pitch curves already carry intentional vibrato.
         const bool EnableF0MicroJitter = false;
@@ -614,7 +614,7 @@ namespace OpenUtau.Core.HifiNeural {
             return output;
         }
 
-        internal readonly record struct PhoneMapReport(bool SplitApplied, string Strategy, int ConsonantTargetFrames);
+        internal readonly record struct PhoneMapReport(bool SplitApplied, string Strategy, int FixedTargetFrames, int F0MaskFrames);
 
         internal static PhoneMapReport WritePhoneMappedSegment(
             float[,] sourceMel,
@@ -669,16 +669,16 @@ namespace OpenUtau.Core.HifiNeural {
             int sourceVowelOnsetFrames = Math.Max(0, sourceStableStartFrames - sourceConsonantFrames);
             if (outputFrames <= 2) {
                 WriteCompactPhoneRegion(sourceMel, sourceStart, sourceFrames, output, outputStart, outputFrames, sourceConsonantFrames);
-                return new PhoneMapReport(false, "compact_short_target", 0);
+                return new PhoneMapReport(false, "compact_short_target", 0, 0);
             }
             if (sourceFrames < MinSourceFrames) {
                 WriteMappedRegion(sourceMel, sourceStart, sourceFrames, output, outputStart, outputFrames);
-                return new PhoneMapReport(false, "simple_short_source", 0);
+                return new PhoneMapReport(false, "simple_short_source", 0, 0);
             }
             int vowelSourceFrames = sourceFrames - sourceConsonantFrames;
             if (vowelSourceFrames < MinVowelSourceFrames) {
                 WriteMappedRegion(sourceMel, sourceStart, sourceFrames, output, outputStart, outputFrames);
-                return new PhoneMapReport(false, "simple_no_vowel_room", 0);
+                return new PhoneMapReport(false, "simple_no_vowel_room", 0, 0);
             }
 
             // Target-axis fixed length uses the SAME preutter boundary as the source fixed split.
@@ -734,7 +734,7 @@ namespace OpenUtau.Core.HifiNeural {
             // source and the note sounded muffled/"dead". So we only mask the leading pure-consonant
             // portion, bounded by min(preutter, consonant) and kept strictly inside the region.
             int f0MaskFrames = ResolveConsonantF0MaskFrames(phone, consonantMs, targetConsonantFrames);
-            return new PhoneMapReport(true, vowelMap.Strategy, f0MaskFrames);
+            return new PhoneMapReport(true, vowelMap.Strategy, targetConsonantFrames, f0MaskFrames);
         }
 
         static int[] BuildPhoneStarts(RenderPhrase phrase, double phraseStartMs, int totalFrames, double frameMs) {
@@ -2077,11 +2077,9 @@ namespace OpenUtau.Core.HifiNeural {
             if (phone.oto == null || phone.oto.Consonant <= 0) {
                 return null;
             }
-            // The oto Consonant marks the fixed (non-stretched) region: the leading vowel tail,
-            // the consonant, and the onset of the target vowel. It is almost always LONGER than
-            // preutter (which is only the timing-alignment lead), so we must NOT clamp it down to
-            // preutter; doing that pushed the consonant/transition into the vowel stretch region,
-            // which is exactly why long Japanese-VCV notes audibly stretched their consonants.
+            // The oto Consonant marks where the stable vowel starts. The fixed alignment span is
+            // still based on preutter; the preutter->consonant interval is treated as vowel onset
+            // and kept near its source duration before the stable sustain absorbs most scaling.
             double consonantMs = phone.oto.Consonant;
             double durationCapMs = Math.Max(HifiF0Builder.FrameMs * 3.0, phone.durationMs * 0.80);
             if (durationCapMs > 0 && consonantMs > durationCapMs) {
@@ -2193,6 +2191,7 @@ namespace OpenUtau.Core.HifiNeural {
 
             metadata.Phones.AddRange(assemblyReport.Phones);
             metadata.Boundaries.AddRange(assemblyReport.Boundaries);
+            metadata.PhoneDiagnostics.AddRange(assemblyReport.PhoneDiagnostics);
             return metadata;
         }
 

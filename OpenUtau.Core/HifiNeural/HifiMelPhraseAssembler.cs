@@ -31,17 +31,16 @@ namespace OpenUtau.Core.HifiNeural {
             public int StartFrame;
             public int FrameCount;
             public int OverlapFramesWithPrev;
-            public int ConsonantFrames;
+            public int FixedFrames;
             public string Strategy = string.Empty;
+            public HifiPhoneFeatureDiagnostic? Diagnostic;
         }
 
         /// <summary>
         /// Build the full phrase mel [NMels, targetFrames] from per-phone source slices.
-        /// <paramref name="consonantFrameRanges"/> receives, per phone that has a fixed consonant
-        /// region, the absolute phrase frame span [start, end) of that consonant — used by the
-        /// caller to mask F0 to 0 there (the NSF vocoder then drives the consonant with noise
-        /// excitation instead of harmonic, which is correct for unvoiced consonants and avoids the
-        /// buzzy/stretched feel on Japanese-VCV consonants).
+        /// The assembly report records each phone's fixed leading span for diagnostics only.
+        /// HIFI-NEURA does not zero F0 on consonants because this NSF vocoder treats F0=0 as
+        /// silence, not noise excitation.
         /// </summary>
         public float[,] Build(
             RenderPhrase phrase,
@@ -76,12 +75,15 @@ namespace OpenUtau.Core.HifiNeural {
             AssembleWithOverlapCrossfade(output, segments, targetFrames);
             BuildAssemblyReport(segments, targetFrames, phraseStartMs, report);
             foreach (var seg in segments) {
-                if (seg.ConsonantFrames > 0) {
+                if (seg.FixedFrames > 0) {
                     int start = Math.Clamp(seg.StartFrame, 0, targetFrames);
-                    int end = Math.Clamp(seg.StartFrame + seg.ConsonantFrames, start, targetFrames);
+                    int end = Math.Clamp(seg.StartFrame + seg.FixedFrames, start, targetFrames);
                     if (end > start) {
                         report.ConsonantFrameRanges.Add((start, end));
                     }
+                }
+                if (seg.Diagnostic != null) {
+                    report.PhoneDiagnostics.Add(seg.Diagnostic);
                 }
             }
             LogSummary(phrase, segments, targetFrames);
@@ -155,6 +157,16 @@ namespace OpenUtau.Core.HifiNeural {
                 phone,
                 localTargetF0,
                 sourceSamples);
+            var diagnostic = HifiClickDiagnostic.BuildPhoneFeatureDiagnostic(
+                phoneIndex,
+                phone.phoneme,
+                startFrame,
+                frameCount,
+                sourceSamples,
+                sourceMel,
+                phoneMel,
+                localTargetF0,
+                report.Strategy);
 
             return new PhoneMelSegment {
                 PhoneIndex = phoneIndex,
@@ -163,8 +175,9 @@ namespace OpenUtau.Core.HifiNeural {
                 Mel = phoneMel,
                 StartFrame = startFrame,
                 FrameCount = frameCount,
-                ConsonantFrames = report.ConsonantTargetFrames,
+                FixedFrames = report.FixedTargetFrames,
                 Strategy = report.Strategy,
+                Diagnostic = diagnostic,
             };
         }
 
@@ -249,7 +262,7 @@ namespace OpenUtau.Core.HifiNeural {
         /// Equal-power cross-fade between two log-mel values at normalized position u in [0,1],
         /// where u=0 is fully the previous (old) value and u=1 is fully the new value. The blend is
         /// done in the linear power domain (exp of log-mel) so a cross-fade between two equal-energy
-        /// voiced segments preserves energy through the overlap — this is what keeps VCV/CVVC vowel
+        /// voiced segments preserves energy through the overlap; this keeps VCV/CVVC vowel
         /// boundaries from dipping or jumping under stretch.
         /// </summary>
         internal static double CrossfadeProgress(int overlapOffset, int overlapFrames) {

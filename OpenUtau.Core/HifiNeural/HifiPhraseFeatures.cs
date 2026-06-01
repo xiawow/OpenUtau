@@ -82,5 +82,6 @@ namespace OpenUtau.Core.HifiNeural {
         public List<HifiPhoneMetadata> Phones { get; } = new List<HifiPhoneMetadata>();
         public List<HifiBoundaryMetadata> Boundaries { get; } = new List<HifiBoundaryMetadata>();
         public List<(int Start, int End)> ConsonantFrameRanges { get; } = new List<(int Start, int End)>();
+        public List<HifiPhoneFeatureDiagnostic> PhoneDiagnostics { get; } = new List<HifiPhoneFeatureDiagnostic>();
     }
 }

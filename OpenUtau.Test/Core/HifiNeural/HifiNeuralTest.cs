@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.Serialization;
 using OpenUtau.Core.HifiNeural;
 using OpenUtau.Core.Render;
 using OpenUtau.Core.Util;
@@ -349,6 +350,22 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
+        public void F0FallbackChoosesNearestNoteInsteadOfFirstNote() {
+            var method = typeof(HifiF0Builder)
+                .GetMethod("NearestNoteAt", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.NotNull(method);
+            var notes = new[] {
+                CreateRenderNoteForFallback(60, 0, 500),
+                CreateRenderNoteForFallback(67, 1000, 1500),
+            };
+
+            var note = (RenderNote?)method!.Invoke(null, new object[] { notes, 1200.0 });
+
+            Assert.NotNull(note);
+            Assert.Equal(67, note!.tone);
+        }
+
+        [Fact]
         public void LoudnessNormalizerBoostsQuietActiveAudioWithoutClipping() {
             var samples = new float[HifiMelExtractor.SampleRate / 2];
             for (int i = 0; i < samples.Length; i++) {
@@ -381,7 +398,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
-        public void PostVocoderLevelerAppliesConservativeHighF0Attenuation() {
+        public void PostVocoderLevelerDoesNotCutEqualLoudnessSolelyByF0() {
             int sampleRate = HifiMelExtractor.SampleRate;
             var samples = new float[sampleRate * 2];
             for (int i = 0; i < samples.Length; i++) {
@@ -398,8 +415,8 @@ namespace OpenUtau.Core.Test.HifiNeural {
 
             double lowF0Db = SegmentRmsDb(samples, sampleRate / 4, sampleRate / 2);
             double highF0Db = SegmentRmsDb(samples, sampleRate + sampleRate / 4, sampleRate / 2);
-            Assert.True(report.MinGainDb < -0.5);
-            Assert.True(highF0Db < lowF0Db - 0.4, $"expected high-f0 attenuation, low={lowF0Db:F2}dB high={highF0Db:F2}dB");
+            Assert.True(Math.Abs(report.MinGainDb) < 0.05);
+            Assert.True(Math.Abs(highF0Db - lowF0Db) < 0.15, $"expected no f0-only attenuation, low={lowF0Db:F2}dB high={highF0Db:F2}dB");
         }
 
         [Fact]
@@ -410,7 +427,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE", "none");
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT", "false");
                 string key = HifiRenderConfig.CacheKey();
-                Assert.Contains("v39-meldomainconcat-waveformsustain-naturalrate-pruned-postleveler-loud17", key);
+                Assert.Contains("v40-meldomainconcat-waveformsustain-naturalrate-f0fallback-postleveler-loud17", key);
                 Assert.Contains("enhnone", key);
                 Assert.Contains("dbgFalse", key);
             } finally {
@@ -511,6 +528,21 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 Assert.True(cur >= low - 1e-3 && cur <= high + 1e-3, $"out of range at u={u}: {cur}");
                 prev = cur;
             }
+        }
+
+        static RenderNote CreateRenderNoteForFallback(int tone, double positionMs, double endMs) {
+            var note = (RenderNote)FormatterServices.GetUninitializedObject(typeof(RenderNote));
+            SetReadonlyField(note, "tone", tone);
+            SetReadonlyField(note, "adjustedTone", 0f);
+            SetReadonlyField(note, "positionMs", positionMs);
+            SetReadonlyField(note, "endMs", endMs);
+            return note;
+        }
+
+        static void SetReadonlyField(object target, string fieldName, object value) {
+            var field = target.GetType().GetField(fieldName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            Assert.NotNull(field);
+            field!.SetValue(target, value);
         }
     }
 }

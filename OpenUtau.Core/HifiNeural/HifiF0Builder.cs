@@ -29,8 +29,29 @@ namespace OpenUtau.Core.HifiNeural {
                 double alpha = index - left;
                 return (phrase.pitches[left] + (phrase.pitches[right] - phrase.pitches[left]) * alpha) * 0.01;
             }
-            var note = phrase.notes.LastOrDefault(n => posMs >= n.positionMs && posMs < n.endMs) ?? phrase.notes.FirstOrDefault();
+            var note = phrase.notes.LastOrDefault(n => posMs >= n.positionMs && posMs < n.endMs)
+                ?? NearestNoteAt(phrase.notes, posMs);
             return note?.adjustedTone ?? note?.tone ?? 0;
+        }
+
+        static RenderNote? NearestNoteAt(RenderNote[] notes, double posMs) {
+            if (notes.Length == 0) {
+                return null;
+            }
+            RenderNote? best = null;
+            double bestDistance = double.PositiveInfinity;
+            foreach (var note in notes) {
+                double distance = posMs < note.positionMs
+                    ? note.positionMs - posMs
+                    : posMs > note.endMs
+                        ? posMs - note.endMs
+                        : 0;
+                if (distance < bestDistance) {
+                    best = note;
+                    bestDistance = distance;
+                }
+            }
+            return best;
         }
     }
 }
