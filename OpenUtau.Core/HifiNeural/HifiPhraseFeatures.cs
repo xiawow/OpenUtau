@@ -35,6 +35,20 @@ namespace OpenUtau.Core.HifiNeural {
         public int FrameCount { get; init; }
         public double SourceSkipOverMs { get; init; }
         public int SourceStartOffsetFrames { get; init; }
+        public HifiPhoneParameterMetadata Parameters { get; init; } = new HifiPhoneParameterMetadata();
+    }
+
+    public sealed class HifiPhoneParameterMetadata {
+        public double Gender { get; init; }
+        public double Breathiness { get; init; }
+        public double Tension { get; init; }
+        public double Voicing { get; init; } = 100;
+        public double GenderKeyShiftSemitones { get; init; }
+        public double BreathNoiseGain { get; init; } = 1;
+        public double VoicingGain { get; init; } = 1;
+        public bool HnsepRequested { get; init; }
+        public bool HnsepApplied { get; init; }
+        public string HnsepReason { get; init; } = string.Empty;
     }
 
     public sealed class HifiNoteMetadata {

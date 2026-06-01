@@ -1,0 +1,363 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Numerics;
+using System.Text;
+using K4os.Hash.xxHash;
+using OpenUtau.Core.Render;
+using OpenUtau.Core.Util;
+using Serilog;
+
+namespace OpenUtau.Core.HifiNeural {
+    public sealed class HifiHnsepSourceCache {
+        readonly Dictionary<string, HifiHnsepResult?> cache = new(StringComparer.OrdinalIgnoreCase);
+        HifiHnsepOnnx? model;
+        bool modelResolved;
+        bool missingLogged;
+        string lastFailureReason = string.Empty;
+
+        public string LastFailureReason => lastFailureReason;
+
+        public bool TryGet(string sourcePath, float[] fullSamples, out HifiHnsepResult result) {
+            result = null!;
+            if (fullSamples.Length == 0) {
+                lastFailureReason = "empty_source";
+                return false;
+            }
+            if (!modelResolved) {
+                modelResolved = true;
+                if (!HifiHnsepOnnx.TryCreate(out model, out var diagnostic)) {
+                    Log.Information("Hifi HNSEP disabled: {Diagnostic}", diagnostic);
+                    lastFailureReason = "model_unavailable:" + diagnostic;
+                    missingLogged = true;
+                }
+            }
+            if (model == null) {
+                if (!missingLogged) {
+                    Log.Information("Hifi HNSEP disabled: model not available.");
+                    missingLogged = true;
+                }
+                if (string.IsNullOrWhiteSpace(lastFailureReason)) {
+                    lastFailureReason = "model_unavailable";
+                }
+                return false;
+            }
+
+            string key = CacheKey(sourcePath, fullSamples.Length);
+            if (!cache.TryGetValue(key, out var cached)) {
+                string diskPath = HifiHnsepDiskCache.GetPath(key);
+                if (!HifiHnsepDiskCache.TryLoad(diskPath, fullSamples.Length, out cached)) {
+                    try {
+                        cached = model.Separate(fullSamples);
+                        HifiHnsepDiskCache.TrySave(diskPath, cached);
+                    } catch (Exception e) {
+                        Log.Warning(e, "Hifi HNSEP separation failed source={Source}", sourcePath);
+                        lastFailureReason = "separation_failed:" + e.GetType().Name + ":" + e.Message;
+                        cached = null;
+                    }
+                }
+                cache[key] = cached;
+            }
+            if (cached == null || cached.Harmonic.Length != fullSamples.Length) {
+                if (cached != null) {
+                    lastFailureReason = $"separation_length_mismatch:source={fullSamples.Length}:harmonic={cached.Harmonic.Length}";
+                } else if (string.IsNullOrWhiteSpace(lastFailureReason)) {
+                    lastFailureReason = "separation_failed";
+                }
+                return false;
+            }
+            lastFailureReason = string.Empty;
+            result = cached;
+            return true;
+        }
+
+        static string CacheKey(string sourcePath, int length) {
+            try {
+                var info = new FileInfo(sourcePath);
+                return $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}|samples={length}|{HifiHnsepOnnx.CacheKeyOrDisabled()}";
+            } catch {
+                return $"{sourcePath}|samples={length}|{HifiHnsepOnnx.CacheKeyOrDisabled()}";
+            }
+        }
+    }
+
+    public readonly record struct HifiHnsepProcessingReport(
+        bool Requested,
+        bool Applied,
+        string Reason);
+
+    public static class HifiHnsepDiskCache {
+        const string Magic = "HNSP1";
+
+        public static string GetPath(string key) {
+            string hash = $"{XXH64.DigestOf(Encoding.UTF8.GetBytes(key)):x16}";
+            return Path.Combine(PathManager.Inst.CachePath, "hifi-hnsep", $"{hash}.f32");
+        }
+
+        public static bool TryLoad(string path, int expectedLength, out HifiHnsepResult? result) {
+            result = null;
+            try {
+                if (!File.Exists(path)) {
+                    return false;
+                }
+                using var stream = File.OpenRead(path);
+                using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: false);
+                if (reader.ReadString() != Magic) {
+                    return false;
+                }
+                int length = reader.ReadInt32();
+                if (length != expectedLength || length < 0) {
+                    return false;
+                }
+                var harmonic = new float[length];
+                for (int i = 0; i < harmonic.Length; i++) {
+                    harmonic[i] = reader.ReadSingle();
+                }
+                result = new HifiHnsepResult { Harmonic = harmonic };
+                Log.Debug("Hifi HNSEP source cache hit path={Path} samples={Samples}", path, length);
+                return true;
+            } catch (Exception e) {
+                Log.Warning(e, "Failed to read Hifi HNSEP source cache path={Path}", path);
+                result = null;
+                return false;
+            }
+        }
+
+        public static void TrySave(string path, HifiHnsepResult? result) {
+            if (result == null || result.Harmonic.Length == 0) {
+                return;
+            }
+            try {
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                string tempPath = path + ".tmp";
+                using (var stream = File.Open(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                using (var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: false)) {
+                    writer.Write(Magic);
+                    writer.Write(result.Harmonic.Length);
+                    for (int i = 0; i < result.Harmonic.Length; i++) {
+                        float value = result.Harmonic[i];
+                        writer.Write(float.IsFinite(value) ? value : 0f);
+                    }
+                }
+                if (File.Exists(path)) {
+                    File.Delete(path);
+                }
+                File.Move(tempPath, path);
+                Log.Debug("Hifi HNSEP source cache saved path={Path} samples={Samples}", path, result.Harmonic.Length);
+            } catch (Exception e) {
+                Log.Warning(e, "Failed to write Hifi HNSEP source cache path={Path}", path);
+            }
+        }
+    }
+
+    public static class HifiHnsepSourceProcessor {
+        const int TensionNfft = HifiMelExtractor.Nfft;
+        const int TensionHop = HifiOnnxVocoder.HopSize;
+
+        public static float[] Apply(
+            RenderPhone phone,
+            string sourcePath,
+            float[] fullSamples,
+            float[] sourceSlice,
+            HifiFrameParameterAverages parameters,
+            HifiHnsepSourceCache cache,
+            out HifiHnsepProcessingReport report) {
+            if (!parameters.NeedsHnsep || sourceSlice.Length == 0) {
+                report = new HifiHnsepProcessingReport(false, false, "neutral_parameters_or_empty_slice");
+                return sourceSlice;
+            }
+            if (!cache.TryGet(sourcePath, fullSamples, out var separated)) {
+                string reason = string.IsNullOrWhiteSpace(cache.LastFailureReason)
+                    ? "no_model_or_separation_failed"
+                    : cache.LastFailureReason;
+                Log.Debug(
+                    "Hifi HNSEP parameters skipped phoneme={Phoneme} brec={Brec:F2} voic={Voic:F2} tenc={Tenc:F2} reason={Reason}",
+                    phone.phoneme,
+                    parameters.Breathiness,
+                    parameters.Voicing,
+                    parameters.Tension,
+                    reason);
+                report = new HifiHnsepProcessingReport(true, false, reason);
+                return sourceSlice;
+            }
+
+            float[] harmonic = HifiMelPhraseAssembler.SliceWithOto(separated.Harmonic, phone);
+            if (harmonic.Length != sourceSlice.Length) {
+                Log.Warning(
+                    "Hifi HNSEP slice length mismatch phoneme={Phoneme} source={SourceLength} harmonic={HarmonicLength}",
+                    phone.phoneme,
+                    sourceSlice.Length,
+                    harmonic.Length);
+                report = new HifiHnsepProcessingReport(true, false, "slice_length_mismatch");
+                return sourceSlice;
+            }
+
+            if (Math.Abs(parameters.Tension) > 0.5) {
+                ApplyTensionInPlace(harmonic, parameters.Tension);
+            }
+
+            var output = new float[sourceSlice.Length];
+            double noiseGain = parameters.BreathNoiseGain;
+            double harmonicGain = parameters.VoicingGain;
+            for (int i = 0; i < output.Length; i++) {
+                double noise = sourceSlice[i] - harmonic[i];
+                output[i] = (float)(noise * noiseGain + harmonic[i] * harmonicGain);
+            }
+            LimitPeakInPlace(output);
+            Log.Debug(
+                "Hifi HNSEP applied phoneme={Phoneme} brec={Brec:F2} noise_gain={NoiseGain:F3} voic={Voic:F2} harmonic_gain={HarmonicGain:F3} tenc={Tenc:F2}",
+                phone.phoneme,
+                parameters.Breathiness,
+                noiseGain,
+                parameters.Voicing,
+                harmonicGain,
+                parameters.Tension);
+            report = new HifiHnsepProcessingReport(true, true, "applied");
+            return output;
+        }
+
+        static void ApplyTensionInPlace(float[] harmonic, double tension) {
+            double b = -Math.Clamp(tension, -100.0, 100.0) / 50.0;
+            if (Math.Abs(b) <= 1e-6 || harmonic.Length <= 1) {
+                return;
+            }
+            var filtered = ApplyHifisamplerStyleSpectralTension(harmonic, b);
+            for (int i = 0; i < harmonic.Length; i++) {
+                harmonic[i] = filtered[i];
+            }
+            LimitPeakInPlace(harmonic);
+        }
+
+        static float[] ApplyHifisamplerStyleSpectralTension(float[] wave, double b) {
+            int originalLength = wave.Length;
+            int centerPad = TensionNfft / 2;
+            int paddedLength = centerPad * 2 + Math.Max(1, originalLength);
+            int frames = Math.Max(1, 1 + Math.Max(0, paddedLength - TensionNfft) / TensionHop);
+            int requiredLength = (frames - 1) * TensionHop + TensionNfft;
+            var padded = new float[requiredLength];
+            Array.Copy(wave, 0, padded, centerPad, wave.Length);
+
+            var output = new double[requiredLength];
+            var windowSum = new double[requiredLength];
+            var fft = new Complex[TensionNfft];
+            var window = TensionWindow.Value;
+            int bins = TensionNfft / 2 + 1;
+            double x0 = bins / ((HifiMelExtractor.SampleRate / 2.0) / 1500.0);
+
+            for (int frame = 0; frame < frames; frame++) {
+                Array.Clear(fft, 0, fft.Length);
+                int start = frame * TensionHop;
+                for (int i = 0; i < TensionNfft; i++) {
+                    fft[i] = new Complex(padded[start + i] * window[i], 0);
+                }
+                ForwardFft(fft, inverse: false);
+
+                for (int k = 0; k < bins; k++) {
+                    double amp = fft[k].Magnitude;
+                    double filter = Math.Clamp((-b / x0) * k + b, -2.0, 2.0);
+                    double newAmp = Math.Exp(Math.Log(Math.Max(amp, 1e-9)) + filter);
+                    double phase = Math.Atan2(fft[k].Imaginary, fft[k].Real);
+                    fft[k] = Complex.FromPolarCoordinates(newAmp, phase);
+                }
+                for (int k = 1; k < bins - 1; k++) {
+                    fft[TensionNfft - k] = Complex.Conjugate(fft[k]);
+                }
+
+                ForwardFft(fft, inverse: true);
+                for (int i = 0; i < TensionNfft; i++) {
+                    double w = window[i];
+                    output[start + i] += fft[i].Real * w;
+                    windowSum[start + i] += w * w;
+                }
+            }
+
+            var result = new float[originalLength];
+            for (int i = 0; i < result.Length; i++) {
+                int src = i + centerPad;
+                double value = output[src];
+                if (windowSum[src] > 1e-9) {
+                    value /= windowSum[src];
+                }
+                result[i] = (float)value;
+            }
+
+            double originalMax = Peak(wave);
+            double filteredMax = Peak(result);
+            if (originalMax > 1e-8 && filteredMax > 1e-8) {
+                double extraGain = Math.Clamp(b / -15.0, 0.0, 0.33) + 1.0;
+                double gain = originalMax / filteredMax * extraGain;
+                for (int i = 0; i < result.Length; i++) {
+                    result[i] = (float)(result[i] * gain);
+                }
+            }
+            return result;
+        }
+
+        static readonly Lazy<float[]> TensionWindow = new(() => {
+            var window = new float[TensionNfft];
+            for (int i = 0; i < window.Length; i++) {
+                window[i] = (float)(0.5 - 0.5 * Math.Cos(2.0 * Math.PI * i / window.Length));
+            }
+            return window;
+        });
+
+        static void ForwardFft(Complex[] buffer, bool inverse) {
+            int n = buffer.Length;
+            for (int i = 1, j = 0; i < n; i++) {
+                int bit = n >> 1;
+                for (; (j & bit) != 0; bit >>= 1) {
+                    j ^= bit;
+                }
+                j ^= bit;
+                if (i < j) {
+                    (buffer[i], buffer[j]) = (buffer[j], buffer[i]);
+                }
+            }
+            for (int len = 2; len <= n; len <<= 1) {
+                double angle = 2.0 * Math.PI / len * (inverse ? 1 : -1);
+                var wlen = new Complex(Math.Cos(angle), Math.Sin(angle));
+                for (int i = 0; i < n; i += len) {
+                    var w = Complex.One;
+                    for (int j = 0; j < len / 2; j++) {
+                        var u = buffer[i + j];
+                        var v = buffer[i + j + len / 2] * w;
+                        buffer[i + j] = u + v;
+                        buffer[i + j + len / 2] = u - v;
+                        w *= wlen;
+                    }
+                }
+            }
+            if (inverse) {
+                for (int i = 0; i < n; i++) {
+                    buffer[i] /= n;
+                }
+            }
+        }
+
+        static double Peak(float[] samples) {
+            double peak = 0;
+            for (int i = 0; i < samples.Length; i++) {
+                peak = Math.Max(peak, Math.Abs(samples[i]));
+            }
+            return peak;
+        }
+
+        static void LimitPeakInPlace(float[] samples) {
+            double peak = 0;
+            for (int i = 0; i < samples.Length; i++) {
+                if (float.IsNaN(samples[i]) || float.IsInfinity(samples[i])) {
+                    samples[i] = 0;
+                    continue;
+                }
+                peak = Math.Max(peak, Math.Abs(samples[i]));
+            }
+            if (peak <= 1.0 || peak <= 1e-9) {
+                return;
+            }
+            double gain = 1.0 / peak;
+            for (int i = 0; i < samples.Length; i++) {
+                samples[i] = (float)(samples[i] * gain);
+            }
+        }
+    }
+}

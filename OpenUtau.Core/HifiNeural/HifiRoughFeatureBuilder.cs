@@ -634,7 +634,8 @@ namespace OpenUtau.Core.HifiNeural {
                 outputFrames,
                 phone,
                 targetF0,
-                null);
+                null,
+                0);
         }
 
         internal static PhoneMapReport WritePhoneMappedSegment(
@@ -646,7 +647,8 @@ namespace OpenUtau.Core.HifiNeural {
             int outputFrames,
             RenderPhone phone,
             float[] targetF0,
-            float[]? sourceSamples) {
+            float[]? sourceSamples,
+            double sourceKeyShiftSemitones = 0) {
             double? consonantMs = EffectiveConsonantMs(phone);
             // VCV/CVVC timing has two important boundaries:
             // - preutter: the alignment point where the target vowel begins on the note grid.
@@ -708,7 +710,8 @@ namespace OpenUtau.Core.HifiNeural {
                 phone.phoneme,
                 sourceVowelOnsetFrames,
                 sourceSamples,
-                phone.tone);
+                phone.tone,
+                sourceKeyShiftSemitones);
 
             double consonantRatio = sourceConsonantFrames > 0
                 ? (targetConsonantFrames * HifiF0Builder.FrameMs) / Math.Max(SourceFrameMs, sourceConsonantFrames * SourceFrameMs)
@@ -885,7 +888,8 @@ namespace OpenUtau.Core.HifiNeural {
             string phoneme,
             int preferredOnsetFrames = -1,
             float[]? sourceSamples = null,
-            int sourceTone = 0) {
+            int sourceTone = 0,
+            double sourceKeyShiftSemitones = 0) {
             if (dstFrames <= 0) {
                 return new VowelMapReport(0, 0, 0, 0, "empty_vowel_target", 0, 0, 0);
             }
@@ -915,7 +919,8 @@ namespace OpenUtau.Core.HifiNeural {
                     sourceSamples: sourceSamples,
                     targetF0: targetF0,
                     targetF0Start: dstStart + targetOnsetFrames,
-                    sourceTone: sourceTone);
+                    sourceTone: sourceTone,
+                    sourceKeyShiftSemitones: sourceKeyShiftSemitones);
             }
             if (targetReleaseFrames > 0) {
                 WriteMappedRegion(
@@ -1201,7 +1206,8 @@ namespace OpenUtau.Core.HifiNeural {
             float[]? sourceSamples = null,
             float[]? targetF0 = null,
             int targetF0Start = 0,
-            int sourceTone = 0) {
+            int sourceTone = 0,
+            double sourceKeyShiftSemitones = 0) {
             if (outputFrames <= 0) {
                 return false;
             }
@@ -1232,7 +1238,8 @@ namespace OpenUtau.Core.HifiNeural {
                 sourceSamples,
                 targetF0,
                 targetF0Start,
-                sourceTone);
+                sourceTone,
+                sourceKeyShiftSemitones);
         }
 
         static bool WriteSustainTemplateExtension(
@@ -1246,7 +1253,8 @@ namespace OpenUtau.Core.HifiNeural {
             float[]? sourceSamples = null,
             float[]? targetF0 = null,
             int targetF0Start = 0,
-            int sourceTone = 0) {
+            int sourceTone = 0,
+            double sourceKeyShiftSemitones = 0) {
             int bins = sourceMel.GetLength(0);
             int totalSourceFrames = sourceMel.GetLength(1);
             sourceStart = Math.Clamp(sourceStart, 0, Math.Max(0, totalSourceFrames - 1));
@@ -1303,7 +1311,8 @@ namespace OpenUtau.Core.HifiNeural {
                     allowMicroVariation,
                     targetF0,
                     targetF0Start,
-                    sourceTone)) {
+                    sourceTone,
+                    sourceKeyShiftSemitones)) {
                 return true;
             }
             var directFrame = new float[bins];
@@ -1391,7 +1400,8 @@ namespace OpenUtau.Core.HifiNeural {
             bool allowMicroVariation,
             float[]? targetF0,
             int targetF0Start,
-            int sourceTone) {
+            int sourceTone,
+            double sourceKeyShiftSemitones) {
             if (sourceSamples == null
                     || sourceSamples.Length < HifiMelExtractor.WinSize
                     || outputFrames < WaveformSustainMinOutputFrames
@@ -1419,7 +1429,7 @@ namespace OpenUtau.Core.HifiNeural {
                 positions[t] = Math.Clamp(MelFrameToSampleCenter(absoluteSourceFrame), 0, sourceSamples.Length - 1);
             }
 
-            float[,] waveformTextureMel = sustainMelExtractor.ExtractAtPositions(sourceSamples, positions);
+            float[,] waveformTextureMel = sustainMelExtractor.ExtractAtPositions(sourceSamples, positions, sourceKeyShiftSemitones);
             if (waveformTextureMel.GetLength(1) != outputFrames) {
                 return false;
             }

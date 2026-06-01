@@ -34,6 +34,8 @@ namespace OpenUtau.Core.HifiNeural {
             public int FixedFrames;
             public string Strategy = string.Empty;
             public HifiPhoneFeatureDiagnostic? Diagnostic;
+            public HifiFrameParameterAverages Parameters;
+            public HifiHnsepProcessingReport HnsepReport;
         }
 
         /// <summary>
@@ -60,9 +62,10 @@ namespace OpenUtau.Core.HifiNeural {
             // Source mels are cached per oto slice (File + Offset + Cutoff) so a phone/oto that
             // recurs within the phrase reuses its STFT instead of re-extracting it.
             var sliceMelCache = new Dictionary<string, float[,]>(StringComparer.Ordinal);
+            var hnsepCache = new HifiHnsepSourceCache();
             for (int i = 0; i < phrase.phones.Length; i++) {
                 var phone = phrase.phones[i];
-                var segment = BuildPhoneSegment(phrase, phone, i, phraseStartMs, targetFrames, targetF0, sourceCache, sliceMelCache);
+                var segment = BuildPhoneSegment(phrase, phone, i, phraseStartMs, targetFrames, targetF0, sourceCache, sliceMelCache, hnsepCache);
                 if (segment != null) {
                     segments.Add(segment);
                 }
@@ -98,15 +101,9 @@ namespace OpenUtau.Core.HifiNeural {
             int targetFrames,
             float[] targetF0,
             Dictionary<string, float[]> sourceCache,
-            Dictionary<string, float[,]> sliceMelCache) {
+            Dictionary<string, float[,]> sliceMelCache,
+            HifiHnsepSourceCache hnsepCache) {
             if (phone.oto == null || string.IsNullOrWhiteSpace(phone.oto.File)) {
-                return null;
-            }
-
-            float[] sourceSamples = LoadSourceSlice(phone, sourceCache);
-            float[,] sourceMel = LoadSliceMel(phone, sourceSamples, sliceMelCache);
-            int sourceFrames = sourceMel.GetLength(1);
-            if (sourceFrames <= 0) {
                 return null;
             }
 
@@ -144,6 +141,16 @@ namespace OpenUtau.Core.HifiNeural {
                 return null;
             }
 
+            var parameters = HifiParameterCurves.AverageForFrames(phrase, phraseStartMs, startFrame, frameCount);
+            float[] fullSourceSamples = LoadSourceFile(phone.oto.File, sourceCache);
+            float[] sourceSamples = SliceWithOto(fullSourceSamples, phone);
+            sourceSamples = HifiHnsepSourceProcessor.Apply(phone, phone.oto.File, fullSourceSamples, sourceSamples, parameters, hnsepCache, out var hnsepReport);
+            float[,] sourceMel = LoadSliceMel(phone, sourceSamples, sliceMelCache, parameters);
+            int sourceFrames = sourceMel.GetLength(1);
+            if (sourceFrames <= 0) {
+                return null;
+            }
+
             var phoneMel = new float[HifiMelExtractor.NMels, frameCount];
             // Local target F0 slice so the (F0-aware) stretch logic sees the right pitch motion.
             float[] localTargetF0 = SliceTargetF0(targetF0, startFrame, frameCount);
@@ -156,7 +163,8 @@ namespace OpenUtau.Core.HifiNeural {
                 frameCount,
                 phone,
                 localTargetF0,
-                sourceSamples);
+                sourceSamples,
+                parameters.GenderKeyShiftSemitones);
             var diagnostic = HifiClickDiagnostic.BuildPhoneFeatureDiagnostic(
                 phoneIndex,
                 phone.phoneme,
@@ -178,6 +186,8 @@ namespace OpenUtau.Core.HifiNeural {
                 FixedFrames = report.FixedTargetFrames,
                 Strategy = report.Strategy,
                 Diagnostic = diagnostic,
+                Parameters = parameters,
+                HnsepReport = hnsepReport,
             };
         }
 
@@ -241,6 +251,18 @@ namespace OpenUtau.Core.HifiNeural {
                     FrameCount = Math.Max(1, end - start),
                     SourceSkipOverMs = 0,
                     SourceStartOffsetFrames = 0,
+                    Parameters = new HifiPhoneParameterMetadata {
+                        Gender = seg.Parameters.Gender,
+                        Breathiness = seg.Parameters.Breathiness,
+                        Tension = seg.Parameters.Tension,
+                        Voicing = seg.Parameters.Voicing,
+                        GenderKeyShiftSemitones = seg.Parameters.GenderKeyShiftSemitones,
+                        BreathNoiseGain = seg.Parameters.BreathNoiseGain,
+                        VoicingGain = seg.Parameters.VoicingGain,
+                        HnsepRequested = seg.HnsepReport.Requested,
+                        HnsepApplied = seg.HnsepReport.Applied,
+                        HnsepReason = seg.HnsepReport.Reason,
+                    },
                 });
                 if (i > 0) {
                     var left = segments[i - 1];
@@ -285,14 +307,15 @@ namespace OpenUtau.Core.HifiNeural {
         float[,] LoadSliceMel(
             RenderPhone phone,
             float[] sourceSamples,
-            Dictionary<string, float[,]> sliceMelCache) {
-            string key = SliceCacheKey(phone);
+            Dictionary<string, float[,]> sliceMelCache,
+            HifiFrameParameterAverages parameters) {
+            string key = SliceCacheKey(phone, parameters);
             if (key.Length > 0 && sliceMelCache.TryGetValue(key, out var cachedMel)) {
                 return cachedMel;
             }
             float[,] mel = sourceSamples.Length == 0
                 ? new float[HifiMelExtractor.NMels, 0]
-                : melExtractor.Extract(sourceSamples);
+                : melExtractor.Extract(sourceSamples, parameters.GenderKeyShiftSemitones);
             if (key.Length > 0) {
                 sliceMelCache[key] = mel;
             }
@@ -311,7 +334,7 @@ namespace OpenUtau.Core.HifiNeural {
             return result;
         }
 
-        static string SliceCacheKey(RenderPhone phone) {
+        static string SliceCacheKey(RenderPhone phone, HifiFrameParameterAverages parameters) {
             if (phone.oto == null || string.IsNullOrWhiteSpace(phone.oto.File)) {
                 return string.Empty;
             }
@@ -320,11 +343,18 @@ namespace OpenUtau.Core.HifiNeural {
             return string.Concat(
                 phone.oto.File,
                 "|", phone.oto.Offset.ToString("R"),
-                "|", phone.oto.Cutoff.ToString("R"));
+                "|", phone.oto.Cutoff.ToString("R"),
+                "|g", Quantize(parameters.GenderKeyShiftSemitones),
+                "|b", Quantize(parameters.BreathNoiseGain),
+                "|v", Quantize(parameters.VoicingGain),
+                "|t", Quantize(parameters.Tension));
         }
 
-        static float[] LoadSourceSlice(RenderPhone phone, Dictionary<string, float[]> sourceCache) {
-            string file = phone.oto.File;
+        static string Quantize(double value) {
+            return Math.Round(value, 3).ToString("R");
+        }
+
+        static float[] LoadSourceFile(string file, Dictionary<string, float[]> sourceCache) {
             if (string.IsNullOrWhiteSpace(file) || !System.IO.File.Exists(file)) {
                 return Array.Empty<float>();
             }
@@ -332,7 +362,7 @@ namespace OpenUtau.Core.HifiNeural {
                 full = melExtractorLoad(file);
                 sourceCache[file] = full;
             }
-            return SliceWithOto(full, phone);
+            return full;
         }
 
         static float[] melExtractorLoad(string file) {
@@ -340,7 +370,7 @@ namespace OpenUtau.Core.HifiNeural {
             return extractor.LoadMono(file).Select(s => Math.Clamp(s, -1f, 1f)).ToArray();
         }
 
-        static float[] SliceWithOto(float[] source, RenderPhone phone) {
+        internal static float[] SliceWithOto(float[] source, RenderPhone phone) {
             if (source.Length == 0 || phone.oto == null) {
                 return Array.Empty<float>();
             }

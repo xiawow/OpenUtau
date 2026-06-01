@@ -6,6 +6,7 @@ using System.Runtime.Serialization;
 using OpenUtau.Core.HifiNeural;
 using OpenUtau.Core.Render;
 using OpenUtau.Core.Util;
+using OpenUtau.Core.Ustx;
 using Xunit;
 
 namespace OpenUtau.Core.Test.HifiNeural {
@@ -38,6 +39,32 @@ namespace OpenUtau.Core.Test.HifiNeural {
             Assert.Equal(HifiMelExtractor.NMels, mel.GetLength(0));
             Assert.True(mel.GetLength(1) > 0);
             foreach (var value in mel) {
+                Assert.False(float.IsNaN(value));
+                Assert.False(float.IsInfinity(value));
+            }
+        }
+
+        [Fact]
+        public void MelExtractorKeyShiftKeepsShapeAndChangesSpectrum() {
+            var samples = new float[HifiMelExtractor.SampleRate / 5];
+            for (int i = 0; i < samples.Length; i++) {
+                double t = i / (double)HifiMelExtractor.SampleRate;
+                samples[i] = (float)(
+                    0.18 * Math.Sin(2.0 * Math.PI * 220.0 * t)
+                    + 0.08 * Math.Sin(2.0 * Math.PI * 880.0 * t)
+                    + 0.03 * Math.Sin(2.0 * Math.PI * 2400.0 * t));
+            }
+
+            var neutral = new HifiMelExtractor().Extract(samples, 0);
+            var shifted = new HifiMelExtractor().Extract(samples, 6);
+            var shiftedDown = new HifiMelExtractor().Extract(samples, -6);
+
+            Assert.Equal(neutral.GetLength(0), shifted.GetLength(0));
+            Assert.Equal(neutral.GetLength(1), shifted.GetLength(1));
+            Assert.True(Rms(Difference(Flatten(neutral), Flatten(shifted))) > 1e-3);
+            Assert.True(MelCentroid(shifted) > MelCentroid(neutral), "positive key shift should move spectral envelope upward");
+            Assert.True(MelCentroid(shiftedDown) < MelCentroid(neutral), "negative key shift should move spectral envelope downward");
+            foreach (var value in shifted) {
                 Assert.False(float.IsNaN(value));
                 Assert.False(float.IsInfinity(value));
             }
@@ -127,10 +154,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
             var method = typeof(HifiRoughFeatureBuilder)
                 .GetMethod(
                     "WriteSustainTemplateExtension",
-                    BindingFlags.NonPublic | BindingFlags.Static,
-                    binder: null,
-                    types: new[] { typeof(float[,]), typeof(int), typeof(int), typeof(float[,]), typeof(int), typeof(int), typeof(bool) },
-                    modifiers: null);
+                    BindingFlags.NonPublic | BindingFlags.Static);
             Assert.NotNull(method);
 
             var source = new float[HifiMelExtractor.NMels, 3];
@@ -141,7 +165,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
             }
             var output = new float[HifiMelExtractor.NMels, 2];
 
-            bool applied = (bool)method!.Invoke(null, new object[] { source, 0, 3, output, 0, 2, false })!;
+            bool applied = (bool)method!.Invoke(null, new object[] { source, 0, 3, output, 0, 2, false, null, null, 0, 0, 0d })!;
 
             Assert.True(applied);
             foreach (float value in output) {
@@ -155,10 +179,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
             var method = typeof(HifiRoughFeatureBuilder)
                 .GetMethod(
                     "WriteSustainTemplateExtension",
-                    BindingFlags.NonPublic | BindingFlags.Static,
-                    binder: null,
-                    types: new[] { typeof(float[,]), typeof(int), typeof(int), typeof(float[,]), typeof(int), typeof(int), typeof(bool) },
-                    modifiers: null);
+                    BindingFlags.NonPublic | BindingFlags.Static);
             Assert.NotNull(method);
 
             var source = new float[HifiMelExtractor.NMels, 10];
@@ -169,7 +190,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
             }
             var output = new float[HifiMelExtractor.NMels, 40];
 
-            bool applied = (bool)method!.Invoke(null, new object[] { source, 0, 10, output, 0, 40, false })!;
+            bool applied = (bool)method!.Invoke(null, new object[] { source, 0, 10, output, 0, 40, false, null, null, 0, 0, 0d })!;
 
             Assert.True(applied);
             Assert.Equal(source[0, 0], output[0, 0], 5);
@@ -204,6 +225,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                         typeof(float[]),
                         typeof(int),
                         typeof(int),
+                        typeof(double),
                     },
                     modifiers: null);
             Assert.NotNull(method);
@@ -239,6 +261,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 targetF0,
                 0,
                 60,
+                0d,
             })!;
 
             Assert.True(applied);
@@ -427,12 +450,203 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE", "none");
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT", "false");
                 string key = HifiRenderConfig.CacheKey();
-                Assert.Contains("v40-meldomainconcat-waveformsustain-naturalrate-f0fallback-postleveler-loud17", key);
+                Assert.Contains("v42-meldomainconcat-waveformsustain-naturalrate-f0fallback-postleveler-loud17-grocv1-genc-hnsep-", key);
                 Assert.Contains("enhnone", key);
                 Assert.Contains("dbgFalse", key);
             } finally {
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE", oldMode);
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT", oldDebug);
+            }
+        }
+
+        [Fact]
+        public void HnsepDiskCacheRoundTripsHarmonicSourceFeatures() {
+            string dir = Path.Combine(Path.GetTempPath(), "hifi-hnsep-test-" + Guid.NewGuid().ToString("N"));
+            string path = Path.Combine(dir, "cache.f32");
+            try {
+                var result = new HifiHnsepResult {
+                    Harmonic = new[] { 0.1f, -0.2f, 0.3f, float.NaN },
+                };
+
+                HifiHnsepDiskCache.TrySave(path, result);
+
+                Assert.True(HifiHnsepDiskCache.TryLoad(path, 4, out var loaded));
+                Assert.NotNull(loaded);
+                Assert.Equal(4, loaded!.Harmonic.Length);
+                Assert.Equal(0.1f, loaded.Harmonic[0], 6);
+                Assert.Equal(-0.2f, loaded.Harmonic[1], 6);
+                Assert.Equal(0.3f, loaded.Harmonic[2], 6);
+                Assert.Equal(0f, loaded.Harmonic[3]);
+                Assert.False(HifiHnsepDiskCache.TryLoad(path, 3, out _));
+            } finally {
+                if (Directory.Exists(dir)) {
+                    Directory.Delete(dir, recursive: true);
+                }
+            }
+        }
+
+        [Fact]
+        public void HifiDebugDumpPreservesPhoneParameterMetadata() {
+            string dir = Path.Combine(Path.GetTempPath(), "hifi-debug-test-" + Guid.NewGuid().ToString("N"));
+            try {
+                var features = new HifiPhraseFeatures {
+                    Mel = new float[HifiMelExtractor.NMels, 2],
+                    F0 = new[] { 220f, 221f },
+                    Metadata = new HifiPhraseMetadata {
+                        SampleRate = HifiMelExtractor.SampleRate,
+                        HopSize = HifiOnnxVocoder.HopSize,
+                        FrameMs = HifiF0Builder.FrameMs,
+                        Phones = {
+                            new HifiPhoneMetadata {
+                                Index = 0,
+                                Phoneme = "a",
+                                FrameCount = 2,
+                                Parameters = new HifiPhoneParameterMetadata {
+                                    Gender = 50,
+                                    Breathiness = 25,
+                                    Tension = -30,
+                                    Voicing = 60,
+                                    GenderKeyShiftSemitones = 6,
+                                    BreathNoiseGain = 1.5,
+                                    VoicingGain = 0.6,
+                                    HnsepRequested = true,
+                                    HnsepApplied = false,
+                                    HnsepReason = "no_model_or_separation_failed",
+                                },
+                            },
+                        },
+                    },
+                };
+
+                HifiDebugExporter.ExportToDirectory(dir, features);
+                var loaded = HifiDebugExporter.Load(dir);
+
+                var parameters = loaded.Metadata.Phones.Single().Parameters;
+                Assert.Equal(50, parameters.Gender, 6);
+                Assert.Equal(25, parameters.Breathiness, 6);
+                Assert.Equal(-30, parameters.Tension, 6);
+                Assert.Equal(60, parameters.Voicing, 6);
+                Assert.Equal(6, parameters.GenderKeyShiftSemitones, 6);
+                Assert.Equal(1.5, parameters.BreathNoiseGain, 6);
+                Assert.Equal(0.6, parameters.VoicingGain, 6);
+                Assert.True(parameters.HnsepRequested);
+                Assert.False(parameters.HnsepApplied);
+                Assert.Equal("no_model_or_separation_failed", parameters.HnsepReason);
+            } finally {
+                if (Directory.Exists(dir)) {
+                    Directory.Delete(dir, recursive: true);
+                }
+            }
+        }
+
+        [Fact]
+        public void HifiFrameParameterMappingsMatchHifisamplerStyleDefaults() {
+            var neutral = new HifiFrameParameterAverages(0, 0, 0, 100);
+            Assert.Equal(0, neutral.GenderKeyShiftSemitones, 6);
+            Assert.Equal(1, neutral.BreathNoiseGain, 6);
+            Assert.Equal(1, neutral.VoicingGain, 6);
+            Assert.False(neutral.NeedsHnsep);
+
+            var expressive = new HifiFrameParameterAverages(50, 25, -30, 60);
+            Assert.Equal(6.0, expressive.GenderKeyShiftSemitones, 6);
+            Assert.Equal(1.5, expressive.BreathNoiseGain, 6);
+            Assert.Equal(0.6, expressive.VoicingGain, 6);
+            Assert.True(expressive.NeedsHnsep);
+        }
+
+        [Fact]
+        public void TensionSpectralTiltMovesEnergyLikeHifisampler() {
+            var method = typeof(HifiHnsepSourceProcessor)
+                .GetMethod("ApplyHifisamplerStyleSpectralTension", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.NotNull(method);
+            var samples = new float[HifiMelExtractor.SampleRate / 2];
+            for (int i = 0; i < samples.Length; i++) {
+                double t = i / (double)HifiMelExtractor.SampleRate;
+                samples[i] = (float)(
+                    0.12 * Math.Sin(2.0 * Math.PI * 220.0 * t)
+                    + 0.12 * Math.Sin(2.0 * Math.PI * 3500.0 * t));
+            }
+
+            var tense = (float[])method!.Invoke(null, new object[] { samples, -1.0 })!;
+            var loose = (float[])method!.Invoke(null, new object[] { samples, 1.0 })!;
+
+            Assert.Equal(samples.Length, tense.Length);
+            Assert.True(BandRmsAt(tense, 3500) / BandRmsAt(tense, 220)
+                > BandRmsAt(loose, 3500) / BandRmsAt(loose, 220));
+            foreach (float sample in tense.Concat(loose)) {
+                Assert.False(float.IsNaN(sample));
+                Assert.False(float.IsInfinity(sample));
+            }
+        }
+
+        [Fact]
+        public void RendererSuggestsAndSupportsGrowlCurve() {
+            var renderer = new HifiNeuralPhraseRenderer();
+            var descriptor = new UExpressionDescriptor {
+                name = HifiGrowlProcessor.CurveName,
+                abbr = HifiGrowlProcessor.CurveAbbr,
+                type = UExpressionType.Curve,
+                min = 0,
+                max = 100,
+                defaultValue = 0,
+                isFlag = false,
+            };
+
+            var suggestions = renderer.GetSuggestedExpressions(null!, null!);
+
+            Assert.True(renderer.SupportsExpression(descriptor));
+            descriptor.abbr = "GROC";
+            Assert.True(renderer.SupportsExpression(descriptor));
+            Assert.Contains(suggestions, d => d.abbr == HifiGrowlProcessor.CurveAbbr && d.type == UExpressionType.Curve);
+        }
+
+        [Fact]
+        public void RendererSupportsHifiLinearParameterCurves() {
+            var renderer = new HifiNeuralPhraseRenderer();
+            foreach (string abbr in new[] {
+                OpenUtau.Core.Format.Ustx.GENC,
+                OpenUtau.Core.Format.Ustx.BREC,
+                OpenUtau.Core.Format.Ustx.TENC,
+                OpenUtau.Core.Format.Ustx.VOIC,
+            }) {
+                Assert.True(renderer.SupportsExpression(new UExpressionDescriptor {
+                    name = abbr,
+                    abbr = abbr,
+                    type = UExpressionType.Curve,
+                    min = -100,
+                    max = 100,
+                    defaultValue = 0,
+                }), $"expected renderer to support {abbr}");
+            }
+        }
+
+        [Fact]
+        public void GrowlZeroStrengthDoesNotChangeSamples() {
+            var samples = GrowlTestWave();
+            var before = samples.ToArray();
+            var strength = new float[samples.Length];
+
+            HifiGrowlProcessor.ApplyInPlace(samples, HifiMelExtractor.SampleRate, strength);
+
+            Assert.Equal(before, samples);
+        }
+
+        [Fact]
+        public void GrowlModifiesHighBandWithoutLengthOrPeakChange() {
+            var samples = GrowlTestWave();
+            var before = samples.ToArray();
+            var strength = Enumerable.Repeat(0.75f, samples.Length).ToArray();
+            double beforeRms = Rms(samples);
+
+            HifiGrowlProcessor.ApplyInPlace(samples, HifiMelExtractor.SampleRate, strength);
+
+            Assert.Equal(before.Length, samples.Length);
+            Assert.True(samples.Max(Math.Abs) <= 0.9801f);
+            Assert.True(Rms(Difference(samples, before)) > 1e-4);
+            Assert.True(Math.Abs(20.0 * Math.Log10(Rms(samples) / beforeRms)) < 0.75);
+            foreach (float sample in samples) {
+                Assert.False(float.IsNaN(sample));
+                Assert.False(float.IsInfinity(sample));
             }
         }
 
@@ -487,6 +701,74 @@ namespace OpenUtau.Core.Test.HifiNeural {
             }
             double rms = Math.Sqrt(sum / Math.Max(1, end - start));
             return 20.0 * Math.Log10(Math.Max(1e-7, rms));
+        }
+
+        static float[] GrowlTestWave() {
+            int sampleRate = HifiMelExtractor.SampleRate;
+            var samples = new float[sampleRate / 2];
+            for (int i = 0; i < samples.Length; i++) {
+                double t = i / (double)sampleRate;
+                samples[i] = (float)(
+                    0.16 * Math.Sin(2.0 * Math.PI * 220.0 * t)
+                    + 0.04 * Math.Sin(2.0 * Math.PI * 1800.0 * t)
+                    + 0.02 * Math.Sin(2.0 * Math.PI * 3600.0 * t));
+            }
+            return samples;
+        }
+
+        static float[] Difference(float[] left, float[] right) {
+            int length = Math.Min(left.Length, right.Length);
+            var diff = new float[length];
+            for (int i = 0; i < length; i++) {
+                diff[i] = left[i] - right[i];
+            }
+            return diff;
+        }
+
+        static float[] Flatten(float[,] values) {
+            var flattened = new float[values.Length];
+            int index = 0;
+            for (int m = 0; m < values.GetLength(0); m++) {
+                for (int t = 0; t < values.GetLength(1); t++) {
+                    flattened[index++] = values[m, t];
+                }
+            }
+            return flattened;
+        }
+
+        static double MelCentroid(float[,] mel) {
+            double weighted = 0;
+            double total = 0;
+            for (int m = 0; m < mel.GetLength(0); m++) {
+                for (int t = 0; t < mel.GetLength(1); t++) {
+                    double power = Math.Exp(mel[m, t]);
+                    weighted += m * power;
+                    total += power;
+                }
+            }
+            return weighted / Math.Max(1e-9, total);
+        }
+
+        static double BandRmsAt(float[] samples, double frequency) {
+            double re = 0;
+            double im = 0;
+            for (int i = 0; i < samples.Length; i++) {
+                double phase = 2.0 * Math.PI * frequency * i / HifiMelExtractor.SampleRate;
+                re += samples[i] * Math.Cos(phase);
+                im -= samples[i] * Math.Sin(phase);
+            }
+            return Math.Sqrt(re * re + im * im) / Math.Max(1, samples.Length);
+        }
+
+        static double Rms(float[] samples) {
+            if (samples.Length == 0) {
+                return 0;
+            }
+            double sum = 0;
+            for (int i = 0; i < samples.Length; i++) {
+                sum += samples[i] * samples[i];
+            }
+            return Math.Sqrt(sum / samples.Length);
         }
 
         [Fact]

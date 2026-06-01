@@ -85,6 +85,7 @@ namespace OpenUtau.Core.HifiNeural {
         sealed class FftScratch {
             public readonly Complex[] Fft = new Complex[Nfft];
             public readonly float[] Magnitude = new float[Nfft / 2 + 1];
+            public readonly float[] WarpedMagnitude = new float[Nfft / 2 + 1];
         }
 
         static ParallelOptions MelParallelOptions() {
@@ -94,6 +95,10 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         public float[,] Extract(float[] samples) {
+            return Extract(samples, 0);
+        }
+
+        public float[,] Extract(float[] samples, double keyShiftSemitones) {
             if (samples.Length == 0) {
                 return new float[NMels, 0];
             }
@@ -108,7 +113,7 @@ namespace OpenUtau.Core.HifiNeural {
             if (frames < ParallelFrameThreshold) {
                 var scratch = new FftScratch();
                 for (int frame = 0; frame < frames; frame++) {
-                    ExtractFrame(padded, frame, mel, scratch);
+                    ExtractFrame(padded, frame, mel, scratch, keyShiftSemitones);
                 }
             } else {
                 Parallel.For(
@@ -117,7 +122,7 @@ namespace OpenUtau.Core.HifiNeural {
                     MelParallelOptions(),
                     () => new FftScratch(),
                     (frame, _, scratch) => {
-                        ExtractFrame(padded, frame, mel, scratch);
+                        ExtractFrame(padded, frame, mel, scratch, keyShiftSemitones);
                         return scratch;
                     },
                     _ => { });
@@ -127,7 +132,7 @@ namespace OpenUtau.Core.HifiNeural {
             return mel;
         }
 
-        void ExtractFrame(float[] padded, int frame, float[,] mel, FftScratch scratch) {
+        void ExtractFrame(float[] padded, int frame, float[,] mel, FftScratch scratch, double keyShiftSemitones) {
             int start = frame * OriginHopSize;
             var fft = scratch.Fft;
             Array.Clear(fft, 0, fft.Length);
@@ -136,10 +141,14 @@ namespace OpenUtau.Core.HifiNeural {
             }
             ForwardFft(fft);
             ComputeMagnitudes(fft, scratch.Magnitude);
-            ProjectMel(scratch.Magnitude, mel, frame);
+            ProjectMel(ResolveMagnitudeForKeyShift(scratch, keyShiftSemitones), mel, frame);
         }
 
         public float[,] ExtractAtPositions(float[] samples, IReadOnlyList<double> centerSamplePositions) {
+            return ExtractAtPositions(samples, centerSamplePositions, 0);
+        }
+
+        public float[,] ExtractAtPositions(float[] samples, IReadOnlyList<double> centerSamplePositions, double keyShiftSemitones) {
             int frames = centerSamplePositions.Count;
             var mel = new float[NMels, frames];
             if (frames == 0) {
@@ -155,7 +164,7 @@ namespace OpenUtau.Core.HifiNeural {
             if (frames < ParallelFrameThreshold) {
                 var scratch = new FftScratch();
                 for (int frame = 0; frame < frames; frame++) {
-                    ExtractFrameAtPosition(samples, centerSamplePositions[frame], frame, mel, scratch);
+                    ExtractFrameAtPosition(samples, centerSamplePositions[frame], frame, mel, scratch, keyShiftSemitones);
                 }
             } else {
                 Parallel.For(
@@ -164,7 +173,7 @@ namespace OpenUtau.Core.HifiNeural {
                     MelParallelOptions(),
                     () => new FftScratch(),
                     (frame, _, scratch) => {
-                        ExtractFrameAtPosition(samples, centerSamplePositions[frame], frame, mel, scratch);
+                        ExtractFrameAtPosition(samples, centerSamplePositions[frame], frame, mel, scratch, keyShiftSemitones);
                         return scratch;
                     },
                     _ => { });
@@ -179,7 +188,7 @@ namespace OpenUtau.Core.HifiNeural {
             return mel;
         }
 
-        void ExtractFrameAtPosition(float[] samples, double center, int frame, float[,] mel, FftScratch scratch) {
+        void ExtractFrameAtPosition(float[] samples, double center, int frame, float[,] mel, FftScratch scratch, double keyShiftSemitones) {
             if (double.IsNaN(center) || double.IsInfinity(center)) {
                 center = 0;
             }
@@ -192,7 +201,54 @@ namespace OpenUtau.Core.HifiNeural {
             }
             ForwardFft(fft);
             ComputeMagnitudes(fft, scratch.Magnitude);
-            ProjectMel(scratch.Magnitude, mel, frame);
+            ProjectMel(ResolveMagnitudeForKeyShift(scratch, keyShiftSemitones), mel, frame);
+        }
+
+        float[] ResolveMagnitudeForKeyShift(FftScratch scratch, double keyShiftSemitones) {
+            if (Math.Abs(keyShiftSemitones) < 1e-4 || double.IsNaN(keyShiftSemitones) || double.IsInfinity(keyShiftSemitones)) {
+                return scratch.Magnitude;
+            }
+            double factor = Math.Pow(2.0, Math.Clamp(keyShiftSemitones, -24.0, 24.0) / 12.0);
+            WarpMagnitude(scratch.Magnitude, scratch.WarpedMagnitude, factor);
+            return scratch.WarpedMagnitude;
+        }
+
+        static void WarpMagnitude(float[] source, float[] output, double factor) {
+            if (source.Length == 0) {
+                return;
+            }
+            factor = Math.Clamp(factor, 0.25, 4.0);
+            double sourceMean = 0;
+            double outputMean = 0;
+            for (int k = 0; k < output.Length; k++) {
+                sourceMean += source[k];
+                // Mirrors hifisampler's PitchAdjustableMelSpectrogram: increasing key_shift uses
+                // a larger analysis FFT/window, so original mel bin k reads approximately source
+                // energy at k / factor before the fixed mel filterbank projects it.
+                double sourceIndex = k / factor;
+                float value = SampleLinear(source, sourceIndex) * (float)(1.0 / factor);
+                output[k] = value;
+                outputMean += value;
+            }
+            sourceMean /= output.Length;
+            outputMean /= output.Length;
+            if (sourceMean > 1e-9 && outputMean > 1e-9) {
+                float gain = (float)Math.Clamp(sourceMean / outputMean, 0.5, 2.0);
+                for (int k = 0; k < output.Length; k++) {
+                    output[k] *= gain;
+                }
+            }
+        }
+
+        static float SampleLinear(float[] values, double index) {
+            if (values.Length == 0) {
+                return 0;
+            }
+            index = Math.Clamp(index, 0, values.Length - 1);
+            int left = (int)Math.Floor(index);
+            int right = Math.Min(values.Length - 1, left + 1);
+            double alpha = index - left;
+            return (float)(values[left] + (values[right] - values[left]) * alpha);
         }
 
         void ComputeMagnitudes(Complex[] fft, float[] magnitude) {

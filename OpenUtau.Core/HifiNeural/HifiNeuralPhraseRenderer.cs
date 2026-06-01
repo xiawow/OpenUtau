@@ -24,7 +24,14 @@ namespace OpenUtau.Core.HifiNeural {
         public bool SupportsRenderPitch => false;
 
         public bool SupportsExpression(UExpressionDescriptor descriptor) {
-            return descriptor.abbr == Format.Ustx.DYN || descriptor.abbr == Format.Ustx.PITD || descriptor.abbr == Format.Ustx.SHFC;
+            return descriptor.abbr == Format.Ustx.DYN
+                || descriptor.abbr == Format.Ustx.PITD
+                || descriptor.abbr == Format.Ustx.SHFC
+                || descriptor.abbr == Format.Ustx.GENC
+                || descriptor.abbr == Format.Ustx.BREC
+                || descriptor.abbr == Format.Ustx.TENC
+                || descriptor.abbr == Format.Ustx.VOIC
+                || string.Equals(descriptor.abbr, HifiGrowlProcessor.CurveAbbr, StringComparison.OrdinalIgnoreCase);
         }
 
         public RenderResult Layout(RenderPhrase phrase) {
@@ -107,6 +114,7 @@ namespace OpenUtau.Core.HifiNeural {
             float[] samples = vocoder.Infer(features);
             ApplyPhraseEdgeGuard(samples, HifiMelExtractor.SampleRate, fadeInMs: 14, fadeOutMs: 32);
             HifiPostVocoderLeveler.LevelInPlace(samples, features, HifiMelExtractor.SampleRate);
+            HifiGrowlProcessor.ApplyInPlace(samples, phrase, layout.positionMs - layout.leadingMs, HifiMelExtractor.SampleRate);
             HifiLoudnessNormalizer.NormalizeInPlace(samples, HifiMelExtractor.SampleRate);
             if (HifiRenderConfig.DebugExportEnabled) {
                 HifiClickDiagnostic.Export(debugKey, features, samples);
@@ -161,7 +169,17 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         public UExpressionDescriptor[] GetSuggestedExpressions(USinger singer, URenderSettings renderSettings) {
-            return Array.Empty<UExpressionDescriptor>();
+            return new[] {
+                new UExpressionDescriptor {
+                    name = HifiGrowlProcessor.CurveName,
+                    abbr = HifiGrowlProcessor.CurveAbbr,
+                    type = UExpressionType.Curve,
+                    min = 0,
+                    max = 100,
+                    defaultValue = 0,
+                    isFlag = false,
+                },
+            };
         }
 
         public override string ToString() => RendererId;
