@@ -202,6 +202,20 @@ namespace OpenUtau.Core.HifiNeural {
                     hop = parsedHop;
                 }
             }
+            if (nfft <= 0 || !IsPowerOfTwo(nfft)) {
+                Log.Warning(
+                    "HNSEP config.yaml n_fft={Nfft} is invalid; falling back to default n_fft={DefaultNfft}.",
+                    nfft,
+                    DefaultNfft);
+                nfft = DefaultNfft;
+            }
+            if (hop <= 0) {
+                Log.Warning(
+                    "HNSEP config.yaml hop_length={Hop} is invalid; falling back to default hop_length={DefaultHop}.",
+                    hop,
+                    DefaultHop);
+                hop = DefaultHop;
+            }
             return (Math.Max(256, nfft), Math.Max(64, hop));
         }
 
@@ -239,6 +253,7 @@ namespace OpenUtau.Core.HifiNeural {
                 for (int f = 0; f < bins; f++) {
                     fft[f] = spec[f, frame];
                 }
+                ConstrainRealSignalSpectrum(fft, bins);
                 for (int f = 1; f < bins - 1; f++) {
                     fft[nfft - f] = Complex.Conjugate(fft[f]);
                 }
@@ -286,7 +301,7 @@ namespace OpenUtau.Core.HifiNeural {
 
         static void ForwardFft(Complex[] buffer, bool inverse) {
             int n = buffer.Length;
-            if ((n & (n - 1)) != 0) {
+            if (!IsPowerOfTwo(n)) {
                 throw new NotSupportedException($"HNSEP STFT n_fft must be a power of two, got {n}.");
             }
             for (int i = 1, j = 0; i < n; i++) {
@@ -317,6 +332,21 @@ namespace OpenUtau.Core.HifiNeural {
                 for (int i = 0; i < n; i++) {
                     buffer[i] /= n;
                 }
+            }
+        }
+
+        static bool IsPowerOfTwo(int value) {
+            return value > 0 && (value & (value - 1)) == 0;
+        }
+
+        static void ConstrainRealSignalSpectrum(Complex[] fft, int bins) {
+            if (bins <= 0) {
+                return;
+            }
+            fft[0] = new Complex(fft[0].Real, 0);
+            if (bins > 1) {
+                int nyquist = bins - 1;
+                fft[nyquist] = new Complex(fft[nyquist].Real, 0);
             }
         }
     }

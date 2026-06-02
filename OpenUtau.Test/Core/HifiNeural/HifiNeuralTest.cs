@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Numerics;
 using System.Reflection;
 using System.Runtime.Serialization;
 using OpenUtau.Core.HifiNeural;
@@ -601,6 +602,16 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
+        public void DefaultExpressionsRegisterGrowlCurve() {
+            var project = new UProject();
+            OpenUtau.Core.Format.Ustx.AddDefaultExpressions(project);
+
+            Assert.True(project.expressions.TryGetValue(OpenUtau.Core.Format.Ustx.GROC, out var descriptor));
+            Assert.Equal(UExpressionType.Curve, descriptor.type);
+            Assert.True(new HifiNeuralPhraseRenderer().SupportsExpression(descriptor));
+        }
+
+        [Fact]
         public void RendererSupportsHifiLinearParameterCurves() {
             var renderer = new HifiNeuralPhraseRenderer();
             foreach (string abbr in new[] {
@@ -618,6 +629,46 @@ namespace OpenUtau.Core.Test.HifiNeural {
                     defaultValue = 0,
                 }), $"expected renderer to support {abbr}");
             }
+        }
+
+        [Fact]
+        public void HnsepConfigRejectsNonPowerOfTwoNfft() {
+            string dir = Path.Combine(Path.GetTempPath(), "hifi-hnsep-config-test-" + Guid.NewGuid().ToString("N"));
+            try {
+                Directory.CreateDirectory(dir);
+                string modelPath = Path.Combine(dir, "model.onnx");
+                File.WriteAllText(Path.Combine(dir, "config.yaml"), "n_fft: 1500\nhop_length: 512\n");
+                var method = typeof(HifiHnsepOnnx)
+                    .GetMethod("ResolveModelConfig", BindingFlags.NonPublic | BindingFlags.Static);
+                Assert.NotNull(method);
+
+                var result = (ValueTuple<int, int>)method!.Invoke(null, new object[] { modelPath })!;
+
+                Assert.Equal(2048, result.Item1);
+                Assert.Equal(512, result.Item2);
+            } finally {
+                if (Directory.Exists(dir)) {
+                    Directory.Delete(dir, recursive: true);
+                }
+            }
+        }
+
+        [Fact]
+        public void HnsepIstftConstrainsDcAndNyquistToRealValues() {
+            var method = typeof(HifiHnsepOnnx)
+                .GetMethod("ConstrainRealSignalSpectrum", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.NotNull(method);
+            var fft = new[] {
+                new Complex(1, 2),
+                new Complex(3, 4),
+                new Complex(5, 6),
+            };
+
+            method!.Invoke(null, new object[] { fft, 3 });
+
+            Assert.Equal(0, fft[0].Imaginary, 6);
+            Assert.Equal(4, fft[1].Imaginary, 6);
+            Assert.Equal(0, fft[2].Imaginary, 6);
         }
 
         [Fact]
