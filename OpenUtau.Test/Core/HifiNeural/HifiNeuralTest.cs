@@ -451,7 +451,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE", "none");
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT", "false");
                 string key = HifiRenderConfig.CacheKey();
-                Assert.Contains("v43-meldomainconcat-waveformsustain-naturalrate-f0fallback-postleveler-loud17-grocv1-genc-hnsepslice-", key);
+                Assert.Contains("v44-meldomainconcat-waveformsustain-naturalrate-f0fallback-postleveler-loud17-grocv1-genc-hnsepslice-rms-", key);
                 Assert.Contains("enhnone", key);
                 Assert.Contains("dbgFalse", key);
             } finally {
@@ -556,6 +556,53 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
+        public void HnsepTensionPreparationDoesNotMutateCachedHarmonic() {
+            var method = typeof(HifiHnsepSourceProcessor)
+                .GetMethod("PrepareHarmonicForRemix", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.NotNull(method);
+            var cachedHarmonic = new float[HifiMelExtractor.SampleRate / 5];
+            for (int i = 0; i < cachedHarmonic.Length; i++) {
+                double t = i / (double)HifiMelExtractor.SampleRate;
+                cachedHarmonic[i] = (float)(
+                    0.12 * Math.Sin(2.0 * Math.PI * 220.0 * t)
+                    + 0.04 * Math.Sin(2.0 * Math.PI * 2800.0 * t));
+            }
+            var before = cachedHarmonic.ToArray();
+
+            var prepared = (float[])method!.Invoke(null, new object[] { cachedHarmonic, -50.0 })!;
+
+            Assert.Equal(before, cachedHarmonic);
+            Assert.NotSame(cachedHarmonic, prepared);
+            Assert.True(Rms(Difference(prepared, before)) > 1e-5);
+        }
+
+        [Fact]
+        public void HnsepRemixPreservesSourceRmsWhileChangingTexture() {
+            var method = typeof(HifiHnsepSourceProcessor)
+                .GetMethod("RemixHarmonicNoiseWithSourceEnergy", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.NotNull(method);
+            var source = new float[HifiMelExtractor.SampleRate / 5];
+            var harmonic = new float[source.Length];
+            for (int i = 0; i < source.Length; i++) {
+                double t = i / (double)HifiMelExtractor.SampleRate;
+                harmonic[i] = (float)(0.12 * Math.Sin(2.0 * Math.PI * 220.0 * t));
+                source[i] = harmonic[i] + (float)(0.02 * Math.Sin(2.0 * Math.PI * 3600.0 * t));
+            }
+            double sourceRms = Rms(source);
+
+            var remixed = (float[])method!.Invoke(null, new object[] { source, harmonic, 3.0, 0.7 })!;
+
+            Assert.Equal(source.Length, remixed.Length);
+            double rmsDeltaDb = 20.0 * Math.Log10(Rms(remixed) / sourceRms);
+            Assert.True(Math.Abs(rmsDeltaDb) < 0.1, $"expected RMS preserved, delta={rmsDeltaDb:F3}dB");
+            Assert.True(Rms(Difference(remixed, source)) > 1e-4);
+            foreach (float sample in remixed) {
+                Assert.False(float.IsNaN(sample));
+                Assert.False(float.IsInfinity(sample));
+            }
+        }
+
+        [Fact]
         public void TensionSpectralTiltMovesEnergyLikeHifisampler() {
             var method = typeof(HifiHnsepSourceProcessor)
                 .GetMethod("ApplyHifisamplerStyleSpectralTension", BindingFlags.NonPublic | BindingFlags.Static);
@@ -650,6 +697,56 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 if (Directory.Exists(dir)) {
                     Directory.Delete(dir, recursive: true);
                 }
+            }
+        }
+
+        [Fact]
+        public void HnsepCpuThreadCountFollowsOpenUtauRenderThreads() {
+            var method = typeof(HifiHnsepOnnx)
+                .GetMethod("ResolveCpuThreadCount", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.NotNull(method);
+            string oldEnv = Environment.GetEnvironmentVariable("HIFI_NEURAL_HNSEP_THREADS");
+            int oldRenderThreads = Preferences.Default.NumRenderThreads;
+            try {
+                Environment.SetEnvironmentVariable("HIFI_NEURAL_HNSEP_THREADS", null);
+                Preferences.Default.NumRenderThreads = 999;
+
+                int threads = (int)method!.Invoke(null, Array.Empty<object>())!;
+
+                int expected = Math.Clamp(999, 1, Math.Max(1, Environment.ProcessorCount / 2));
+                Assert.Equal(expected, threads);
+
+                Environment.SetEnvironmentVariable("HIFI_NEURAL_HNSEP_THREADS", "1");
+                threads = (int)method.Invoke(null, Array.Empty<object>())!;
+                Assert.Equal(1, threads);
+            } finally {
+                Environment.SetEnvironmentVariable("HIFI_NEURAL_HNSEP_THREADS", oldEnv);
+                Preferences.Default.NumRenderThreads = oldRenderThreads;
+            }
+        }
+
+        [Fact]
+        public void HnsepConcurrencyLimitsCpuOversubscription() {
+            var method = typeof(HifiHnsepOnnx)
+                .GetMethod("ResolveMaxConcurrentSeparations", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.NotNull(method);
+            string oldEnv = Environment.GetEnvironmentVariable("HIFI_NEURAL_HNSEP_CONCURRENCY");
+            int oldRenderThreads = Preferences.Default.NumRenderThreads;
+            try {
+                Environment.SetEnvironmentVariable("HIFI_NEURAL_HNSEP_CONCURRENCY", null);
+                Preferences.Default.NumRenderThreads = Math.Max(2, Environment.ProcessorCount);
+                int workerThreads = Math.Max(1, Environment.ProcessorCount);
+
+                int concurrency = (int)method!.Invoke(null, new object[] { workerThreads })!;
+
+                Assert.Equal(1, concurrency);
+
+                Environment.SetEnvironmentVariable("HIFI_NEURAL_HNSEP_CONCURRENCY", "2");
+                concurrency = (int)method.Invoke(null, new object[] { workerThreads })!;
+                Assert.Equal(Math.Min(2, Preferences.Default.NumRenderThreads), concurrency);
+            } finally {
+                Environment.SetEnvironmentVariable("HIFI_NEURAL_HNSEP_CONCURRENCY", oldEnv);
+                Preferences.Default.NumRenderThreads = oldRenderThreads;
             }
         }
 

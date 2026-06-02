@@ -5,6 +5,8 @@ using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using K4os.Hash.xxHash;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
@@ -19,20 +21,26 @@ namespace OpenUtau.Core.HifiNeural {
     public sealed class HifiHnsepOnnx {
         const int DefaultNfft = 2048;
         const int DefaultHop = 512;
+        const int ParallelFrameThreshold = 16;
         static readonly ConcurrentDictionary<string, Lazy<InferenceSession>> sessionCache = new();
+        static readonly ConcurrentDictionary<int, SemaphoreSlim> separationGates = new();
 
         readonly string modelPath;
         readonly InferenceSession session;
         readonly int nfft;
         readonly int hop;
+        readonly int workerThreads;
+        readonly int maxConcurrentSeparations;
         readonly float[] window;
 
         HifiHnsepOnnx(string modelPath, int nfft, int hop) {
             this.modelPath = modelPath;
             this.nfft = nfft;
             this.hop = hop;
+            workerThreads = ResolveCpuThreadCount();
+            maxConcurrentSeparations = ResolveMaxConcurrentSeparations(workerThreads);
             window = BuildHannWindow(nfft);
-            session = GetCachedSession(modelPath);
+            session = GetCachedSession(modelPath, workerThreads, maxConcurrentSeparations);
         }
 
         public static bool TryCreate(out HifiHnsepOnnx? model, out string diagnostic) {
@@ -70,6 +78,16 @@ namespace OpenUtau.Core.HifiNeural {
                 return new HifiHnsepResult { Harmonic = Array.Empty<float>() };
             }
 
+            var gate = separationGates.GetOrAdd(maxConcurrentSeparations, count => new SemaphoreSlim(count, count));
+            gate.Wait();
+            try {
+                return SeparateCore(samples);
+            } finally {
+                gate.Release();
+            }
+        }
+
+        HifiHnsepResult SeparateCore(float[] samples) {
             int originalLength = samples.Length;
             int t1 = originalLength + hop;
             int segmentLength = 32 * hop;
@@ -83,13 +101,7 @@ namespace OpenUtau.Core.HifiNeural {
             int bins = spec.GetLength(0);
             int frames = spec.GetLength(1);
             var inputData = new float[2 * bins * frames];
-            for (int f = 0; f < bins; f++) {
-                for (int t = 0; t < frames; t++) {
-                    int index = f * frames + t;
-                    inputData[index] = (float)spec[f, t].Real;
-                    inputData[bins * frames + index] = (float)spec[f, t].Imaginary;
-                }
-            }
+            WriteInputTensorData(spec, inputData, bins, frames);
 
             string inputName = session.InputMetadata.Keys.First();
             using var outputs = session.Run(new[] {
@@ -104,6 +116,26 @@ namespace OpenUtau.Core.HifiNeural {
             var harmonic = new float[originalLength];
             Array.Copy(separatedPadded, leftPad, harmonic, 0, originalLength);
             return new HifiHnsepResult { Harmonic = harmonic };
+        }
+
+        void WriteInputTensorData(Complex[,] spec, float[] inputData, int bins, int frames) {
+            if (bins < ParallelFrameThreshold || workerThreads <= 1) {
+                for (int f = 0; f < bins; f++) {
+                    WriteInputTensorBand(spec, inputData, bins, frames, f);
+                }
+                return;
+            }
+            Parallel.For(0, bins, HnsepParallelOptions(), f => {
+                WriteInputTensorBand(spec, inputData, bins, frames, f);
+            });
+        }
+
+        static void WriteInputTensorBand(Complex[,] spec, float[] inputData, int bins, int frames, int f) {
+            for (int t = 0; t < frames; t++) {
+                int index = f * frames + t;
+                inputData[index] = (float)spec[f, t].Real;
+                inputData[bins * frames + index] = (float)spec[f, t].Imaginary;
+            }
         }
 
         static void DecodeMaskOutput(float[] output, Complex[,] spec, Complex[,] predicted, int bins, int frames) {
@@ -226,19 +258,37 @@ namespace OpenUtau.Core.HifiNeural {
             int frames = Math.Max(1, 1 + Math.Max(0, padded.Length - nfft) / hop);
             int bins = nfft / 2 + 1;
             var spec = new Complex[bins, frames];
-            var fft = new Complex[nfft];
-            for (int frame = 0; frame < frames; frame++) {
-                Array.Clear(fft, 0, fft.Length);
-                int start = frame * hop;
-                for (int i = 0; i < nfft; i++) {
-                    fft[i] = new Complex(padded[start + i] * window[i], 0);
+            if (frames < ParallelFrameThreshold || workerThreads <= 1) {
+                var fft = new Complex[nfft];
+                for (int frame = 0; frame < frames; frame++) {
+                    WriteStftFrame(padded, spec, fft, frame, bins);
                 }
-                ForwardFft(fft, inverse: false);
-                for (int f = 0; f < bins; f++) {
-                    spec[f, frame] = fft[f];
-                }
+                return spec;
             }
+
+            Parallel.For(
+                0,
+                frames,
+                HnsepParallelOptions(),
+                () => new Complex[nfft],
+                (frame, _, fft) => {
+                    WriteStftFrame(padded, spec, fft, frame, bins);
+                    return fft;
+                },
+                _ => { });
             return spec;
+        }
+
+        void WriteStftFrame(float[] padded, Complex[,] spec, Complex[] fft, int frame, int bins) {
+            Array.Clear(fft, 0, fft.Length);
+            int start = frame * hop;
+            for (int i = 0; i < nfft; i++) {
+                fft[i] = new Complex(padded[start + i] * window[i], 0);
+            }
+            ForwardFft(fft, inverse: false);
+            for (int f = 0; f < bins; f++) {
+                spec[f, frame] = fft[f];
+            }
         }
 
         float[] Istft(Complex[,] spec, int outputLength) {
@@ -278,17 +328,57 @@ namespace OpenUtau.Core.HifiNeural {
             return output;
         }
 
-        static InferenceSession GetCachedSession(string modelPath) {
+        ParallelOptions HnsepParallelOptions() {
+            return new ParallelOptions {
+                MaxDegreeOfParallelism = Math.Max(1, workerThreads),
+            };
+        }
+
+        static InferenceSession GetCachedSession(string modelPath, int workerThreads, int maxConcurrentSeparations) {
             string fullPath = Path.GetFullPath(modelPath);
-            string key = $"{fullPath}|runner=CPU";
+            string key = $"{fullPath}|runner=CPU|threads={workerThreads}";
             var lazy = sessionCache.GetOrAdd(key, _ => new Lazy<InferenceSession>(() => {
                 // DirectML currently creates this HNSEP graph but fails at runtime on Resize nodes.
                 // Keep HNSEP on CPU; the vocoder still uses the user's ONNX runner choice.
-                var session = Onnx.getInferenceSession(fullPath, OnnxRunnerChoice.CPU);
-                Log.Information("Loaded Hifi HNSEP ONNX model path={Path} runner=CPU", fullPath);
+                var options = new SessionOptions {
+                    GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
+                    IntraOpNumThreads = workerThreads,
+                    InterOpNumThreads = 1,
+                };
+                var session = new InferenceSession(fullPath, options);
+                Log.Information(
+                    "Loaded Hifi HNSEP ONNX model path={Path} runner=CPU intra_threads={Threads} max_concurrent={MaxConcurrent}",
+                    fullPath,
+                    workerThreads,
+                    maxConcurrentSeparations);
                 return session;
             }));
             return lazy.Value;
+        }
+
+        internal static int ResolveCpuThreadCount() {
+            if (TryReadPositiveEnvironmentInt("HIFI_NEURAL_HNSEP_THREADS", out int explicitThreads)) {
+                return Math.Clamp(explicitThreads, 1, Math.Max(1, Environment.ProcessorCount));
+            }
+            int renderThreads = Math.Max(1, Preferences.Default.NumRenderThreads);
+            int cpuThreadCap = Math.Max(1, Environment.ProcessorCount / 2);
+            return Math.Clamp(renderThreads, 1, cpuThreadCap);
+        }
+
+        internal static int ResolveMaxConcurrentSeparations(int workerThreads) {
+            if (TryReadPositiveEnvironmentInt("HIFI_NEURAL_HNSEP_CONCURRENCY", out int explicitConcurrency)) {
+                return Math.Clamp(explicitConcurrency, 1, Math.Max(1, Preferences.Default.NumRenderThreads));
+            }
+            workerThreads = Math.Max(1, workerThreads);
+            int renderThreads = Math.Max(1, Preferences.Default.NumRenderThreads);
+            int cpuBound = Math.Max(1, Environment.ProcessorCount / workerThreads);
+            return Math.Clamp(Math.Min(renderThreads, cpuBound), 1, renderThreads);
+        }
+
+        static bool TryReadPositiveEnvironmentInt(string name, out int value) {
+            value = 0;
+            string? raw = Environment.GetEnvironmentVariable(name);
+            return int.TryParse(raw, out value) && value > 0;
         }
 
         static float[] BuildHannWindow(int size) {

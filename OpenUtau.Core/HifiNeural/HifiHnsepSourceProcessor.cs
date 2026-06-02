@@ -246,29 +246,20 @@ namespace OpenUtau.Core.HifiNeural {
                 return sourceSlice;
             }
 
-            float[] harmonic = separated.Harmonic;
-            if (harmonic.Length != sourceSlice.Length) {
+            if (separated.Harmonic.Length != sourceSlice.Length) {
                 Log.Warning(
                     "Hifi HNSEP slice length mismatch phoneme={Phoneme} source={SourceLength} harmonic={HarmonicLength}",
                     phone.phoneme,
                     sourceSlice.Length,
-                    harmonic.Length);
+                    separated.Harmonic.Length);
                 report = new HifiHnsepProcessingReport(true, false, "slice_length_mismatch");
                 return sourceSlice;
             }
 
-            if (Math.Abs(parameters.Tension) > 0.5) {
-                ApplyTensionInPlace(harmonic, parameters.Tension);
-            }
-
-            var output = new float[sourceSlice.Length];
+            float[] harmonic = PrepareHarmonicForRemix(separated.Harmonic, parameters.Tension);
             double noiseGain = parameters.BreathNoiseGain;
             double harmonicGain = parameters.VoicingGain;
-            for (int i = 0; i < output.Length; i++) {
-                double noise = sourceSlice[i] - harmonic[i];
-                output[i] = (float)(noise * noiseGain + harmonic[i] * harmonicGain);
-            }
-            LimitPeakInPlace(output);
+            var output = RemixHarmonicNoiseWithSourceEnergy(sourceSlice, harmonic, noiseGain, harmonicGain);
             Log.Debug(
                 "Hifi HNSEP applied phoneme={Phoneme} brec={Brec:F2} noise_gain={NoiseGain:F3} voic={Voic:F2} harmonic_gain={HarmonicGain:F3} tenc={Tenc:F2}",
                 phone.phoneme,
@@ -278,6 +269,26 @@ namespace OpenUtau.Core.HifiNeural {
                 harmonicGain,
                 parameters.Tension);
             report = new HifiHnsepProcessingReport(true, true, "applied");
+            return output;
+        }
+
+        internal static float[] PrepareHarmonicForRemix(float[] cachedHarmonic, double tension) {
+            var harmonic = new float[cachedHarmonic.Length];
+            Array.Copy(cachedHarmonic, harmonic, cachedHarmonic.Length);
+            if (Math.Abs(tension) > 0.5) {
+                ApplyTensionInPlace(harmonic, tension);
+            }
+            return harmonic;
+        }
+
+        internal static float[] RemixHarmonicNoiseWithSourceEnergy(float[] sourceSlice, float[] harmonic, double noiseGain, double harmonicGain) {
+            var output = new float[sourceSlice.Length];
+            for (int i = 0; i < output.Length; i++) {
+                double noise = sourceSlice[i] - harmonic[i];
+                output[i] = (float)(noise * noiseGain + harmonic[i] * harmonicGain);
+            }
+            MatchRmsInPlace(output, sourceSlice);
+            LimitPeakInPlace(output);
             return output;
         }
 
@@ -405,6 +416,38 @@ namespace OpenUtau.Core.HifiNeural {
                 peak = Math.Max(peak, Math.Abs(samples[i]));
             }
             return peak;
+        }
+
+        static double Rms(float[] samples) {
+            if (samples.Length == 0) {
+                return 0;
+            }
+            double sum = 0;
+            int count = 0;
+            for (int i = 0; i < samples.Length; i++) {
+                float value = samples[i];
+                if (!float.IsFinite(value)) {
+                    continue;
+                }
+                sum += value * value;
+                count++;
+            }
+            return count > 0 ? Math.Sqrt(sum / count) : 0;
+        }
+
+        static void MatchRmsInPlace(float[] samples, float[] reference) {
+            double targetRms = Rms(reference);
+            double currentRms = Rms(samples);
+            if (targetRms <= 1e-5 || currentRms <= 1e-5) {
+                return;
+            }
+            double gain = Math.Clamp(targetRms / currentRms, 0.5, 2.0);
+            if (!double.IsFinite(gain) || Math.Abs(gain - 1.0) < 1e-4) {
+                return;
+            }
+            for (int i = 0; i < samples.Length; i++) {
+                samples[i] = (float)(samples[i] * gain);
+            }
         }
 
         static void LimitPeakInPlace(float[] samples) {
