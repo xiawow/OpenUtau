@@ -451,7 +451,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE", "none");
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT", "false");
                 string key = HifiRenderConfig.CacheKey();
-                Assert.Contains("v44-meldomainconcat-waveformsustain-naturalrate-f0fallback-postleveler-loud17-grocv1-genc-hnsepslice-rms-", key);
+                Assert.Contains("v45-meldomainconcat-waveformsustain-naturalrate-f0fallback-postleveler-loud17-grocv1-genc-hnsepslice-rms-sourceparams-", key);
                 Assert.Contains("enhnone", key);
                 Assert.Contains("dbgFalse", key);
             } finally {
@@ -556,9 +556,36 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
+        public void HifiFrameParameterTrackKeepsCurveShapeForCacheAndSourceSampling() {
+            var rising = new HifiFrameParameterTrack(
+                new[] { 0.0, 0.0 },
+                new[] { 0.0, 0.0 },
+                new[] { -100.0, 100.0 },
+                new[] { 100.0, 100.0 });
+            var falling = new HifiFrameParameterTrack(
+                new[] { 0.0, 0.0 },
+                new[] { 0.0, 0.0 },
+                new[] { 100.0, -100.0 },
+                new[] { 100.0, 100.0 });
+
+            Assert.Equal(0, rising.Average.Tension, 6);
+            Assert.Equal(0, falling.Average.Tension, 6);
+            Assert.NotEqual(rising.CacheKey, falling.CacheKey);
+            Assert.Equal(-100, rising.SampleAtSourceSample(0, 100).Tension, 6);
+            Assert.Equal(100, rising.SampleAtSourceSample(99, 100).Tension, 6);
+            Assert.True(rising.HasTension);
+            Assert.True(rising.NeedsHnsep);
+        }
+
+        [Fact]
         public void HnsepTensionPreparationDoesNotMutateCachedHarmonic() {
             var method = typeof(HifiHnsepSourceProcessor)
-                .GetMethod("PrepareHarmonicForRemix", BindingFlags.NonPublic | BindingFlags.Static);
+                .GetMethod(
+                    "PrepareHarmonicForRemix",
+                    BindingFlags.NonPublic | BindingFlags.Static,
+                    binder: null,
+                    types: new[] { typeof(float[]), typeof(double) },
+                    modifiers: null);
             Assert.NotNull(method);
             var cachedHarmonic = new float[HifiMelExtractor.SampleRate / 5];
             for (int i = 0; i < cachedHarmonic.Length; i++) {
@@ -579,7 +606,12 @@ namespace OpenUtau.Core.Test.HifiNeural {
         [Fact]
         public void HnsepRemixPreservesSourceRmsWhileChangingTexture() {
             var method = typeof(HifiHnsepSourceProcessor)
-                .GetMethod("RemixHarmonicNoiseWithSourceEnergy", BindingFlags.NonPublic | BindingFlags.Static);
+                .GetMethod(
+                    "RemixHarmonicNoiseWithSourceEnergy",
+                    BindingFlags.NonPublic | BindingFlags.Static,
+                    binder: null,
+                    types: new[] { typeof(float[]), typeof(float[]), typeof(double), typeof(double) },
+                    modifiers: null);
             Assert.NotNull(method);
             var source = new float[HifiMelExtractor.SampleRate / 5];
             var harmonic = new float[source.Length];
@@ -603,9 +635,89 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
+        public void SourceFrameAwareTensionChangesOnlyRequestedSourceRegion() {
+            var method = typeof(HifiHnsepSourceProcessor)
+                .GetMethod(
+                    "ApplyHifisamplerStyleSpectralTension",
+                    BindingFlags.NonPublic | BindingFlags.Static,
+                    binder: null,
+                    types: new[] { typeof(float[]), typeof(HifiFrameParameterTrack) },
+                    modifiers: null);
+            Assert.NotNull(method);
+            int sampleRate = HifiMelExtractor.SampleRate;
+            var samples = new float[sampleRate];
+            for (int i = 0; i < samples.Length; i++) {
+                double t = i / (double)sampleRate;
+                samples[i] = (float)(
+                    0.12 * Math.Sin(2.0 * Math.PI * 220.0 * t)
+                    + 0.12 * Math.Sin(2.0 * Math.PI * 3500.0 * t));
+            }
+            int frames = 64;
+            var tension = new double[frames];
+            for (int i = 0; i < frames; i++) {
+                tension[i] = i < frames / 2 ? 100.0 : -100.0;
+            }
+            var track = new HifiFrameParameterTrack(
+                new double[frames],
+                new double[frames],
+                tension,
+                Enumerable.Repeat(100.0, frames).ToArray());
+
+            var processed = (float[])method!.Invoke(null, new object[] { samples, track })!;
+
+            double firstRatio = SegmentBandRmsAt(processed, sampleRate / 8, sampleRate / 4, 3500)
+                / Math.Max(1e-9, SegmentBandRmsAt(processed, sampleRate / 8, sampleRate / 4, 220));
+            double secondRatio = SegmentBandRmsAt(processed, sampleRate * 5 / 8, sampleRate / 4, 3500)
+                / Math.Max(1e-9, SegmentBandRmsAt(processed, sampleRate * 5 / 8, sampleRate / 4, 220));
+            Assert.True(firstRatio > secondRatio * 1.2, $"expected frame-aware spectral contrast, first={firstRatio:F4} second={secondRatio:F4}");
+        }
+
+        [Fact]
+        public void SourceFrameAwareBreathinessChangesOnlyRequestedSourceRegion() {
+            var method = typeof(HifiHnsepSourceProcessor)
+                .GetMethod(
+                    "RemixHarmonicNoiseWithSourceEnergy",
+                    BindingFlags.NonPublic | BindingFlags.Static,
+                    binder: null,
+                    types: new[] { typeof(float[]), typeof(float[]), typeof(HifiFrameParameterTrack) },
+                    modifiers: null);
+            Assert.NotNull(method);
+            int sampleRate = HifiMelExtractor.SampleRate;
+            var source = new float[sampleRate];
+            var harmonic = new float[sampleRate];
+            for (int i = 0; i < source.Length; i++) {
+                double t = i / (double)sampleRate;
+                harmonic[i] = (float)(0.12 * Math.Sin(2.0 * Math.PI * 220.0 * t));
+                source[i] = harmonic[i] + (float)(0.02 * Math.Sin(2.0 * Math.PI * 3600.0 * t));
+            }
+            int frames = 64;
+            var breathiness = new double[frames];
+            for (int i = 0; i < frames; i++) {
+                breathiness[i] = i < frames / 2 ? 100.0 : 0.0;
+            }
+            var track = new HifiFrameParameterTrack(
+                new double[frames],
+                breathiness,
+                new double[frames],
+                Enumerable.Repeat(100.0, frames).ToArray());
+
+            var remixed = (float[])method!.Invoke(null, new object[] { source, harmonic, track })!;
+            var diff = Difference(remixed, source);
+
+            double firstDiff = SegmentRms(diff, sampleRate / 8, sampleRate / 4);
+            double secondDiff = SegmentRms(diff, sampleRate * 5 / 8, sampleRate / 4);
+            Assert.True(firstDiff > secondDiff * 2.0, $"expected frame-aware breathiness, first={firstDiff:F6} second={secondDiff:F6}");
+        }
+
+        [Fact]
         public void TensionSpectralTiltMovesEnergyLikeHifisampler() {
             var method = typeof(HifiHnsepSourceProcessor)
-                .GetMethod("ApplyHifisamplerStyleSpectralTension", BindingFlags.NonPublic | BindingFlags.Static);
+                .GetMethod(
+                    "ApplyHifisamplerStyleSpectralTension",
+                    BindingFlags.NonPublic | BindingFlags.Static,
+                    binder: null,
+                    types: new[] { typeof(float[]), typeof(double) },
+                    modifiers: null);
             Assert.NotNull(method);
             var samples = new float[HifiMelExtractor.SampleRate / 2];
             for (int i = 0; i < samples.Length; i++) {
@@ -841,14 +953,18 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         static double SegmentRmsDb(float[] samples, int start, int count) {
+            double rms = SegmentRms(samples, start, count);
+            return 20.0 * Math.Log10(Math.Max(1e-7, rms));
+        }
+
+        static double SegmentRms(float[] samples, int start, int count) {
             start = Math.Clamp(start, 0, samples.Length);
             int end = Math.Clamp(start + count, start, samples.Length);
             double sum = 0;
             for (int i = start; i < end; i++) {
                 sum += samples[i] * samples[i];
             }
-            double rms = Math.Sqrt(sum / Math.Max(1, end - start));
-            return 20.0 * Math.Log10(Math.Max(1e-7, rms));
+            return Math.Sqrt(sum / Math.Max(1, end - start));
         }
 
         static float[] GrowlTestWave() {
@@ -906,6 +1022,19 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 im -= samples[i] * Math.Sin(phase);
             }
             return Math.Sqrt(re * re + im * im) / Math.Max(1, samples.Length);
+        }
+
+        static double SegmentBandRmsAt(float[] samples, int start, int count, double frequency) {
+            start = Math.Clamp(start, 0, samples.Length);
+            int end = Math.Clamp(start + count, start, samples.Length);
+            double re = 0;
+            double im = 0;
+            for (int i = start; i < end; i++) {
+                double phase = 2.0 * Math.PI * frequency * i / HifiMelExtractor.SampleRate;
+                re += samples[i] * Math.Cos(phase);
+                im -= samples[i] * Math.Sin(phase);
+            }
+            return Math.Sqrt(re * re + im * im) / Math.Max(1, end - start);
         }
 
         static double Rms(float[] samples) {

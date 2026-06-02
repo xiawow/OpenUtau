@@ -227,7 +227,26 @@ namespace OpenUtau.Core.HifiNeural {
             HifiFrameParameterAverages parameters,
             HifiHnsepSourceCache cache,
             out HifiHnsepProcessingReport report) {
-            if (!parameters.NeedsHnsep || sourceSlice.Length == 0) {
+            return Apply(
+                phone,
+                sourcePath,
+                fullSamples,
+                sourceSlice,
+                HifiFrameParameterTrack.Constant(parameters),
+                cache,
+                out report);
+        }
+
+        public static float[] Apply(
+            RenderPhone phone,
+            string sourcePath,
+            float[] fullSamples,
+            float[] sourceSlice,
+            HifiFrameParameterTrack parameterTrack,
+            HifiHnsepSourceCache cache,
+            out HifiHnsepProcessingReport report) {
+            var parameters = parameterTrack.Average;
+            if (!parameterTrack.NeedsHnsep || sourceSlice.Length == 0) {
                 report = new HifiHnsepProcessingReport(false, false, "neutral_parameters_or_empty_slice");
                 return sourceSlice;
             }
@@ -256,35 +275,47 @@ namespace OpenUtau.Core.HifiNeural {
                 return sourceSlice;
             }
 
-            float[] harmonic = PrepareHarmonicForRemix(separated.Harmonic, parameters.Tension);
-            double noiseGain = parameters.BreathNoiseGain;
-            double harmonicGain = parameters.VoicingGain;
-            var output = RemixHarmonicNoiseWithSourceEnergy(sourceSlice, harmonic, noiseGain, harmonicGain);
+            float[] harmonic = PrepareHarmonicForRemix(separated.Harmonic, parameterTrack);
+            var output = RemixHarmonicNoiseWithSourceEnergy(sourceSlice, harmonic, parameterTrack);
             Log.Debug(
-                "Hifi HNSEP applied phoneme={Phoneme} brec={Brec:F2} noise_gain={NoiseGain:F3} voic={Voic:F2} harmonic_gain={HarmonicGain:F3} tenc={Tenc:F2}",
+                "Hifi HNSEP applied phoneme={Phoneme} mode=source_frame_aware frames={Frames} brec_avg={Brec:F2} noise_gain_avg={NoiseGain:F3} voic_avg={Voic:F2} harmonic_gain_avg={HarmonicGain:F3} tenc_avg={Tenc:F2}",
                 phone.phoneme,
+                parameterTrack.FrameCount,
                 parameters.Breathiness,
-                noiseGain,
+                parameters.BreathNoiseGain,
                 parameters.Voicing,
-                harmonicGain,
+                parameters.VoicingGain,
                 parameters.Tension);
             report = new HifiHnsepProcessingReport(true, true, "applied");
             return output;
         }
 
         internal static float[] PrepareHarmonicForRemix(float[] cachedHarmonic, double tension) {
+            return PrepareHarmonicForRemix(cachedHarmonic, HifiFrameParameterTrack.Constant(new HifiFrameParameterAverages(0, 0, tension, 100)));
+        }
+
+        internal static float[] PrepareHarmonicForRemix(float[] cachedHarmonic, HifiFrameParameterTrack parameterTrack) {
             var harmonic = new float[cachedHarmonic.Length];
             Array.Copy(cachedHarmonic, harmonic, cachedHarmonic.Length);
-            if (Math.Abs(tension) > 0.5) {
-                ApplyTensionInPlace(harmonic, tension);
+            if (parameterTrack.HasTension) {
+                ApplyTensionInPlace(harmonic, parameterTrack);
             }
             return harmonic;
         }
 
         internal static float[] RemixHarmonicNoiseWithSourceEnergy(float[] sourceSlice, float[] harmonic, double noiseGain, double harmonicGain) {
+            return RemixHarmonicNoiseWithSourceEnergy(
+                sourceSlice,
+                harmonic,
+                HifiFrameParameterTrack.Constant(new HifiFrameParameterAverages(0, (noiseGain - 1.0) / 0.02, 0, harmonicGain * 100.0)));
+        }
+
+        internal static float[] RemixHarmonicNoiseWithSourceEnergy(float[] sourceSlice, float[] harmonic, HifiFrameParameterTrack parameterTrack) {
             var output = new float[sourceSlice.Length];
             for (int i = 0; i < output.Length; i++) {
                 double noise = sourceSlice[i] - harmonic[i];
+                double noiseGain = parameterTrack.BreathNoiseGainAtSourceSample(i, sourceSlice.Length);
+                double harmonicGain = parameterTrack.VoicingGainAtSourceSample(i, sourceSlice.Length);
                 output[i] = (float)(noise * noiseGain + harmonic[i] * harmonicGain);
             }
             MatchRmsInPlace(output, sourceSlice);
@@ -293,11 +324,14 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         static void ApplyTensionInPlace(float[] harmonic, double tension) {
-            double b = -Math.Clamp(tension, -100.0, 100.0) / 50.0;
-            if (Math.Abs(b) <= 1e-6 || harmonic.Length <= 1) {
+            ApplyTensionInPlace(harmonic, HifiFrameParameterTrack.Constant(new HifiFrameParameterAverages(0, 0, tension, 100)));
+        }
+
+        static void ApplyTensionInPlace(float[] harmonic, HifiFrameParameterTrack parameterTrack) {
+            if (!parameterTrack.HasTension || harmonic.Length <= 1) {
                 return;
             }
-            var filtered = ApplyHifisamplerStyleSpectralTension(harmonic, b);
+            var filtered = ApplyHifisamplerStyleSpectralTension(harmonic, parameterTrack);
             for (int i = 0; i < harmonic.Length; i++) {
                 harmonic[i] = filtered[i];
             }
@@ -305,6 +339,18 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         static float[] ApplyHifisamplerStyleSpectralTension(float[] wave, double b) {
+            double tension = -b * 50.0;
+            return ApplyHifisamplerStyleSpectralTension(
+                wave,
+                HifiFrameParameterTrack.Constant(new HifiFrameParameterAverages(0, 0, tension, 100)));
+        }
+
+        static float[] ApplyHifisamplerStyleSpectralTension(float[] wave, HifiFrameParameterTrack parameterTrack) {
+            if (!parameterTrack.HasTension) {
+                var copy = new float[wave.Length];
+                Array.Copy(wave, copy, wave.Length);
+                return copy;
+            }
             int originalLength = wave.Length;
             int centerPad = TensionNfft / 2;
             int paddedLength = centerPad * 2 + Math.Max(1, originalLength);
@@ -328,6 +374,9 @@ namespace OpenUtau.Core.HifiNeural {
                 }
                 ForwardFft(fft, inverse: false);
 
+                double frameCenterSample = Math.Clamp(start + TensionNfft * 0.5 - centerPad, 0, Math.Max(0, originalLength - 1));
+                double tension = parameterTrack.TensionAtSourceSample(frameCenterSample, originalLength);
+                double b = -Math.Clamp(tension, -100.0, 100.0) / 50.0;
                 for (int k = 0; k < bins; k++) {
                     double amp = fft[k].Magnitude;
                     double filter = Math.Clamp((-b / x0) * k + b, -2.0, 2.0);
@@ -360,7 +409,8 @@ namespace OpenUtau.Core.HifiNeural {
             double originalMax = Peak(wave);
             double filteredMax = Peak(result);
             if (originalMax > 1e-8 && filteredMax > 1e-8) {
-                double extraGain = Math.Clamp(b / -15.0, 0.0, 0.33) + 1.0;
+                double averageB = -Math.Clamp(parameterTrack.Average.Tension, -100.0, 100.0) / 50.0;
+                double extraGain = Math.Clamp(averageB / -15.0, 0.0, 0.33) + 1.0;
                 double gain = originalMax / filteredMax * extraGain;
                 for (int i = 0; i < result.Length; i++) {
                     result[i] = (float)(result[i] * gain);
