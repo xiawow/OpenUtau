@@ -276,7 +276,7 @@ namespace OpenUtau.Core.HifiNeural {
             }
 
             float[] harmonic = PrepareHarmonicForRemix(separated.Harmonic, parameterTrack);
-            var output = RemixHarmonicNoiseWithSourceEnergy(sourceSlice, harmonic, parameterTrack);
+            var output = RemixHarmonicNoiseWithSourceEnergy(sourceSlice, separated.Harmonic, harmonic, parameterTrack);
             Log.Debug(
                 "Hifi HNSEP applied phoneme={Phoneme} mode=source_frame_aware frames={Frames} brec_avg={Brec:F2} noise_gain_avg={NoiseGain:F3} voic_avg={Voic:F2} harmonic_gain_avg={HarmonicGain:F3} tenc_avg={Tenc:F2}",
                 phone.phoneme,
@@ -311,12 +311,22 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         internal static float[] RemixHarmonicNoiseWithSourceEnergy(float[] sourceSlice, float[] harmonic, HifiFrameParameterTrack parameterTrack) {
+            return RemixHarmonicNoiseWithSourceEnergy(sourceSlice, harmonic, harmonic, parameterTrack);
+        }
+
+        internal static float[] RemixHarmonicNoiseWithSourceEnergy(
+            float[] sourceSlice,
+            float[] originalHarmonic,
+            float[] processedHarmonic,
+            HifiFrameParameterTrack parameterTrack) {
             var output = new float[sourceSlice.Length];
             for (int i = 0; i < output.Length; i++) {
-                double noise = sourceSlice[i] - harmonic[i];
+                double original = i < originalHarmonic.Length ? originalHarmonic[i] : 0;
+                double processed = i < processedHarmonic.Length ? processedHarmonic[i] : original;
+                double noise = sourceSlice[i] - original;
                 double noiseGain = parameterTrack.BreathNoiseGainAtSourceSample(i, sourceSlice.Length);
                 double harmonicGain = parameterTrack.VoicingGainAtSourceSample(i, sourceSlice.Length);
-                output[i] = (float)(noise * noiseGain + harmonic[i] * harmonicGain);
+                output[i] = (float)(noise * noiseGain + processed * harmonicGain);
             }
             MatchRmsInPlace(output, sourceSlice);
             LimitPeakInPlace(output);

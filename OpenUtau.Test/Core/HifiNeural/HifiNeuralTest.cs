@@ -635,6 +635,45 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
+        public void HnsepTensionSurvivesNeutralRemix() {
+            var prepare = typeof(HifiHnsepSourceProcessor)
+                .GetMethod(
+                    "PrepareHarmonicForRemix",
+                    BindingFlags.NonPublic | BindingFlags.Static,
+                    binder: null,
+                    types: new[] { typeof(float[]), typeof(double) },
+                    modifiers: null);
+            var remix = typeof(HifiHnsepSourceProcessor)
+                .GetMethod(
+                    "RemixHarmonicNoiseWithSourceEnergy",
+                    BindingFlags.NonPublic | BindingFlags.Static,
+                    binder: null,
+                    types: new[] { typeof(float[]), typeof(float[]), typeof(float[]), typeof(HifiFrameParameterTrack) },
+                    modifiers: null);
+            Assert.NotNull(prepare);
+            Assert.NotNull(remix);
+
+            var source = new float[HifiMelExtractor.SampleRate / 3];
+            var harmonic = new float[source.Length];
+            for (int i = 0; i < source.Length; i++) {
+                double t = i / (double)HifiMelExtractor.SampleRate;
+                harmonic[i] = (float)(
+                    0.12 * Math.Sin(2.0 * Math.PI * 220.0 * t)
+                    + 0.035 * Math.Sin(2.0 * Math.PI * 3200.0 * t));
+                source[i] = harmonic[i] + (float)(0.015 * Math.Sin(2.0 * Math.PI * 6200.0 * t));
+            }
+
+            var processedHarmonic = (float[])prepare!.Invoke(null, new object[] { harmonic, -50.0 })!;
+            var neutralTrack = HifiFrameParameterTrack.Constant(new HifiFrameParameterAverages(0, 0, -50, 100));
+            var remixed = (float[])remix!.Invoke(null, new object[] { source, harmonic, processedHarmonic, neutralTrack })!;
+
+            Assert.Equal(source.Length, remixed.Length);
+            Assert.True(Rms(Difference(remixed, source)) > 1e-4, "TENC must not cancel out when BREC=0 and VOIC=100.");
+            Assert.True(BandRmsAt(remixed, 3200) / BandRmsAt(remixed, 220)
+                > BandRmsAt(source, 3200) / BandRmsAt(source, 220));
+        }
+
+        [Fact]
         public void SourceFrameAwareTensionChangesOnlyRequestedSourceRegion() {
             var method = typeof(HifiHnsepSourceProcessor)
                 .GetMethod(
