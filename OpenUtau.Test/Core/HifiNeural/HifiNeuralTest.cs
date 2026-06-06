@@ -451,7 +451,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE", "none");
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT", "false");
                 string key = HifiRenderConfig.CacheKey();
-                Assert.Contains("v45-meldomainconcat-waveformsustain-naturalrate-f0fallback-postleveler-loud17-grocv1-genc-hnsepslice-rms-sourceparams-", key);
+                Assert.Contains("v47-meldomainconcat-waveformsustain-naturalrate-f0fallback-postleveler-loud17-grocv1-genc-hnsepslice-rms-sourceparams-tencremixfix-nonlinearparammap-", key);
                 Assert.Contains("enhnone", key);
                 Assert.Contains("dbgFalse", key);
             } finally {
@@ -575,6 +575,24 @@ namespace OpenUtau.Core.Test.HifiNeural {
             Assert.Equal(100, rising.SampleAtSourceSample(99, 100).Tension, 6);
             Assert.True(rising.HasTension);
             Assert.True(rising.NeedsHnsep);
+        }
+
+        [Fact]
+        public void HifiFrameParameterTrackProjectsTargetCurveThroughNonlinearSourceMap() {
+            var target = new HifiFrameParameterTrack(
+                new[] { 0.0, 0.0, 0.0, 0.0 },
+                new[] { 0.0, 0.0, 0.0, 0.0 },
+                new[] { 100.0, 100.0, -100.0, -100.0 },
+                new[] { 100.0, 100.0, 100.0, 100.0 });
+            var targetToSourceFrameMap = new[] { 0.0, 0.0, 3.0, 3.0 };
+
+            var projected = target.ProjectToSourceFrames(targetToSourceFrameMap, 4);
+
+            Assert.Equal(4, projected.FrameCount);
+            Assert.NotEqual(target.CacheKey, projected.CacheKey);
+            Assert.True(projected.SampleAtSourceSample(0, 400).Tension > 80);
+            Assert.True(projected.SampleAtSourceSample(399, 400).Tension < -80);
+            Assert.Equal(100, projected.SampleAtSourceSample(0, 400).Voicing, 6);
         }
 
         [Fact]

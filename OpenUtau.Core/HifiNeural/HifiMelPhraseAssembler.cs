@@ -143,10 +143,12 @@ namespace OpenUtau.Core.HifiNeural {
 
             var parameterTrack = HifiParameterCurves.TrackForFrames(phrase, phraseStartMs, startFrame, frameCount);
             var parameters = parameterTrack.Average;
+            float[] localTargetF0 = SliceTargetF0(targetF0, startFrame, frameCount);
             float[] fullSourceSamples = LoadSourceFile(phone.oto.File, sourceCache);
             float[] sourceSamples = SliceWithOto(fullSourceSamples, phone);
-            sourceSamples = HifiHnsepSourceProcessor.Apply(phone, phone.oto.File, fullSourceSamples, sourceSamples, parameterTrack, hnsepCache, out var hnsepReport);
-            float[,] sourceMel = LoadSliceMel(phone, sourceSamples, sliceMelCache, parameterTrack);
+            var sourceParameterTrack = BuildHnsepSourceParameterTrack(parameterTrack, sourceSamples.Length, frameCount, phone);
+            sourceSamples = HifiHnsepSourceProcessor.Apply(phone, phone.oto.File, fullSourceSamples, sourceSamples, sourceParameterTrack, hnsepCache, out var hnsepReport);
+            float[,] sourceMel = LoadSliceMel(phone, sourceSamples, sliceMelCache, parameterTrack, sourceParameterTrack);
             int sourceFrames = sourceMel.GetLength(1);
             if (sourceFrames <= 0) {
                 return null;
@@ -154,7 +156,6 @@ namespace OpenUtau.Core.HifiNeural {
 
             var phoneMel = new float[HifiMelExtractor.NMels, frameCount];
             // Local target F0 slice so the (F0-aware) stretch logic sees the right pitch motion.
-            float[] localTargetF0 = SliceTargetF0(targetF0, startFrame, frameCount);
             var report = HifiRoughFeatureBuilder.WritePhoneMappedSegment(
                 sourceMel,
                 0,
@@ -190,6 +191,35 @@ namespace OpenUtau.Core.HifiNeural {
                 Parameters = parameters,
                 HnsepReport = hnsepReport,
             };
+        }
+
+        static HifiFrameParameterTrack BuildHnsepSourceParameterTrack(
+            HifiFrameParameterTrack targetTrack,
+            int sourceSampleCount,
+            int targetFrameCount,
+            RenderPhone phone) {
+            if (!targetTrack.NeedsHnsep || sourceSampleCount <= 0 || targetFrameCount <= 1) {
+                return targetTrack;
+            }
+            int sourceFrameCount = HifiMelExtractor.EstimateFrameCount(sourceSampleCount);
+            if (sourceFrameCount <= 1) {
+                return targetTrack;
+            }
+            var targetToSourceFrameMap = HifiRoughFeatureBuilder.BuildPhoneTargetToSourceFrameMap(
+                sourceFrameCount,
+                targetFrameCount,
+                phone);
+            if (targetToSourceFrameMap.Length != targetTrack.FrameCount) {
+                return targetTrack;
+            }
+            var sourceTrack = targetTrack.ProjectToSourceFrames(targetToSourceFrameMap, sourceFrameCount);
+            Log.Debug(
+                "HifiMelPhraseAssembler hnsep_nonlinear_source_params phoneme={Phoneme} target_frames={TargetFrames} source_frames={SourceFrames} source_samples={SourceSamples}",
+                phone.phoneme,
+                targetFrameCount,
+                sourceFrameCount,
+                sourceSampleCount);
+            return sourceTrack;
         }
 
         static void AssembleWithOverlapCrossfade(float[,] output, List<PhoneMelSegment> segments, int targetFrames) {
@@ -309,8 +339,9 @@ namespace OpenUtau.Core.HifiNeural {
             RenderPhone phone,
             float[] sourceSamples,
             Dictionary<string, float[,]> sliceMelCache,
-            HifiFrameParameterTrack parameterTrack) {
-            string key = SliceCacheKey(phone, parameterTrack);
+            HifiFrameParameterTrack parameterTrack,
+            HifiFrameParameterTrack sourceParameterTrack) {
+            string key = SliceCacheKey(phone, parameterTrack, sourceParameterTrack);
             if (key.Length > 0 && sliceMelCache.TryGetValue(key, out var cachedMel)) {
                 return cachedMel;
             }
@@ -336,7 +367,10 @@ namespace OpenUtau.Core.HifiNeural {
             return result;
         }
 
-        static string SliceCacheKey(RenderPhone phone, HifiFrameParameterTrack parameterTrack) {
+        static string SliceCacheKey(
+            RenderPhone phone,
+            HifiFrameParameterTrack parameterTrack,
+            HifiFrameParameterTrack sourceParameterTrack) {
             if (phone.oto == null || string.IsNullOrWhiteSpace(phone.oto.File)) {
                 return string.Empty;
             }
@@ -348,7 +382,8 @@ namespace OpenUtau.Core.HifiNeural {
                 "|", phone.oto.Offset.ToString("R"),
                 "|", phone.oto.Cutoff.ToString("R"),
                 "|g", Quantize(parameters.GenderKeyShiftSemitones),
-                "|trk", parameterTrack.CacheKey);
+                "|trk", parameterTrack.CacheKey,
+                "|src", sourceParameterTrack.CacheKey);
         }
 
         static string Quantize(double value) {

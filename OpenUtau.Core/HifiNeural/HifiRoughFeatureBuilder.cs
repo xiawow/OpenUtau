@@ -616,6 +616,62 @@ namespace OpenUtau.Core.HifiNeural {
 
         internal readonly record struct PhoneMapReport(bool SplitApplied, string Strategy, int FixedTargetFrames, int F0MaskFrames);
 
+        internal static double[] BuildPhoneTargetToSourceFrameMap(int sourceFrames, int outputFrames, RenderPhone phone) {
+            var map = new double[Math.Max(0, outputFrames)];
+            if (map.Length == 0) {
+                return map;
+            }
+            sourceFrames = Math.Max(1, sourceFrames);
+            if (outputFrames <= 2) {
+                WriteCompactPhoneFrameMap(map, 0, outputFrames, sourceFrames, 0);
+                return map;
+            }
+            double? consonantMs = EffectiveConsonantMs(phone);
+            double preutterMs = consonantMs.HasValue ? Math.Max(0, phone.preutterMs) : 0;
+            double stableStartMs = consonantMs.HasValue ? Math.Max(preutterMs, consonantMs.Value) : preutterMs;
+            int sourceConsonantFrames = preutterMs > 0
+                ? (int)Math.Round(preutterMs / SourceFrameMs)
+                : 0;
+            int sourceStableStartFrames = stableStartMs > 0
+                ? (int)Math.Round(stableStartMs / SourceFrameMs)
+                : sourceConsonantFrames;
+            sourceConsonantFrames = NormalizeSourceConsonantFrames(sourceConsonantFrames, sourceFrames, phone.phoneme);
+            sourceStableStartFrames = NormalizeSourceStableStartFrames(sourceStableStartFrames, sourceConsonantFrames, sourceFrames);
+            int sourceVowelOnsetFrames = Math.Max(0, sourceStableStartFrames - sourceConsonantFrames);
+
+            if (sourceFrames < MinSourceFrames) {
+                WriteFrameMapRegion(map, 0, outputFrames, 0, sourceFrames);
+                return map;
+            }
+            int vowelSourceFrames = sourceFrames - sourceConsonantFrames;
+            if (vowelSourceFrames < MinVowelSourceFrames) {
+                WriteFrameMapRegion(map, 0, outputFrames, 0, sourceFrames);
+                return map;
+            }
+
+            int targetConsonantFrames = preutterMs > 0
+                ? (int)Math.Round(preutterMs / HifiF0Builder.FrameMs)
+                : 0;
+            targetConsonantFrames = Math.Clamp(targetConsonantFrames, 0, Math.Max(0, outputFrames - MinVowelTargetFrames));
+            int vowelTargetFrames = outputFrames - targetConsonantFrames;
+            if (vowelTargetFrames < MinVowelTargetFrames) {
+                vowelTargetFrames = MinVowelTargetFrames;
+                targetConsonantFrames = Math.Max(0, outputFrames - vowelTargetFrames);
+            }
+
+            if (targetConsonantFrames > 0) {
+                WriteFrameMapRegion(map, 0, targetConsonantFrames, 0, sourceConsonantFrames);
+            }
+            WriteVowelFrameMap(
+                map,
+                targetConsonantFrames,
+                vowelTargetFrames,
+                sourceConsonantFrames,
+                vowelSourceFrames,
+                sourceVowelOnsetFrames);
+            return map;
+        }
+
         internal static PhoneMapReport WritePhoneMappedSegment(
             float[,] sourceMel,
             int sourceStart,
@@ -636,6 +692,156 @@ namespace OpenUtau.Core.HifiNeural {
                 targetF0,
                 null,
                 0);
+        }
+
+        static void WriteCompactPhoneFrameMap(double[] map, int outputStart, int outputFrames, int sourceFrames, int sourceConsonantFrames) {
+            if (outputFrames <= 0) {
+                return;
+            }
+            sourceFrames = Math.Max(1, sourceFrames);
+            int nucleus = Math.Clamp(sourceConsonantFrames > 0 ? sourceConsonantFrames : sourceFrames / 2, 0, sourceFrames - 1);
+            if (outputFrames == 1) {
+                map[outputStart] = nucleus;
+                return;
+            }
+            int onset = sourceConsonantFrames > 0
+                ? Math.Clamp(sourceConsonantFrames / 2, 0, sourceFrames - 1)
+                : Math.Clamp((int)Math.Round(sourceFrames * 0.25), 0, sourceFrames - 1);
+            map[outputStart] = onset;
+            map[outputStart + 1] = nucleus;
+        }
+
+        static void WriteVowelFrameMap(
+            double[] map,
+            int outputStart,
+            int outputFrames,
+            int sourceStart,
+            int sourceFrames,
+            int preferredOnsetFrames) {
+            if (outputFrames <= 0) {
+                return;
+            }
+            ResolveVowelSections(sourceFrames, preferredOnsetFrames, out int onsetFrames, out int releaseFrames, out int sustainFrames);
+            var (targetOnsetFrames, targetSustainFrames, targetReleaseFrames) = AllocateVowelTargetSections(
+                onsetFrames,
+                sustainFrames,
+                releaseFrames,
+                outputFrames);
+
+            if (targetOnsetFrames > 0) {
+                WriteFrameMapRegion(map, outputStart, targetOnsetFrames, sourceStart, onsetFrames);
+            }
+            if (targetSustainFrames > 0) {
+                WriteSustainFrameMap(
+                    map,
+                    outputStart + targetOnsetFrames,
+                    targetSustainFrames,
+                    sourceStart + onsetFrames,
+                    sustainFrames);
+            }
+            if (targetReleaseFrames > 0) {
+                WriteFrameMapRegion(
+                    map,
+                    outputStart + targetOnsetFrames + targetSustainFrames,
+                    targetReleaseFrames,
+                    sourceStart + sourceFrames - releaseFrames,
+                    releaseFrames);
+            }
+        }
+
+        static void WriteSustainFrameMap(
+            double[] map,
+            int outputStart,
+            int outputFrames,
+            int sourceStart,
+            int sourceFrames) {
+            double stretchRatio = SourceToTargetDurationRatio(sourceFrames, outputFrames);
+            if (sourceFrames <= 2 || stretchRatio <= 1.05) {
+                WriteFrameMapRegion(map, outputStart, outputFrames, sourceStart, sourceFrames);
+                return;
+            }
+            if (stretchRatio < SustainTemplateStretchThreshold) {
+                WriteNaturalFrameMapRegion(map, outputStart, outputFrames, sourceStart, sourceFrames);
+                return;
+            }
+            WriteSustainTextureFrameMap(map, outputStart, outputFrames, sourceStart, sourceFrames, stretchRatio);
+        }
+
+        static void WriteNaturalFrameMapRegion(
+            double[] map,
+            int outputStart,
+            int outputFrames,
+            int sourceStart,
+            int sourceFrames) {
+            var transientAnchor = new TransientAnchorPlan(false, 0, 0, 0, 0, "parameter_map");
+            double stretchRatio = SourceToTargetDurationRatio(sourceFrames, outputFrames);
+            for (int t = 0; t < outputFrames; t++) {
+                double targetNorm = outputFrames == 1 ? 0 : t / (double)(outputFrames - 1);
+                double sourceNorm = MapSourceNormalized(targetNorm, stretchRatio, transientAnchor, sourceFrames, outputFrames);
+                map[outputStart + t] = sourceStart + Math.Clamp(sourceNorm, 0, 1) * Math.Max(0, sourceFrames - 1);
+            }
+        }
+
+        static void WriteSustainTextureFrameMap(
+            double[] map,
+            int outputStart,
+            int outputFrames,
+            int sourceStart,
+            int sourceFrames,
+            double stretchRatio) {
+            int stableStart = Math.Max(0, sourceFrames / 5);
+            int stableEnd = sourceFrames - Math.Max(0, sourceFrames / 5);
+            if (stableEnd <= stableStart) {
+                stableStart = 0;
+                stableEnd = sourceFrames;
+            }
+            int stableFrames = Math.Max(1, stableEnd - stableStart);
+            if (stableFrames < SustainTextureMinStableFrames) {
+                WriteNaturalFrameMapRegion(map, outputStart, outputFrames, sourceStart, sourceFrames);
+                return;
+            }
+
+            int edgeFrames = ResolveSustainEdgeFrames(outputFrames);
+            double seed = SeedFromInts(sourceStart, outputFrames);
+            double previousTextureIndex = stableStart + (stableFrames - 1) * 0.5;
+            for (int t = 0; t < outputFrames; t++) {
+                double u = outputFrames == 1 ? 0 : t / (double)(outputFrames - 1);
+                double directIndex = outputFrames == 1 || sourceFrames == 1
+                    ? 0
+                    : u * (sourceFrames - 1);
+                double textureIndex = ResolveSustainTextureSourceIndex(
+                    t,
+                    outputFrames,
+                    stableStart,
+                    stableFrames,
+                    stretchRatio,
+                    seed);
+                if (t > 0) {
+                    textureIndex = LimitTextureIndexStep(previousTextureIndex, textureIndex, stretchRatio);
+                }
+                previousTextureIndex = textureIndex;
+                double coreWeight = SustainCoreTextureWeight(t, outputFrames, edgeFrames);
+                map[outputStart + t] = sourceStart + directIndex * (1.0 - coreWeight) + textureIndex * coreWeight;
+            }
+        }
+
+        static void WriteFrameMapRegion(
+            double[] map,
+            int outputStart,
+            int outputFrames,
+            int sourceStart,
+            int sourceFrames) {
+            if (outputFrames <= 0) {
+                return;
+            }
+            sourceFrames = Math.Max(1, sourceFrames);
+            outputFrames = Math.Max(1, Math.Min(outputFrames, map.Length - outputStart));
+            for (int t = 0; t < outputFrames; t++) {
+                double sourceIndex = outputFrames == 1 || sourceFrames == 1
+                    ? 0
+                    : t * (sourceFrames - 1.0) / (outputFrames - 1);
+                map[outputStart + t] = sourceStart + sourceIndex;
+            }
         }
 
         internal static PhoneMapReport WritePhoneMappedSegment(

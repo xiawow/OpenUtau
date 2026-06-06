@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using OpenUtau.Core.Render;
 
 namespace OpenUtau.Core.HifiNeural {
@@ -106,7 +107,27 @@ namespace OpenUtau.Core.HifiNeural {
             return Math.Clamp(voicing / 100.0, 0.0, 1.5);
         }
 
-        HifiFrameParameterAverages SampleAtFrameIndex(double index) {
+        public HifiFrameParameterTrack ProjectToSourceFrames(IReadOnlyList<double> targetToSourceFrameMap, int sourceFrameCount) {
+            sourceFrameCount = Math.Max(1, sourceFrameCount);
+            if (targetToSourceFrameMap.Count == 0 || FrameCount == 0) {
+                return Constant(Average, sourceFrameCount);
+            }
+            if (targetToSourceFrameMap.Count != FrameCount) {
+                return new HifiFrameParameterTrack(
+                    ResampleArray(Gender, sourceFrameCount),
+                    ResampleArray(Breathiness, sourceFrameCount),
+                    ResampleArray(Tension, sourceFrameCount),
+                    ResampleArray(Voicing, sourceFrameCount));
+            }
+
+            return new HifiFrameParameterTrack(
+                ProjectArray(Gender, targetToSourceFrameMap, sourceFrameCount),
+                ProjectArray(Breathiness, targetToSourceFrameMap, sourceFrameCount),
+                ProjectArray(Tension, targetToSourceFrameMap, sourceFrameCount),
+                ProjectArray(Voicing, targetToSourceFrameMap, sourceFrameCount));
+        }
+
+        public HifiFrameParameterAverages SampleAtFrameIndex(double index) {
             return new HifiFrameParameterAverages(
                 Sample(Gender, index),
                 Sample(Breathiness, index),
@@ -134,6 +155,68 @@ namespace OpenUtau.Core.HifiNeural {
             int right = Math.Min(values.Length - 1, left + 1);
             double alpha = index - left;
             return values[left] + (values[right] - values[left]) * alpha;
+        }
+
+        static double[] ProjectArray(double[] targetValues, IReadOnlyList<double> targetToSourceFrameMap, int sourceFrameCount) {
+            var values = ResampleArray(targetValues, sourceFrameCount);
+            var weighted = new double[sourceFrameCount];
+            var weights = new double[sourceFrameCount];
+            int count = Math.Min(targetValues.Length, targetToSourceFrameMap.Count);
+            for (int t = 0; t < count; t++) {
+                double sourceIndex = targetToSourceFrameMap[t];
+                if (double.IsNaN(sourceIndex) || double.IsInfinity(sourceIndex)) {
+                    continue;
+                }
+                sourceIndex = Math.Clamp(sourceIndex, 0, sourceFrameCount - 1);
+                int left = (int)Math.Floor(sourceIndex);
+                int right = Math.Min(sourceFrameCount - 1, left + 1);
+                double alpha = sourceIndex - left;
+                AddProjectedValue(weighted, weights, left, targetValues[t], 1.0 - alpha);
+                AddProjectedValue(weighted, weights, right, targetValues[t], alpha);
+            }
+
+            bool anyMapped = false;
+            for (int i = 0; i < sourceFrameCount; i++) {
+                if (weights[i] > 1e-9) {
+                    values[i] = weighted[i] / weights[i];
+                    anyMapped = true;
+                }
+            }
+            if (anyMapped) {
+                SmoothInPlace(values);
+            }
+            return values;
+        }
+
+        static void AddProjectedValue(double[] sums, double[] weights, int index, double value, double weight) {
+            if (weight <= 1e-9) {
+                return;
+            }
+            sums[index] += value * weight;
+            weights[index] += weight;
+        }
+
+        static double[] ResampleArray(double[] values, int frameCount) {
+            frameCount = Math.Max(1, frameCount);
+            var output = new double[frameCount];
+            if (values.Length == 0) {
+                return output;
+            }
+            for (int i = 0; i < frameCount; i++) {
+                double index = frameCount == 1 ? 0 : i * (values.Length - 1.0) / (frameCount - 1);
+                output[i] = Sample(values, index);
+            }
+            return output;
+        }
+
+        static void SmoothInPlace(double[] values) {
+            if (values.Length < 3) {
+                return;
+            }
+            var copy = (double[])values.Clone();
+            for (int i = 1; i < values.Length - 1; i++) {
+                values[i] = copy[i] * 0.60 + (copy[i - 1] + copy[i + 1]) * 0.20;
+            }
         }
 
         string BuildCacheKey() {

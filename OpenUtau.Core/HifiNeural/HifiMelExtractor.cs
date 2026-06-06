@@ -78,6 +78,13 @@ namespace OpenUtau.Core.HifiNeural {
             return Extract(LoadMono(path));
         }
 
+        public static int EstimateFrameCount(int sampleCount) {
+            if (sampleCount <= 0) {
+                return 0;
+            }
+            return Math.Max(1, 1 + Math.Max(0, sampleCount - OriginHopSize) / OriginHopSize);
+        }
+
         // Below this frame count the Parallel.For scheduling overhead outweighs the work, so we
         // run the STFT loop serially.
         const int ParallelFrameThreshold = 16;
@@ -104,7 +111,7 @@ namespace OpenUtau.Core.HifiNeural {
             }
 
             var padded = ReflectPad(samples, (WinSize - OriginHopSize) / 2, (WinSize - OriginHopSize + 1) / 2);
-            int frames = Math.Max(1, 1 + Math.Max(0, padded.Length - WinSize) / OriginHopSize);
+            int frames = EstimateFrameCount(samples.Length);
             var mel = new float[NMels, frames];
 
             // Each STFT frame is independent and writes its own column of `mel`, and the filterbank /
