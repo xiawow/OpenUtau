@@ -305,6 +305,30 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
+        public void LongSustainParameterMapFollowsDirectContour() {
+            var method = typeof(HifiRoughFeatureBuilder)
+                .GetMethod("WriteSustainFrameMap", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.NotNull(method);
+
+            var map = new double[24];
+            method!.Invoke(null, new object[] {
+                map,
+                0,
+                map.Length,
+                5,
+                20,
+            });
+
+            for (int t = 0; t < map.Length; t++) {
+                double expected = 5 + t * 19.0 / (map.Length - 1);
+                Assert.Equal(expected, map[t], 6);
+                if (t > 0) {
+                    Assert.True(map[t] >= map[t - 1], "long sustain parameter map should not follow residual texture wander");
+                }
+            }
+        }
+
+        [Fact]
         public void SustainTextureResidualRemovesFrameMeanEnergy() {
             var meanMethod = typeof(HifiRoughFeatureBuilder)
                 .GetMethod("TextureResidualMean", BindingFlags.NonPublic | BindingFlags.Static);
@@ -482,7 +506,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE", "none");
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT", "false");
                 string key = HifiRenderConfig.CacheKey();
-                Assert.Contains("v48-sustainresidual-meldomainconcat-waveformsustain-naturalrate-f0fallback-postleveler-loud17-grocv1-genc-hnsepslice-rms-sourceparams-tencremixfix-nonlinearparammap-", key);
+                Assert.Contains("v49-directparammap-sustainresidual-meldomainconcat-waveformsustain-naturalrate-f0fallback-postleveler-loud17-grocv1-genc-hnsepslice-rms-sourceparams-tencremixfix-nonlinearparammap-", key);
                 Assert.Contains("enhnone", key);
                 Assert.Contains("dbgFalse", key);
             } finally {

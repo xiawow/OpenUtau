@@ -767,7 +767,10 @@ namespace OpenUtau.Core.HifiNeural {
                 WriteNaturalFrameMapRegion(map, outputStart, outputFrames, sourceStart, sourceFrames);
                 return;
             }
-            WriteSustainTextureFrameMap(map, outputStart, outputFrames, sourceStart, sourceFrames, stretchRatio);
+            // Long sustain mel uses directContour as the main body and texture only as a residual.
+            // Keep source-frame-aware parameters aligned to that main contour instead of the residual
+            // wander path, otherwise HNSEP parameters drift away from the audible vowel body.
+            WriteFrameMapRegion(map, outputStart, outputFrames, sourceStart, sourceFrames);
         }
 
         static void WriteNaturalFrameMapRegion(
