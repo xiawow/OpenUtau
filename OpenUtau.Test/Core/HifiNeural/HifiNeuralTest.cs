@@ -305,6 +305,37 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
+        public void SustainTextureResidualRemovesFrameMeanEnergy() {
+            var meanMethod = typeof(HifiRoughFeatureBuilder)
+                .GetMethod("TextureResidualMean", BindingFlags.NonPublic | BindingFlags.Static);
+            var composeMethod = typeof(HifiRoughFeatureBuilder)
+                .GetMethod("ComposeSustainResidualValue", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.NotNull(meanMethod);
+            Assert.NotNull(composeMethod);
+
+            float[] texture = { -3.9f, -3.8f, -3.7f, -3.6f };
+            float[] envelope = { -4.0f, -3.9f, -3.8f, -3.7f };
+            double residualMean = (double)meanMethod!.Invoke(null, new object[] { texture, envelope })!;
+            var values = new double[texture.Length];
+            for (int i = 0; i < texture.Length; i++) {
+                values[i] = (float)composeMethod!.Invoke(null, new object[] {
+                    -4.0f,
+                    -4.0f,
+                    texture[i],
+                    envelope[i],
+                    residualMean,
+                    i,
+                    texture.Length,
+                    1.0,
+                    0.0,
+                })!;
+            }
+
+            double meanDelta = values.Average() - -4.0;
+            Assert.True(Math.Abs(meanDelta) < 0.01, $"residual should not change frame mean, delta={meanDelta:F6}");
+        }
+
+        [Fact]
         public void VcvPreferredOnsetUsesConsonantBoundary() {
             var method = typeof(HifiRoughFeatureBuilder)
                 .GetMethod(
@@ -451,7 +482,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE", "none");
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT", "false");
                 string key = HifiRenderConfig.CacheKey();
-                Assert.Contains("v47-meldomainconcat-waveformsustain-naturalrate-f0fallback-postleveler-loud17-grocv1-genc-hnsepslice-rms-sourceparams-tencremixfix-nonlinearparammap-", key);
+                Assert.Contains("v48-sustainresidual-meldomainconcat-waveformsustain-naturalrate-f0fallback-postleveler-loud17-grocv1-genc-hnsepslice-rms-sourceparams-tencremixfix-nonlinearparammap-", key);
                 Assert.Contains("enhnone", key);
                 Assert.Contains("dbgFalse", key);
             } finally {
