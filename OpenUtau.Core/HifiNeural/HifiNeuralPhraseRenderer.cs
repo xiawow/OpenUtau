@@ -112,10 +112,10 @@ namespace OpenUtau.Core.HifiNeural {
 
             using var vocoder = new HifiOnnxVocoder(modelPath);
             float[] samples = vocoder.Infer(features);
-            ApplyPhraseEdgeGuard(samples, HifiMelExtractor.SampleRate);
             HifiPostVocoderLeveler.LevelInPlace(samples, features, HifiMelExtractor.SampleRate);
             HifiGrowlProcessor.ApplyInPlace(samples, phrase, layout.positionMs - layout.leadingMs, HifiMelExtractor.SampleRate);
             HifiLoudnessNormalizer.NormalizeInPlace(samples, HifiMelExtractor.SampleRate);
+            ApplyPhraseEdgeGuard(samples, HifiMelExtractor.SampleRate);
             if (HifiRenderConfig.DebugExportEnabled) {
                 HifiClickDiagnostic.Export(debugKey, features, samples);
             }

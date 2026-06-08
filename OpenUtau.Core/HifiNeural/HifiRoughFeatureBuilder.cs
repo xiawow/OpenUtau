@@ -82,6 +82,21 @@ namespace OpenUtau.Core.HifiNeural {
             double MedianFlux,
             string Reason);
 
+        readonly record struct HifiPhoneTimingPlan(
+            double? ConsonantMs,
+            double TargetPreutterMs,
+            double SourcePreutterMs,
+            int SourceLeadFrames,
+            int SourceStableStartFrames,
+            int SourceVowelOnsetFrames,
+            int SourceVowelFrames,
+            int TargetLeadFrames,
+            int TargetFixedFrames,
+            int TargetLeadOnsetFrames,
+            int SourceFixedFrames,
+            int SourceLeadOnsetFrames,
+            int TargetVowelFrames);
+
         public HifiRoughFeatureBuilder(IHifiMelEnhancer melEnhancer) {
             this.melEnhancer = melEnhancer;
         }
@@ -628,67 +643,39 @@ namespace OpenUtau.Core.HifiNeural {
                 return map;
             }
             sourceFrames = Math.Max(1, sourceFrames);
+            var timing = BuildPhoneTimingPlan(sourceFrames, outputFrames, phone);
             if (outputFrames <= 2) {
-                WriteCompactPhoneFrameMap(map, 0, outputFrames, sourceFrames, 0);
+                WriteCompactPhoneFrameMap(map, 0, outputFrames, sourceFrames, timing.SourceLeadFrames);
                 return map;
             }
-            double? consonantMs = EffectiveConsonantMs(phone);
-            double targetPreutterMs = consonantMs.HasValue ? Math.Max(0, phone.preutterMs) : 0;
-            double sourcePreutterMs = consonantMs.HasValue ? SourcePreutterMs(phone) : targetPreutterMs;
-            double stableStartMs = consonantMs.HasValue ? SourceStableStartMs(phone, sourcePreutterMs) : sourcePreutterMs;
-            int sourceConsonantFrames = sourcePreutterMs > 0
-                ? (int)Math.Round(sourcePreutterMs / SourceFrameMs)
-                : 0;
-            int sourceStableStartFrames = stableStartMs > 0
-                ? (int)Math.Round(stableStartMs / SourceFrameMs)
-                : sourceConsonantFrames;
-            sourceConsonantFrames = NormalizeSourceConsonantFrames(sourceConsonantFrames, sourceFrames, phone.phoneme);
-            sourceStableStartFrames = NormalizeSourceStableStartFrames(sourceStableStartFrames, sourceConsonantFrames, sourceFrames);
-            int sourceVowelOnsetFrames = Math.Max(0, sourceStableStartFrames - sourceConsonantFrames);
 
             if (sourceFrames < MinSourceFrames) {
                 WriteFrameMapRegion(map, 0, outputFrames, 0, sourceFrames);
                 return map;
             }
-            int vowelSourceFrames = sourceFrames - sourceConsonantFrames;
-            if (vowelSourceFrames < MinVowelSourceFrames) {
+            if (timing.SourceVowelFrames < MinVowelSourceFrames) {
                 WriteFrameMapRegion(map, 0, outputFrames, 0, sourceFrames);
                 return map;
             }
 
-            int targetLeadFrames = ResolveTargetLeadFrames(phone, consonantMs, outputFrames);
-            int targetConsonantFrames = Math.Min(ResolveTargetFixedFrames(phone, consonantMs, outputFrames), targetLeadFrames);
-            int targetLeadOnsetFrames = targetLeadFrames - targetConsonantFrames;
-            int sourceFixedFrames = ResolveSourceFixedFrames(sourceConsonantFrames, targetConsonantFrames, targetLeadFrames);
-            int sourceLeadOnsetFrames = Math.Max(0, sourceConsonantFrames - sourceFixedFrames);
-            int vowelTargetFrames = outputFrames - targetLeadFrames;
-            if (vowelTargetFrames < MinVowelTargetFrames) {
-                vowelTargetFrames = MinVowelTargetFrames;
-                targetLeadFrames = Math.Max(0, outputFrames - vowelTargetFrames);
-                targetConsonantFrames = Math.Min(targetConsonantFrames, targetLeadFrames);
-                targetLeadOnsetFrames = targetLeadFrames - targetConsonantFrames;
-                sourceFixedFrames = ResolveSourceFixedFrames(sourceConsonantFrames, targetConsonantFrames, targetLeadFrames);
-                sourceLeadOnsetFrames = Math.Max(0, sourceConsonantFrames - sourceFixedFrames);
+            if (timing.TargetFixedFrames > 0) {
+                WriteFrameMapRegion(map, 0, timing.TargetFixedFrames, 0, Math.Max(1, timing.SourceFixedFrames));
             }
-
-            if (targetConsonantFrames > 0) {
-                WriteFrameMapRegion(map, 0, targetConsonantFrames, 0, Math.Max(1, sourceFixedFrames));
-            }
-            if (targetLeadOnsetFrames > 0) {
+            if (timing.TargetLeadOnsetFrames > 0) {
                 WriteFrameMapRegion(
                     map,
-                    targetConsonantFrames,
-                    targetLeadOnsetFrames,
-                    sourceFixedFrames,
-                    Math.Max(1, sourceLeadOnsetFrames));
+                    timing.TargetFixedFrames,
+                    timing.TargetLeadOnsetFrames,
+                    timing.SourceFixedFrames,
+                    Math.Max(1, timing.SourceLeadOnsetFrames));
             }
             WriteVowelFrameMap(
                 map,
-                targetLeadFrames,
-                vowelTargetFrames,
-                sourceConsonantFrames,
-                vowelSourceFrames,
-                sourceVowelOnsetFrames);
+                timing.TargetLeadFrames,
+                timing.TargetVowelFrames,
+                timing.SourceLeadFrames,
+                timing.SourceVowelFrames,
+                timing.SourceVowelOnsetFrames);
             return map;
         }
 
@@ -878,104 +865,68 @@ namespace OpenUtau.Core.HifiNeural {
             float[] targetF0,
             float[]? sourceSamples,
             double sourceKeyShiftSemitones = 0) {
-            double? consonantMs = EffectiveConsonantMs(phone);
-            // VCV/CVVC timing has two separate coordinate systems:
-            // - target preutter: OpenUtau's possibly capped/overlap-adjusted note-grid lead.
-            // - source preutter/consonant: the original oto coordinates inside the raw sample.
-            // ClassicRenderer bridges these with skipOver; HIFI-NEURA must not use the capped
-            // target preutter as a source-sample boundary, or the vowel/onset arrives late.
-            double targetPreutterMs = consonantMs.HasValue ? Math.Max(0, phone.preutterMs) : 0;
-            double sourcePreutterMs = consonantMs.HasValue ? SourcePreutterMs(phone) : targetPreutterMs;
-            double stableStartMs = consonantMs.HasValue ? SourceStableStartMs(phone, sourcePreutterMs) : sourcePreutterMs;
-            int sourceConsonantFrames = sourcePreutterMs > 0
-                ? (int)Math.Round(sourcePreutterMs / SourceFrameMs)
-                : 0;
-            int sourceStableStartFrames = stableStartMs > 0
-                ? (int)Math.Round(stableStartMs / SourceFrameMs)
-                : sourceConsonantFrames;
             sourceFrames = Math.Max(1, Math.Min(sourceFrames, sourceMel.GetLength(1) - sourceStart));
             outputFrames = Math.Max(1, Math.Min(outputFrames, output.GetLength(1) - outputStart));
-            sourceFrames = TrimInactiveTailFrames(sourceMel, sourceStart, sourceFrames, sourceConsonantFrames, phone.phoneme);
-            sourceConsonantFrames = NormalizeSourceConsonantFrames(sourceConsonantFrames, sourceFrames, phone.phoneme);
-            sourceStableStartFrames = NormalizeSourceStableStartFrames(sourceStableStartFrames, sourceConsonantFrames, sourceFrames);
-            int sourceVowelOnsetFrames = Math.Max(0, sourceStableStartFrames - sourceConsonantFrames);
+            var initialTiming = BuildPhoneTimingPlan(sourceFrames, outputFrames, phone);
+            sourceFrames = TrimInactiveTailFrames(sourceMel, sourceStart, sourceFrames, initialTiming.SourceLeadFrames, phone.phoneme);
+            var timing = BuildPhoneTimingPlan(sourceFrames, outputFrames, phone);
             if (outputFrames <= 2) {
-                WriteCompactPhoneRegion(sourceMel, sourceStart, sourceFrames, output, outputStart, outputFrames, sourceConsonantFrames);
+                WriteCompactPhoneRegion(sourceMel, sourceStart, sourceFrames, output, outputStart, outputFrames, timing.SourceLeadFrames);
                 return new PhoneMapReport(false, "compact_short_target", 0, 0);
             }
             if (sourceFrames < MinSourceFrames) {
                 WriteMappedRegion(sourceMel, sourceStart, sourceFrames, output, outputStart, outputFrames);
                 return new PhoneMapReport(false, "simple_short_source", 0, 0);
             }
-            int vowelSourceFrames = sourceFrames - sourceConsonantFrames;
-            if (vowelSourceFrames < MinVowelSourceFrames) {
+            if (timing.SourceVowelFrames < MinVowelSourceFrames) {
                 WriteMappedRegion(sourceMel, sourceStart, sourceFrames, output, outputStart, outputFrames);
                 return new PhoneMapReport(false, "simple_no_vowel_room", 0, 0);
             }
 
-            // Target fixed length is a rhythmic lead, not the raw oto preutter. Raw preutter can be
-            // very large in VCV/CVVC banks; keeping all of it fixed makes short notes drag and
-            // delays the vowel body. The source still uses preutter as the alignment point, but it
-            // is compressed into this shorter target lead.
-            int targetLeadFrames = ResolveTargetLeadFrames(phone, consonantMs, outputFrames);
-            int targetConsonantFrames = Math.Min(ResolveTargetFixedFrames(phone, consonantMs, outputFrames), targetLeadFrames);
-            int targetLeadOnsetFrames = targetLeadFrames - targetConsonantFrames;
-            int sourceFixedFrames = ResolveSourceFixedFrames(sourceConsonantFrames, targetConsonantFrames, targetLeadFrames);
-            int sourceLeadOnsetFrames = Math.Max(0, sourceConsonantFrames - sourceFixedFrames);
-            int vowelTargetFrames = outputFrames - targetLeadFrames;
-            if (vowelTargetFrames < MinVowelTargetFrames) {
-                vowelTargetFrames = MinVowelTargetFrames;
-                targetLeadFrames = Math.Max(0, outputFrames - vowelTargetFrames);
-                targetConsonantFrames = Math.Min(targetConsonantFrames, targetLeadFrames);
-                targetLeadOnsetFrames = targetLeadFrames - targetConsonantFrames;
-                sourceFixedFrames = ResolveSourceFixedFrames(sourceConsonantFrames, targetConsonantFrames, targetLeadFrames);
-                sourceLeadOnsetFrames = Math.Max(0, sourceConsonantFrames - sourceFixedFrames);
+            if (timing.SourceLeadFrames > 0 && timing.TargetFixedFrames > 0) {
+                WriteMappedRegion(sourceMel, sourceStart, Math.Max(1, timing.SourceFixedFrames), output, outputStart, timing.TargetFixedFrames);
             }
-
-            if (sourceConsonantFrames > 0 && targetConsonantFrames > 0) {
-                WriteMappedRegion(sourceMel, sourceStart, Math.Max(1, sourceFixedFrames), output, outputStart, targetConsonantFrames);
-            }
-            if (targetLeadOnsetFrames > 0) {
+            if (timing.TargetLeadOnsetFrames > 0) {
                 WriteMappedRegion(
                     sourceMel,
-                    sourceStart + sourceFixedFrames,
-                    Math.Max(1, sourceLeadOnsetFrames),
+                    sourceStart + timing.SourceFixedFrames,
+                    Math.Max(1, timing.SourceLeadOnsetFrames),
                     output,
-                    outputStart + targetConsonantFrames,
-                    targetLeadOnsetFrames);
+                    outputStart + timing.TargetFixedFrames,
+                    timing.TargetLeadOnsetFrames);
             }
 
             var vowelMap = WriteVowelSourceToTargetMap(
                 sourceMel,
-                sourceStart + sourceConsonantFrames,
-                vowelSourceFrames,
+                sourceStart + timing.SourceLeadFrames,
+                timing.SourceVowelFrames,
                 output,
-                outputStart + targetLeadFrames,
-                vowelTargetFrames,
+                outputStart + timing.TargetLeadFrames,
+                timing.TargetVowelFrames,
                 targetF0,
                 phone.phoneme,
-                sourceVowelOnsetFrames,
+                timing.SourceVowelOnsetFrames,
                 sourceSamples,
                 phone.tone,
                 sourceKeyShiftSemitones);
 
-            double consonantRatio = sourceConsonantFrames > 0
-                ? (targetConsonantFrames * HifiF0Builder.FrameMs) / Math.Max(SourceFrameMs, sourceConsonantFrames * SourceFrameMs)
+            double consonantRatio = timing.SourceLeadFrames > 0
+                ? (timing.TargetFixedFrames * HifiF0Builder.FrameMs) / Math.Max(SourceFrameMs, timing.SourceLeadFrames * SourceFrameMs)
                 : 0;
-            double vowelRatio = (vowelTargetFrames * HifiF0Builder.FrameMs) / Math.Max(SourceFrameMs, vowelSourceFrames * SourceFrameMs);
+            double vowelRatio = (timing.TargetVowelFrames * HifiF0Builder.FrameMs) / Math.Max(SourceFrameMs, timing.SourceVowelFrames * SourceFrameMs);
             Log.Debug(
                 "HifiRoughFeatureBuilder phone_timewarp phoneme={Phoneme} source_frames={SourceFrames} target_frames={TargetFrames} source_preutter_ms={SourcePreutterMs:F2} target_preutter_ms={TargetPreutterMs:F2} source_fixed_frames={SourceFixedFrames} target_fixed_frames={TargetFixedFrames} source_vowel_onset_frames={SourceVowelOnsetFrames} target_vowel_onset_frames={TargetVowelOnsetFrames} source_vowel_frames={SourceVowelFrames} target_vowel_frames={TargetVowelFrames} fixed_ratio={FixedRatio:F4} vowel_ratio={VowelRatio:F4} strategy={Strategy}",
                 phone.phoneme,
                 sourceFrames,
                 outputFrames,
-                sourcePreutterMs,
-                targetPreutterMs,
-                sourceFixedFrames,
-                targetConsonantFrames,
-                sourceLeadOnsetFrames + sourceVowelOnsetFrames,
+                timing.SourcePreutterMs,
+                timing.TargetPreutterMs,
+                timing.SourceFixedFrames,
+                timing.TargetFixedFrames,
+                timing.SourceLeadOnsetFrames + timing.SourceVowelOnsetFrames,
                 vowelMap.TargetOnsetFrames,
-                vowelSourceFrames,
-                vowelTargetFrames,
+                timing.SourceVowelFrames,
+                timing.TargetVowelFrames,
                 consonantRatio,
                 vowelRatio,
                 vowelMap.Strategy);
@@ -984,8 +935,8 @@ namespace OpenUtau.Core.HifiNeural {
             // voiced; zeroing F0 over the whole region made that vowel onset lose its harmonic
             // source and the note sounded muffled/"dead". So we only mask the leading pure-consonant
             // portion, bounded by min(preutter, consonant) and kept strictly inside the region.
-            int f0MaskFrames = ResolveConsonantF0MaskFrames(phone, consonantMs, targetConsonantFrames);
-            return new PhoneMapReport(true, vowelMap.Strategy, targetConsonantFrames, f0MaskFrames);
+            int f0MaskFrames = ResolveConsonantF0MaskFrames(phone, timing.ConsonantMs, timing.TargetFixedFrames);
+            return new PhoneMapReport(true, vowelMap.Strategy, timing.TargetFixedFrames, f0MaskFrames);
         }
 
         static int[] BuildPhoneStarts(RenderPhrase phrase, double phraseStartMs, int totalFrames, double frameMs) {
@@ -2367,6 +2318,61 @@ namespace OpenUtau.Core.HifiNeural {
                 sourceStableStartFrames = maxStableStart;
             }
             return Math.Clamp(sourceStableStartFrames, sourceFixedFrames, sourceFrames);
+        }
+
+        static HifiPhoneTimingPlan BuildPhoneTimingPlan(int sourceFrames, int outputFrames, RenderPhone phone) {
+            sourceFrames = Math.Max(1, sourceFrames);
+            outputFrames = Math.Max(1, outputFrames);
+            double? consonantMs = EffectiveConsonantMs(phone);
+            // VCV/CVVC timing has two separate coordinate systems:
+            // - target preutter: OpenUtau's possibly capped/overlap-adjusted note-grid lead.
+            // - source preutter/consonant: the original oto coordinates inside the raw sample.
+            // ClassicRenderer bridges these with skipOver; HIFI-NEURA must not use the capped
+            // target preutter as a source-sample boundary, or the vowel/onset arrives late.
+            double targetPreutterMs = consonantMs.HasValue ? Math.Max(0, phone.preutterMs) : 0;
+            double sourcePreutterMs = consonantMs.HasValue ? SourcePreutterMs(phone) : targetPreutterMs;
+            double stableStartMs = consonantMs.HasValue ? SourceStableStartMs(phone, sourcePreutterMs) : sourcePreutterMs;
+
+            int sourceLeadFrames = sourcePreutterMs > 0
+                ? (int)Math.Round(sourcePreutterMs / SourceFrameMs)
+                : 0;
+            int sourceStableStartFrames = stableStartMs > 0
+                ? (int)Math.Round(stableStartMs / SourceFrameMs)
+                : sourceLeadFrames;
+            sourceLeadFrames = NormalizeSourceConsonantFrames(sourceLeadFrames, sourceFrames, phone.phoneme);
+            sourceStableStartFrames = NormalizeSourceStableStartFrames(sourceStableStartFrames, sourceLeadFrames, sourceFrames);
+            int sourceVowelOnsetFrames = Math.Max(0, sourceStableStartFrames - sourceLeadFrames);
+            int sourceVowelFrames = sourceFrames - sourceLeadFrames;
+
+            int targetLeadFrames = ResolveTargetLeadFrames(phone, consonantMs, outputFrames);
+            int targetFixedFrames = Math.Min(ResolveTargetFixedFrames(phone, consonantMs, outputFrames), targetLeadFrames);
+            int targetLeadOnsetFrames = targetLeadFrames - targetFixedFrames;
+            int sourceFixedFrames = ResolveSourceFixedFrames(sourceLeadFrames, targetFixedFrames, targetLeadFrames);
+            int sourceLeadOnsetFrames = Math.Max(0, sourceLeadFrames - sourceFixedFrames);
+            int targetVowelFrames = outputFrames - targetLeadFrames;
+            if (targetVowelFrames < MinVowelTargetFrames) {
+                targetVowelFrames = MinVowelTargetFrames;
+                targetLeadFrames = Math.Max(0, outputFrames - targetVowelFrames);
+                targetFixedFrames = Math.Min(targetFixedFrames, targetLeadFrames);
+                targetLeadOnsetFrames = targetLeadFrames - targetFixedFrames;
+                sourceFixedFrames = ResolveSourceFixedFrames(sourceLeadFrames, targetFixedFrames, targetLeadFrames);
+                sourceLeadOnsetFrames = Math.Max(0, sourceLeadFrames - sourceFixedFrames);
+            }
+
+            return new HifiPhoneTimingPlan(
+                consonantMs,
+                targetPreutterMs,
+                sourcePreutterMs,
+                sourceLeadFrames,
+                sourceStableStartFrames,
+                sourceVowelOnsetFrames,
+                sourceVowelFrames,
+                targetLeadFrames,
+                targetFixedFrames,
+                targetLeadOnsetFrames,
+                sourceFixedFrames,
+                sourceLeadOnsetFrames,
+                targetVowelFrames);
         }
 
         internal static double ResolveTargetFixedMs(RenderPhone phone) {
