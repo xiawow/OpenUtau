@@ -20,6 +20,8 @@ namespace OpenUtau.Core.HifiNeural {
     public sealed class HifiMelPhraseAssembler {
         const float LogFloor = -11.512925f; // log(1e-5), matches HifiMelExtractor floor.
         const int SampleRate = HifiMelExtractor.SampleRate;
+        const double RestGapToleranceMs = 8.0;
+        const double RestReleaseGuardMs = 18.0;
 
         readonly HifiMelExtractor melExtractor = new HifiMelExtractor();
 
@@ -107,27 +109,27 @@ namespace OpenUtau.Core.HifiNeural {
                 return null;
             }
 
-            // Placement on the phrase frame grid. The phone audibly begins at its pre-utterance
-            // point (positionMs - preutterMs), the same anchor SharpWavtool used (posMs =
-            // phone.positionMs - phone.leadingMs). The segment runs until the next phone's anchor
-            // (or phrase end), plus a short overlap tail so adjacent segments share frames.
+            // Placement stays on OpenUtau's raw preutter anchor so the phrase grid remains
+            // continuous. The shortened target lead is only used inside the phone mel mapper.
             int startFrame = MsToFrame(phone.positionMs - phone.preutterMs - phraseStartMs);
             startFrame = Math.Clamp(startFrame, 0, Math.Max(0, targetFrames - 1));
 
-            int nextAnchorFrame;
-            if (phoneIndex + 1 < phrase.phones.Length) {
+            bool hasNextPhone = phoneIndex + 1 < phrase.phones.Length;
+            double nextAnchorMs;
+            if (hasNextPhone) {
                 var next = phrase.phones[phoneIndex + 1];
-                nextAnchorFrame = MsToFrame(next.positionMs - next.preutterMs - phraseStartMs);
+                nextAnchorMs = next.positionMs - next.preutterMs;
             } else {
-                nextAnchorFrame = targetFrames;
+                nextAnchorMs = phraseStartMs + targetFrames * HifiF0Builder.FrameMs;
             }
+            int nextAnchorFrame = MsToFrame(nextAnchorMs - phraseStartMs);
             nextAnchorFrame = Math.Clamp(nextAnchorFrame, startFrame + 1, targetFrames);
 
             // Overlap with the next segment: the next phone's overlap window (overlapMs) is the
             // region where both phones sound. We extend this segment past the next anchor by that
             // overlap so the cross-fade has frames to work with.
             int overlapTailFrames = 0;
-            if (phoneIndex + 1 < phrase.phones.Length) {
+            if (hasNextPhone) {
                 double nextOverlapMs = Math.Max(0, phrase.phones[phoneIndex + 1].overlapMs);
                 overlapTailFrames = Math.Clamp(
                     (int)Math.Round(nextOverlapMs / HifiF0Builder.FrameMs),
@@ -135,8 +137,17 @@ namespace OpenUtau.Core.HifiNeural {
                     Math.Max(0, targetFrames - nextAnchorFrame));
             }
 
-            int frameCount = Math.Max(1, nextAnchorFrame - startFrame + overlapTailFrames);
-            frameCount = Math.Min(frameCount, targetFrames - startFrame);
+            bool hasRestGap = hasNextPhone && nextAnchorMs - phone.endMs > RestGapToleranceMs;
+            int segmentEndFrame = ResolveSegmentEndFrame(
+                startFrame,
+                nextAnchorFrame,
+                overlapTailFrames,
+                targetFrames,
+                hasNextPhone,
+                hasRestGap,
+                ResolvePhoneReleaseEndFrame(phone, phraseStartMs),
+                ResolveCorrectedEnvelopeEndFrame(phone, phraseStartMs));
+            int frameCount = Math.Max(1, segmentEndFrame - startFrame);
             if (frameCount <= 0) {
                 return null;
             }
@@ -220,6 +231,54 @@ namespace OpenUtau.Core.HifiNeural {
                 sourceFrameCount,
                 sourceSampleCount);
             return sourceTrack;
+        }
+
+        internal static int ResolveSegmentEndFrame(
+            int startFrame,
+            int nextAnchorFrame,
+            int overlapTailFrames,
+            int targetFrames,
+            bool hasNextPhone,
+            bool hasRestGap,
+            int phoneReleaseEndFrame,
+            int correctedEnvelopeEndFrame) {
+            targetFrames = Math.Max(0, targetFrames);
+            if (targetFrames == 0) {
+                return 0;
+            }
+            startFrame = Math.Clamp(startFrame, 0, Math.Max(0, targetFrames - 1));
+            int overlapEndFrame = Math.Clamp(nextAnchorFrame + Math.Max(0, overlapTailFrames), startFrame + 1, targetFrames);
+            if (!hasNextPhone || !hasRestGap) {
+                return overlapEndFrame;
+            }
+
+            // In a real rest gap, do not fill silence up to the next phone anchor. Keep a short
+            // release guard, and let the corrected OTO envelope end participate only as an upper
+            // bound for rest handling. Connected phones must not be hard-clipped by envelope[4].
+            int restEndFrame = Math.Clamp(nextAnchorFrame, startFrame + 1, targetFrames);
+            if (phoneReleaseEndFrame > 0) {
+                restEndFrame = Math.Min(restEndFrame, Math.Clamp(phoneReleaseEndFrame, startFrame + 1, targetFrames));
+            }
+            if (correctedEnvelopeEndFrame > 0) {
+                restEndFrame = Math.Min(restEndFrame, Math.Clamp(correctedEnvelopeEndFrame, startFrame + 1, targetFrames));
+            }
+            return Math.Clamp(restEndFrame, startFrame + 1, targetFrames);
+        }
+
+        static int ResolvePhoneReleaseEndFrame(RenderPhone phone, double phraseStartMs) {
+            return MsToFrame(phone.endMs + RestReleaseGuardMs - phraseStartMs);
+        }
+
+        static int ResolveCorrectedEnvelopeEndFrame(RenderPhone phone, double phraseStartMs) {
+            if (phone.envelope == null || phone.envelope.Length < 5) {
+                return -1;
+            }
+            double envelopeLengthMs = phone.envelope[4].X - phone.envelope[0].X;
+            if (envelopeLengthMs <= 0) {
+                return -1;
+            }
+            double segmentStartMs = phone.positionMs - phone.leadingMs;
+            return MsToFrame(segmentStartMs + envelopeLengthMs + RestReleaseGuardMs - phraseStartMs);
         }
 
         static void AssembleWithOverlapCrossfade(float[,] output, List<PhoneMelSegment> segments, int targetFrames) {

@@ -112,7 +112,7 @@ namespace OpenUtau.Core.HifiNeural {
 
             using var vocoder = new HifiOnnxVocoder(modelPath);
             float[] samples = vocoder.Infer(features);
-            ApplyPhraseEdgeGuard(samples, HifiMelExtractor.SampleRate, fadeInMs: 14, fadeOutMs: 32);
+            ApplyPhraseEdgeGuard(samples, HifiMelExtractor.SampleRate);
             HifiPostVocoderLeveler.LevelInPlace(samples, features, HifiMelExtractor.SampleRate);
             HifiGrowlProcessor.ApplyInPlace(samples, phrase, layout.positionMs - layout.leadingMs, HifiMelExtractor.SampleRate);
             HifiLoudnessNormalizer.NormalizeInPlace(samples, HifiMelExtractor.SampleRate);
@@ -125,12 +125,32 @@ namespace OpenUtau.Core.HifiNeural {
             return samples;
         }
 
-        static void ApplyPhraseEdgeGuard(float[] samples, int sampleRate, double fadeInMs, double fadeOutMs) {
+        internal static void ApplyPhraseEdgeGuard(float[] samples, int sampleRate) {
+            const double edgeProbeMs = 2.0;
+            const double fadeInMs = 8.0;
+            const double fadeOutMs = 10.0;
+            const double absoluteThreshold = 0.0015;
+            const double peakRatioThreshold = 0.018;
+            if (samples.Length == 0) {
+                return;
+            }
+
+            double peak = PeakAbs(samples);
+            if (peak <= 1e-6) {
+                return;
+            }
+            double threshold = Math.Max(absoluteThreshold, peak * peakRatioThreshold);
+            int probeSamples = Math.Clamp((int)Math.Round(sampleRate * edgeProbeMs / 1000.0), 1, samples.Length);
             int maxFade = Math.Max(1, samples.Length / 2);
             int fadeInSamples = Math.Min(maxFade, Math.Max(1, (int)Math.Round(sampleRate * fadeInMs / 1000.0)));
             int fadeOutSamples = Math.Min(maxFade, Math.Max(1, (int)Math.Round(sampleRate * fadeOutMs / 1000.0)));
-            ApplyFadeIn(samples, fadeInSamples);
-            ApplyFadeOut(samples, fadeOutSamples);
+
+            if (EdgePeak(samples, 0, probeSamples) > threshold) {
+                ApplyFadeIn(samples, fadeInSamples);
+            }
+            if (EdgePeak(samples, samples.Length - probeSamples, probeSamples) > threshold) {
+                ApplyFadeOut(samples, fadeOutSamples);
+            }
         }
 
         static void ApplyFadeIn(float[] samples, int fadeSamples) {
@@ -150,6 +170,34 @@ namespace OpenUtau.Core.HifiNeural {
                 float gain = (float)(0.5 - 0.5 * Math.Cos(Math.PI * t));
                 samples[index] *= gain;
             }
+        }
+
+        static double PeakAbs(float[] samples) {
+            double peak = 0;
+            foreach (float sample in samples) {
+                if (float.IsNaN(sample) || float.IsInfinity(sample)) {
+                    continue;
+                }
+                peak = Math.Max(peak, Math.Abs(sample));
+            }
+            return peak;
+        }
+
+        static double EdgePeak(float[] samples, int start, int count) {
+            if (count <= 0 || samples.Length == 0) {
+                return 0;
+            }
+            start = Math.Clamp(start, 0, samples.Length);
+            int end = Math.Clamp(start + count, start, samples.Length);
+            double peak = 0;
+            for (int i = start; i < end; i++) {
+                float sample = samples[i];
+                if (float.IsNaN(sample) || float.IsInfinity(sample)) {
+                    continue;
+                }
+                peak = Math.Max(peak, Math.Abs(sample));
+            }
+            return peak;
         }
 
         static void SaveCache(string wavPath, float[] samples) {

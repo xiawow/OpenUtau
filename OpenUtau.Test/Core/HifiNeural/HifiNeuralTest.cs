@@ -506,7 +506,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE", "none");
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT", "false");
                 string key = HifiRenderConfig.CacheKey();
-                Assert.Contains("v49-directparammap-sustainresidual-meldomainconcat-waveformsustain-naturalrate-f0fallback-postleveler-loud17-grocv1-genc-hnsepslice-rms-sourceparams-tencremixfix-nonlinearparammap-", key);
+                Assert.Contains("v58-audibletargetfixed-sourceotopreutter-conditionaledge-restgapend-finaltail-vowelbudget-anchorlead-targetfixed-envelopeend-directparammap-sustainresidual-meldomainconcat-waveformsustain-naturalrate-f0fallback-postleveler-loud17-grocv1-genc-hnsepslice-rms-sourceparams-tencremixfix-nonlinearparammap-", key);
                 Assert.Contains("enhnone", key);
                 Assert.Contains("dbgFalse", key);
             } finally {
@@ -1045,6 +1045,253 @@ namespace OpenUtau.Core.Test.HifiNeural {
             Assert.Equal(0.5, CrossfadeProgress(0, 1), 6);
         }
 
+        [Fact]
+        public void PhraseEdgeGuardKeepsNaturallyQuietTail() {
+            var samples = new float[44100 / 5];
+            for (int i = 0; i < samples.Length; i++) {
+                samples[i] = 0.2f;
+            }
+            for (int i = 0; i < 512; i++) {
+                int index = samples.Length - 1 - i;
+                samples[index] = 0.0002f * (i / 512f);
+            }
+            float before = samples[^128];
+
+            HifiNeuralPhraseRenderer.ApplyPhraseEdgeGuard(samples, 44100);
+
+            Assert.Equal(before, samples[^128], 6);
+        }
+
+        [Fact]
+        public void PhraseEdgeGuardFadesNonZeroEdges() {
+            var samples = Enumerable.Repeat(0.2f, 44100 / 5).ToArray();
+
+            HifiNeuralPhraseRenderer.ApplyPhraseEdgeGuard(samples, 44100);
+
+            Assert.Equal(0f, samples[0], 6);
+            Assert.Equal(0f, samples[^1], 6);
+            Assert.True(samples[400] > samples[0]);
+            Assert.True(samples[^401] > samples[^1]);
+        }
+
+        [Fact]
+        public void SegmentEndDoesNotStretchAcrossRestGap() {
+            int end = ResolveSegmentEndFrame(
+                startFrame: 10,
+                nextAnchorFrame: 80,
+                overlapTailFrames: 0,
+                targetFrames: 100,
+                hasNextPhone: true,
+                hasRestGap: true,
+                phoneReleaseEndFrame: 10 + FramesForMs(260),
+                correctedEnvelopeEndFrame: 10 + FramesForMs(340));
+
+            Assert.Equal(10 + FramesForMs(260), end);
+            Assert.True(end < 80, "phone mel should end near its release instead of filling a rest gap");
+        }
+
+        [Fact]
+        public void SegmentEndKeepsOtoOverlapTailForConnectedPhones() {
+            int startFrame = 5;
+            int nextAnchorFrame = 85;
+            int overlapTailFrames = 10;
+
+            int end = ResolveSegmentEndFrame(
+                startFrame,
+                nextAnchorFrame,
+                overlapTailFrames,
+                targetFrames: 120,
+                hasNextPhone: true,
+                hasRestGap: false,
+                phoneReleaseEndFrame: 40,
+                correctedEnvelopeEndFrame: 35);
+
+            Assert.Equal(nextAnchorFrame + overlapTailFrames, end);
+        }
+
+        [Fact]
+        public void SegmentEndUsesCorrectedEnvelopeOnlyForRestGap() {
+            int end = ResolveSegmentEndFrame(
+                startFrame: 10,
+                nextAnchorFrame: 90,
+                overlapTailFrames: 8,
+                targetFrames: 120,
+                hasNextPhone: true,
+                hasRestGap: true,
+                phoneReleaseEndFrame: 70,
+                correctedEnvelopeEndFrame: 55);
+
+            Assert.Equal(55, end);
+        }
+
+        [Fact]
+        public void SegmentEndDoesNotCutPhraseFinalTail() {
+            int end = ResolveSegmentEndFrame(
+                startFrame: 10,
+                nextAnchorFrame: 100,
+                overlapTailFrames: 0,
+                targetFrames: 100,
+                hasNextPhone: false,
+                hasRestGap: true,
+                phoneReleaseEndFrame: 40,
+                correctedEnvelopeEndFrame: 30);
+
+            Assert.Equal(100, end);
+        }
+
+        [Fact]
+        public void TargetFixedLeadCapsLargeVcvPreutter() {
+            double fixedMs = ResolveTargetFixedMs(
+                preutterMs: 180,
+                overlapMs: 80,
+                durationMs: 120,
+                hasReliableConsonant: true);
+
+            Assert.True(fixedMs is >= 60 and <= 75, $"large preutter should be shortened but still audible, got {fixedMs:F3}ms");
+            Assert.True(fixedMs >= HifiF0Builder.FrameMs);
+        }
+
+        [Fact]
+        public void TargetFixedLeadKeepsShortConsonantsAudible() {
+            double fixedMs = ResolveTargetFixedMs(
+                preutterMs: 180,
+                overlapMs: 80,
+                durationMs: 70,
+                hasReliableConsonant: true);
+
+            Assert.True(fixedMs >= 40, $"short-note consonant lead should not collapse, got {fixedMs:F3}ms");
+            Assert.True(fixedMs < 55, $"short-note consonant lead should not dominate the note, got {fixedMs:F3}ms");
+        }
+
+        [Fact]
+        public void TargetFixedLeadPreservesSmallPreutter() {
+            double fixedMs = ResolveTargetFixedMs(
+                preutterMs: 24,
+                overlapMs: 4,
+                durationMs: 240,
+                hasReliableConsonant: true);
+
+            Assert.Equal(24, fixedMs, 3);
+        }
+
+        [Fact]
+        public void TargetFixedLeadKeepsRawPreutterAnchorInSourceMap() {
+            double preutterMs = 180;
+            int sourceFrames = 120;
+            int targetFrames = 60;
+            var phone = CreateRenderPhoneForTiming(
+                preutterMs,
+                overlapMs: 80,
+                durationMs: 120,
+                consonantMs: 230);
+
+            double[] map = HifiRoughFeatureBuilder.BuildPhoneTargetToSourceFrameMap(sourceFrames, targetFrames, phone);
+            int targetLeadFrames = Math.Min(targetFrames - 1, FramesForMs(preutterMs));
+            int sourceLeadFrames = Math.Min(sourceFrames - 4, SourceFramesForMs(preutterMs));
+
+            Assert.True(ResolveTargetFixedMs(180, 80, 120, true) < preutterMs);
+            Assert.Equal(sourceLeadFrames, map[targetLeadFrames], 1.0);
+        }
+
+        [Fact]
+        public void SourceMapUsesOtoPreutterWhenTargetPreutterIsCapped() {
+            var phone = CreateRenderPhoneForTiming(
+                preutterMs: 80,
+                overlapMs: 40,
+                durationMs: 120,
+                consonantMs: 250,
+                sourcePreutterMs: 180);
+
+            double[] map = HifiRoughFeatureBuilder.BuildPhoneTargetToSourceFrameMap(
+                sourceFrames: 160,
+                outputFrames: 80,
+                phone);
+            int targetLeadFrames = ResolveTargetLeadFrames(phone, outputFrames: 80);
+            int targetPreutterSourceFrames = SourceFramesForMs(80);
+            int rawOtoPreutterSourceFrames = SourceFramesForMs(180);
+
+            Assert.True(rawOtoPreutterSourceFrames > targetPreutterSourceFrames);
+            Assert.Equal(rawOtoPreutterSourceFrames, map[targetLeadFrames], 1.0);
+        }
+
+        [Fact]
+        public void TargetLeadLeavesVowelCoreOnShortPhones() {
+            var phone = CreateRenderPhoneForTiming(
+                preutterMs: 180,
+                overlapMs: 80,
+                durationMs: 70,
+                consonantMs: 230);
+
+            int leadFrames = ResolveTargetLeadFrames(phone, outputFrames: 6);
+
+            Assert.Equal(4, leadFrames);
+        }
+
+        static double ResolveTargetFixedMs(
+            double preutterMs,
+            double overlapMs,
+            double durationMs,
+            bool hasReliableConsonant) {
+            var method = typeof(HifiRoughFeatureBuilder)
+                .GetMethod(
+                    "ResolveTargetFixedMs",
+                    BindingFlags.NonPublic | BindingFlags.Static,
+                    binder: null,
+                    types: new[] {
+                        typeof(double),
+                        typeof(double),
+                        typeof(double),
+                        typeof(bool),
+                    },
+                    modifiers: null);
+            Assert.NotNull(method);
+            return (double)method!.Invoke(null, new object[] {
+                preutterMs,
+                overlapMs,
+                durationMs,
+                hasReliableConsonant,
+            })!;
+        }
+
+        static int ResolveTargetLeadFrames(RenderPhone phone, int outputFrames) {
+            var method = typeof(HifiRoughFeatureBuilder)
+                .GetMethod("ResolveTargetLeadFrames", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.NotNull(method);
+            return (int)method!.Invoke(null, new object[] {
+                phone,
+                (double?)phone.oto.Consonant,
+                outputFrames,
+            })!;
+        }
+
+        static int ResolveSegmentEndFrame(
+            int startFrame,
+            int nextAnchorFrame,
+            int overlapTailFrames,
+            int targetFrames,
+            bool hasNextPhone,
+            bool hasRestGap,
+            int phoneReleaseEndFrame,
+            int correctedEnvelopeEndFrame) {
+            var method = typeof(HifiMelPhraseAssembler)
+                .GetMethod("ResolveSegmentEndFrame", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert.NotNull(method);
+            return (int)method!.Invoke(null, new object[] {
+                startFrame,
+                nextAnchorFrame,
+                overlapTailFrames,
+                targetFrames,
+                hasNextPhone,
+                hasRestGap,
+                phoneReleaseEndFrame,
+                correctedEnvelopeEndFrame,
+            })!;
+        }
+
+        static int FramesForMs(double ms) => (int)Math.Round(ms / HifiF0Builder.FrameMs);
+
+        static int SourceFramesForMs(double ms) => (int)Math.Round(ms / (1000.0 * HifiMelExtractor.OriginHopSize / HifiMelExtractor.SampleRate));
+
         static HifiPhraseFeatures CreateLevelerFeatures(int sampleCount, float f0) {
             int frames = Math.Max(1, (sampleCount + HifiOnnxVocoder.HopSize - 1) / HifiOnnxVocoder.HopSize);
             return CreateLevelerFeatures(sampleCount, Enumerable.Repeat(f0, frames).ToArray());
@@ -1208,6 +1455,25 @@ namespace OpenUtau.Core.Test.HifiNeural {
             SetReadonlyField(note, "positionMs", positionMs);
             SetReadonlyField(note, "endMs", endMs);
             return note;
+        }
+
+        static RenderPhone CreateRenderPhoneForTiming(
+            double preutterMs,
+            double overlapMs,
+            double durationMs,
+            double consonantMs,
+            double? sourcePreutterMs = null) {
+            var phone = (RenderPhone)FormatterServices.GetUninitializedObject(typeof(RenderPhone));
+            var oto = new UOto {
+                Consonant = consonantMs,
+                Preutter = sourcePreutterMs ?? preutterMs,
+            };
+            SetReadonlyField(phone, "phoneme", "a");
+            SetReadonlyField(phone, "preutterMs", preutterMs);
+            SetReadonlyField(phone, "overlapMs", overlapMs);
+            SetReadonlyField(phone, "durationMs", durationMs);
+            SetReadonlyField(phone, "oto", oto);
+            return phone;
         }
 
         static void SetReadonlyField(object target, string fieldName, object value) {
