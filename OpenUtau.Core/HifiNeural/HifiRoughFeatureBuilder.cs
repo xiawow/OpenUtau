@@ -11,6 +11,9 @@ namespace OpenUtau.Core.HifiNeural {
         const int MinVowelTargetFrames = 1;
         const double TargetFixedMaxMs = 72.0;
         const double TargetFixedShortNoteRatio = 0.60;
+        const double TargetFixedDynamicShortNoteRatioRange = 0.22;
+        const double TargetFixedSourceOnsetBonusMaxMs = 12.0;
+        const double TargetFixedSourceOnsetBonusRatio = 0.25;
         const double TargetFixedOverlapRelease = 0.35;
         // Historical diagnostic ceiling for the old F0-mask span. The mask is not applied because
         // this NSF vocoder treats F0=0 as silence.
@@ -2331,6 +2334,7 @@ namespace OpenUtau.Core.HifiNeural {
             // target preutter as a source-sample boundary, or the vowel/onset arrives late.
             double targetPreutterMs = consonantMs.HasValue ? Math.Max(0, phone.preutterMs) : 0;
             double sourcePreutterMs = consonantMs.HasValue ? SourcePreutterMs(phone) : targetPreutterMs;
+            double sourceOverlapMs = consonantMs.HasValue ? SourceOverlapMs(phone) : Math.Max(0, phone.overlapMs);
             double stableStartMs = consonantMs.HasValue ? SourceStableStartMs(phone, sourcePreutterMs) : sourcePreutterMs;
 
             int sourceLeadFrames = sourcePreutterMs > 0
@@ -2345,7 +2349,9 @@ namespace OpenUtau.Core.HifiNeural {
             int sourceVowelFrames = sourceFrames - sourceLeadFrames;
 
             int targetLeadFrames = ResolveTargetLeadFrames(phone, consonantMs, outputFrames);
-            int targetFixedFrames = Math.Min(ResolveTargetFixedFrames(phone, consonantMs, outputFrames), targetLeadFrames);
+            int targetFixedFrames = Math.Min(
+                ResolveTargetFixedFrames(phone, consonantMs, outputFrames, sourcePreutterMs, sourceOverlapMs, stableStartMs),
+                targetLeadFrames);
             int targetLeadOnsetFrames = targetLeadFrames - targetFixedFrames;
             int sourceFixedFrames = ResolveSourceFixedFrames(sourceLeadFrames, targetFixedFrames, targetLeadFrames);
             int sourceLeadOnsetFrames = Math.Max(0, sourceLeadFrames - sourceFixedFrames);
@@ -2376,11 +2382,15 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         internal static double ResolveTargetFixedMs(RenderPhone phone) {
+            double sourcePreutterMs = SourcePreutterMs(phone);
             return ResolveTargetFixedMs(
                 phone.preutterMs,
                 phone.overlapMs,
                 phone.durationMs,
-                EffectiveConsonantMs(phone).HasValue);
+                EffectiveConsonantMs(phone).HasValue,
+                sourcePreutterMs,
+                SourceOverlapMs(phone),
+                SourceStableStartMs(phone, sourcePreutterMs));
         }
 
         internal static double ResolveTargetFixedMs(
@@ -2388,12 +2398,33 @@ namespace OpenUtau.Core.HifiNeural {
             double overlapMs,
             double durationMs,
             bool hasReliableConsonant) {
+            return ResolveTargetFixedMs(
+                preutterMs,
+                overlapMs,
+                durationMs,
+                hasReliableConsonant,
+                preutterMs,
+                overlapMs,
+                preutterMs);
+        }
+
+        internal static double ResolveTargetFixedMs(
+            double preutterMs,
+            double overlapMs,
+            double durationMs,
+            bool hasReliableConsonant,
+            double sourcePreutterMs,
+            double sourceOverlapMs,
+            double sourceStableStartMs) {
             if (!hasReliableConsonant || preutterMs <= 0) {
                 return 0;
             }
             preutterMs = Math.Max(0, preutterMs);
             overlapMs = Math.Clamp(overlapMs, 0, preutterMs);
             durationMs = Math.Max(0, durationMs);
+            sourcePreutterMs = Math.Max(0, sourcePreutterMs);
+            sourceOverlapMs = Math.Clamp(sourceOverlapMs, 0, Math.Max(0, sourcePreutterMs));
+            sourceStableStartMs = Math.Max(sourcePreutterMs, sourceStableStartMs);
             if (preutterMs <= HifiF0Builder.FrameMs * 3.0) {
                 return preutterMs;
             }
@@ -2401,16 +2432,34 @@ namespace OpenUtau.Core.HifiNeural {
             double overlapAwareMs = Math.Max(
                 HifiF0Builder.FrameMs,
                 preutterMs - overlapMs * TargetFixedOverlapRelease);
+            double sourceLeadBudgetMs = Math.Max(
+                HifiF0Builder.FrameMs,
+                (sourcePreutterMs > 0 ? sourcePreutterMs : preutterMs) - sourceOverlapMs * TargetFixedOverlapRelease);
+            double sourceOnsetMs = Math.Max(0, sourceStableStartMs - sourcePreutterMs);
+            double sourceOnsetBonusMs = Math.Clamp(
+                sourceOnsetMs * TargetFixedSourceOnsetBonusRatio,
+                0,
+                TargetFixedSourceOnsetBonusMaxMs);
+            double sourceAwareMaxMs = Math.Min(
+                TargetFixedMaxMs,
+                Math.Max(HifiF0Builder.FrameMs, sourceLeadBudgetMs + sourceOnsetBonusMs));
+            double shortNoteRatio = ResolveTargetFixedShortNoteRatio(sourceLeadBudgetMs);
             double durationCapMs = Math.Max(
                 HifiF0Builder.FrameMs * 2.0,
-                durationMs * TargetFixedShortNoteRatio);
-            double fixedMs = Math.Min(preutterMs, overlapAwareMs);
-            fixedMs = Math.Min(fixedMs, durationCapMs);
-            fixedMs = Math.Min(fixedMs, TargetFixedMaxMs);
-            return Math.Clamp(fixedMs, HifiF0Builder.FrameMs, preutterMs);
+                durationMs * shortNoteRatio);
+            double upperMs = Math.Min(preutterMs, overlapAwareMs);
+            upperMs = Math.Min(upperMs, durationCapMs);
+            upperMs = Math.Min(upperMs, sourceAwareMaxMs);
+            return Math.Clamp(upperMs, HifiF0Builder.FrameMs, preutterMs);
         }
 
-        static int ResolveTargetFixedFrames(RenderPhone phone, double? consonantMs, int outputFrames) {
+        static int ResolveTargetFixedFrames(
+            RenderPhone phone,
+            double? consonantMs,
+            int outputFrames,
+            double sourcePreutterMs,
+            double sourceOverlapMs,
+            double sourceStableStartMs) {
             int maxFixedFrames = ResolveMaxTargetFixedFrames(outputFrames);
             if (maxFixedFrames <= 0) {
                 return 0;
@@ -2419,7 +2468,10 @@ namespace OpenUtau.Core.HifiNeural {
                 phone.preutterMs,
                 phone.overlapMs,
                 phone.durationMs,
-                consonantMs.HasValue);
+                consonantMs.HasValue,
+                sourcePreutterMs,
+                sourceOverlapMs,
+                sourceStableStartMs);
             if (fixedMs <= 0) {
                 return 0;
             }
@@ -2428,6 +2480,11 @@ namespace OpenUtau.Core.HifiNeural {
                 frames = 2;
             }
             return Math.Clamp(frames, 0, maxFixedFrames);
+        }
+
+        static double ResolveTargetFixedShortNoteRatio(double sourceLeadBudgetMs) {
+            double sourceWeight = sourceLeadBudgetMs / Math.Max(HifiF0Builder.FrameMs, sourceLeadBudgetMs + 80.0);
+            return TargetFixedShortNoteRatio + (sourceWeight - 0.5) * TargetFixedDynamicShortNoteRatioRange;
         }
 
         static int ResolveTargetLeadFrames(RenderPhone phone, double? consonantMs, int outputFrames) {
@@ -2452,6 +2509,13 @@ namespace OpenUtau.Core.HifiNeural {
                 return Math.Max(0, phone.oto.Preutter);
             }
             return Math.Max(0, phone.preutterMs);
+        }
+
+        static double SourceOverlapMs(RenderPhone phone) {
+            if (phone.oto != null && phone.oto.Overlap > 0) {
+                return Math.Max(0, phone.oto.Overlap);
+            }
+            return Math.Max(0, phone.overlapMs);
         }
 
         static double SourceStableStartMs(RenderPhone phone, double sourcePreutterMs) {

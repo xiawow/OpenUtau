@@ -1164,6 +1164,88 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
+        public void TargetFixedLeadUsesSourceOtoTimingInsteadOfPhonemeSpelling() {
+            var romaji = CreateRenderPhoneForTiming(
+                preutterMs: 180,
+                overlapMs: 80,
+                durationMs: 70,
+                consonantMs: 230,
+                phoneme: "fang");
+            var kana = CreateRenderPhoneForTiming(
+                preutterMs: 180,
+                overlapMs: 80,
+                durationMs: 70,
+                consonantMs: 230,
+                phoneme: "あ");
+
+            double romajiFixedMs = HifiRoughFeatureBuilder.ResolveTargetFixedMs(romaji);
+            double kanaFixedMs = HifiRoughFeatureBuilder.ResolveTargetFixedMs(kana);
+
+            Assert.Equal(romajiFixedMs, kanaFixedMs, 3);
+        }
+
+        [Fact]
+        public void TargetFixedLeadAdaptsToSourcePreutterBudget() {
+            double shortSourceFixedMs = HifiRoughFeatureBuilder.ResolveTargetFixedMs(
+                preutterMs: 180,
+                overlapMs: 80,
+                durationMs: 70,
+                hasReliableConsonant: true,
+                sourcePreutterMs: 60,
+                sourceOverlapMs: 40,
+                sourceStableStartMs: 90);
+            double longSourceFixedMs = HifiRoughFeatureBuilder.ResolveTargetFixedMs(
+                preutterMs: 180,
+                overlapMs: 80,
+                durationMs: 70,
+                hasReliableConsonant: true,
+                sourcePreutterMs: 180,
+                sourceOverlapMs: 80,
+                sourceStableStartMs: 230);
+
+            Assert.True(longSourceFixedMs > shortSourceFixedMs, $"longer source preutter budget should keep slightly more fixed lead, got short={shortSourceFixedMs:F3}ms long={longSourceFixedMs:F3}ms");
+        }
+
+        [Fact]
+        public void TargetFixedLeadDoesNotExceedUpperBudget() {
+            double fixedMs = HifiRoughFeatureBuilder.ResolveTargetFixedMs(
+                preutterMs: 180,
+                overlapMs: 40,
+                durationMs: 25,
+                hasReliableConsonant: true,
+                sourcePreutterMs: 220,
+                sourceOverlapMs: 20,
+                sourceStableStartMs: 260);
+
+            double durationCapMs = Math.Max(HifiF0Builder.FrameMs * 2.0, 25 * 0.60);
+
+            Assert.True(fixedMs <= durationCapMs + 0.001, $"fixed lead must not exceed duration cap, got fixed={fixedMs:F3}ms cap={durationCapMs:F3}ms");
+        }
+
+        [Fact]
+        public void TargetFixedLeadUsesSourceOtoOverlap() {
+            var smallOverlap = CreateRenderPhoneForTiming(
+                preutterMs: 180,
+                overlapMs: 80,
+                durationMs: 140,
+                consonantMs: 230,
+                sourcePreutterMs: 180,
+                sourceOverlapMs: 10);
+            var largeOverlap = CreateRenderPhoneForTiming(
+                preutterMs: 180,
+                overlapMs: 80,
+                durationMs: 140,
+                consonantMs: 230,
+                sourcePreutterMs: 180,
+                sourceOverlapMs: 120);
+
+            double smallOverlapFixedMs = HifiRoughFeatureBuilder.ResolveTargetFixedMs(smallOverlap);
+            double largeOverlapFixedMs = HifiRoughFeatureBuilder.ResolveTargetFixedMs(largeOverlap);
+
+            Assert.True(smallOverlapFixedMs > largeOverlapFixedMs, $"larger source overlap should reduce fixed lead budget, got small={smallOverlapFixedMs:F3}ms large={largeOverlapFixedMs:F3}ms");
+        }
+
+        [Fact]
         public void TargetFixedLeadPreservesSmallPreutter() {
             double fixedMs = ResolveTargetFixedMs(
                 preutterMs: 24,
@@ -1462,13 +1544,16 @@ namespace OpenUtau.Core.Test.HifiNeural {
             double overlapMs,
             double durationMs,
             double consonantMs,
-            double? sourcePreutterMs = null) {
+            double? sourcePreutterMs = null,
+            double? sourceOverlapMs = null,
+            string phoneme = "a") {
             var phone = (RenderPhone)FormatterServices.GetUninitializedObject(typeof(RenderPhone));
             var oto = new UOto {
                 Consonant = consonantMs,
                 Preutter = sourcePreutterMs ?? preutterMs,
+                Overlap = sourceOverlapMs ?? overlapMs,
             };
-            SetReadonlyField(phone, "phoneme", "a");
+            SetReadonlyField(phone, "phoneme", phoneme);
             SetReadonlyField(phone, "preutterMs", preutterMs);
             SetReadonlyField(phone, "overlapMs", overlapMs);
             SetReadonlyField(phone, "durationMs", durationMs);
