@@ -33,9 +33,9 @@ namespace OpenUtau.Core.HifiNeural {
         const int SustainTextureMinStableFrames = 4;
         const double SustainTextureNaturalStepFrames = HifiF0Builder.HopSize / (double)HifiMelExtractor.OriginHopSize;
         const double SustainTextureMaxStepFrames = SustainTextureNaturalStepFrames * 1.35;
-        const double SustainTextureResidualAmount = 0.38;
-        const double SustainTextureResidualClamp = 0.10;
-        const double SustainTextureLowBandResidual = 0.16;
+        const double SustainTextureBodyAmount = 0.88;
+        const double SustainTextureBodyClamp = 0.22;
+        const double SustainTextureBodyLowBandResidual = 0.42;
         const int WaveformSustainMinOutputFrames = 8;
         const int WaveformSustainMinStableFrames = 8;
         const double WaveformSustainEnergyOffsetClamp = 0.10;
@@ -1559,7 +1559,7 @@ namespace OpenUtau.Core.HifiNeural {
                         double bandSeed = SeedFromInts(sourceStart, band);
                         micro = microAmp * SmoothWobble(framePhase, bandSeed);
                     }
-                    output[m, outputStart + t] = ComposeSustainResidualValue(
+                    output[m, outputStart + t] = ComposeSustainTextureBodyValue(
                         directFrame[m],
                         directContourFrame[m],
                         textureFrame[m],
@@ -1670,7 +1670,7 @@ namespace OpenUtau.Core.HifiNeural {
                         double bandSeed = SeedFromInts(sourceStart, band);
                         micro = microAmp * SmoothWobble(framePhase, bandSeed);
                     }
-                    output[m, outputStart + t] = ComposeSustainResidualValue(
+                    output[m, outputStart + t] = ComposeSustainTextureBodyValue(
                         directFrame[m],
                         directContourFrame[m],
                         textureFrame[m],
@@ -1689,7 +1689,7 @@ namespace OpenUtau.Core.HifiNeural {
                     coreWeight);
             }
             Log.Debug(
-                "HifiRoughFeatureBuilder sustain_waveform_texture_residual source_frames={SourceFrames} output_frames={OutputFrames} stable_frames={StableFrames} edge_frames={EdgeFrames} stretch_ratio={StretchRatio:F3} source_samples={SourceSamples}",
+                "HifiRoughFeatureBuilder sustain_waveform_texture_body source_frames={SourceFrames} output_frames={OutputFrames} stable_frames={StableFrames} edge_frames={EdgeFrames} stretch_ratio={StretchRatio:F3} source_samples={SourceSamples}",
                 sourceFrames,
                 outputFrames,
                 stableFrames,
@@ -1753,7 +1753,7 @@ namespace OpenUtau.Core.HifiNeural {
             return (sampleCenter - HifiMelExtractor.OriginHopSize * 0.5) / HifiMelExtractor.OriginHopSize;
         }
 
-        static float ComposeSustainResidualValue(
+        static float ComposeSustainTextureBodyValue(
             float directFrameValue,
             float directContourValue,
             float textureValue,
@@ -1763,16 +1763,20 @@ namespace OpenUtau.Core.HifiNeural {
             int bins,
             double coreWeight,
             double micro) {
-            double baseValue = directFrameValue * (1.0 - coreWeight) + directContourValue * coreWeight;
             double residual = textureValue - textureEnvelopeValue - residualMean;
             if (!IsFinite(residual)) {
                 residual = 0;
             }
-            residual = Math.Clamp(residual, -SustainTextureResidualClamp, SustainTextureResidualClamp);
-            double residualWeight = SustainTextureResidualWeight(bin, bins);
-            return (float)(baseValue
-                + residual * SustainTextureResidualAmount * residualWeight * coreWeight
-                + micro);
+            residual = Math.Clamp(residual, -SustainTextureBodyClamp, SustainTextureBodyClamp);
+            double residualWeight = SustainTextureBodyResidualWeight(bin, bins);
+
+            // Keep the long-sustain loudness/formant envelope on the slow contour, but let the
+            // stable source texture provide most of the fine spectral motion. This avoids both
+            // static-template metal and repeated source vibrato/energy envelopes.
+            double coreValue = directContourValue
+                + residual * SustainTextureBodyAmount * residualWeight
+                + micro;
+            return (float)(directFrameValue * (1.0 - coreWeight) + coreValue * coreWeight);
         }
 
         static double TextureResidualMean(float[] textureFrame, float[] textureEnvelopeFrame) {
@@ -1793,12 +1797,12 @@ namespace OpenUtau.Core.HifiNeural {
             return valid > 0 ? sum / valid : 0;
         }
 
-        static double SustainTextureResidualWeight(int bin, int bins) {
+        static double SustainTextureBodyResidualWeight(int bin, int bins) {
             if (bins <= 1) {
-                return SustainTextureLowBandResidual;
+                return SustainTextureBodyLowBandResidual;
             }
-            double high = SmoothStep((bin - 18) / (double)Math.Max(1, bins - 18));
-            return SustainTextureLowBandResidual + (1.0 - SustainTextureLowBandResidual) * high;
+            double high = SmoothStep((bin - 12) / (double)Math.Max(1, bins - 12));
+            return SustainTextureBodyLowBandResidual + (1.0 - SustainTextureBodyLowBandResidual) * high;
         }
 
         static void CopyMelColumn(float[,] mel, int frame, float[] output) {
