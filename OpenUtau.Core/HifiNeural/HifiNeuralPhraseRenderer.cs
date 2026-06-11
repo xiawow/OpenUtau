@@ -26,6 +26,7 @@ namespace OpenUtau.Core.HifiNeural {
         public bool SupportsExpression(UExpressionDescriptor descriptor) {
             return descriptor.abbr == Format.Ustx.DYN
                 || descriptor.abbr == Format.Ustx.PITD
+                || descriptor.abbr == Format.Ustx.VEL
                 || descriptor.abbr == Format.Ustx.SHFC
                 || descriptor.abbr == Format.Ustx.GENC
                 || descriptor.abbr == Format.Ustx.BREC

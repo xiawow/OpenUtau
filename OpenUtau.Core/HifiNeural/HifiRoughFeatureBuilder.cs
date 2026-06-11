@@ -15,6 +15,8 @@ namespace OpenUtau.Core.HifiNeural {
         const double TargetFixedSourceOnsetBonusMaxMs = 12.0;
         const double TargetFixedSourceOnsetBonusRatio = 0.25;
         const double TargetFixedOverlapRelease = 0.35;
+        const double LeadSoftSkipMaxStrength = 0.55;
+        const int LeadSoftSkipGraceFrames = 1;
         // Historical diagnostic ceiling for the old F0-mask span. The mask is not applied because
         // this NSF vocoder treats F0=0 as silence.
         const int ConsonantF0MaskMaxFrames = 5;
@@ -89,6 +91,8 @@ namespace OpenUtau.Core.HifiNeural {
             double? ConsonantMs,
             double TargetPreutterMs,
             double SourcePreutterMs,
+            double SourceSoftSkipMs,
+            int SourceSoftSkipFrames,
             int SourceLeadFrames,
             int SourceStableStartFrames,
             int SourceVowelOnsetFrames,
@@ -638,7 +642,13 @@ namespace OpenUtau.Core.HifiNeural {
             return output;
         }
 
-        internal readonly record struct PhoneMapReport(bool SplitApplied, string Strategy, int FixedTargetFrames, int F0MaskFrames);
+        internal readonly record struct PhoneMapReport(
+            bool SplitApplied,
+            string Strategy,
+            int FixedTargetFrames,
+            int F0MaskFrames,
+            double SourceSkipOverMs,
+            int SourceStartOffsetFrames);
 
         internal static double[] BuildPhoneTargetToSourceFrameMap(int sourceFrames, int outputFrames, RenderPhone phone) {
             var map = new double[Math.Max(0, outputFrames)];
@@ -661,16 +671,14 @@ namespace OpenUtau.Core.HifiNeural {
                 return map;
             }
 
-            if (timing.TargetFixedFrames > 0) {
-                WriteFrameMapRegion(map, 0, timing.TargetFixedFrames, 0, Math.Max(1, timing.SourceFixedFrames));
-            }
-            if (timing.TargetLeadOnsetFrames > 0) {
-                WriteFrameMapRegion(
+            if (timing.TargetLeadFrames > 0 && timing.SourceLeadFrames > 0) {
+                WriteLeadFrameMap(
                     map,
-                    timing.TargetFixedFrames,
-                    timing.TargetLeadOnsetFrames,
-                    timing.SourceFixedFrames,
-                    Math.Max(1, timing.SourceLeadOnsetFrames));
+                    0,
+                    timing.TargetLeadFrames,
+                    0,
+                    timing.SourceLeadFrames,
+                    timing.SourceSoftSkipFrames);
             }
             WriteVowelFrameMap(
                 map,
@@ -757,6 +765,57 @@ namespace OpenUtau.Core.HifiNeural {
                     sourceStart + sourceFrames - releaseFrames,
                     releaseFrames);
             }
+        }
+
+        static void WriteLeadFrameMap(
+            double[] map,
+            int outputStart,
+            int outputFrames,
+            int sourceStart,
+            int sourceFrames,
+            int sourceSoftSkipFrames) {
+            if (outputFrames <= 0) {
+                return;
+            }
+            sourceFrames = Math.Max(1, sourceFrames);
+            outputFrames = Math.Max(1, Math.Min(outputFrames, map.Length - outputStart));
+            double previous = sourceStart;
+            for (int t = 0; t < outputFrames; t++) {
+                double sourceIndex = sourceStart + ResolveLeadSourceIndex(t, outputFrames, sourceFrames, sourceSoftSkipFrames);
+                if (t > 0) {
+                    sourceIndex = Math.Max(previous, sourceIndex);
+                }
+                previous = sourceIndex;
+                map[outputStart + t] = sourceIndex;
+            }
+        }
+
+        static double ResolveLeadSourceIndex(
+            int targetFrame,
+            int targetFrames,
+            int sourceFrames,
+            int sourceSoftSkipFrames) {
+            sourceFrames = Math.Max(1, sourceFrames);
+            if (targetFrames <= 1 || sourceFrames <= 1) {
+                return 0;
+            }
+            double sourceMax = sourceFrames - 1.0;
+            double u = Math.Clamp(targetFrame / (double)(targetFrames - 1), 0.0, 1.0);
+            double linear = u * sourceMax;
+            if (sourceSoftSkipFrames <= 0 || targetFrame <= LeadSoftSkipGraceFrames) {
+                return linear;
+            }
+            double strength = Math.Clamp(sourceSoftSkipFrames / Math.Max(1.0, sourceMax), 0.0, LeadSoftSkipMaxStrength);
+            int catchupFrames = Math.Clamp(
+                (int)Math.Round(targetFrames * 0.42),
+                LeadSoftSkipGraceFrames + 2,
+                Math.Max(LeadSoftSkipGraceFrames + 2, targetFrames - 1));
+            double catchup = Math.Clamp(
+                (targetFrame - LeadSoftSkipGraceFrames) / (double)Math.Max(1, catchupFrames - LeadSoftSkipGraceFrames),
+                0.0,
+                1.0);
+            double boost = sourceMax * strength * SmoothStep(catchup) * (1.0 - u);
+            return Math.Clamp(linear + boost, 0.0, sourceMax);
         }
 
         static void WriteSustainFrameMap(
@@ -875,28 +934,26 @@ namespace OpenUtau.Core.HifiNeural {
             var timing = BuildPhoneTimingPlan(sourceFrames, outputFrames, phone);
             if (outputFrames <= 2) {
                 WriteCompactPhoneRegion(sourceMel, sourceStart, sourceFrames, output, outputStart, outputFrames, timing.SourceLeadFrames);
-                return new PhoneMapReport(false, "compact_short_target", 0, 0);
+                return new PhoneMapReport(false, "compact_short_target", 0, 0, timing.SourceSoftSkipMs, 0);
             }
             if (sourceFrames < MinSourceFrames) {
                 WriteMappedRegion(sourceMel, sourceStart, sourceFrames, output, outputStart, outputFrames);
-                return new PhoneMapReport(false, "simple_short_source", 0, 0);
+                return new PhoneMapReport(false, "simple_short_source", 0, 0, timing.SourceSoftSkipMs, 0);
             }
             if (timing.SourceVowelFrames < MinVowelSourceFrames) {
                 WriteMappedRegion(sourceMel, sourceStart, sourceFrames, output, outputStart, outputFrames);
-                return new PhoneMapReport(false, "simple_no_vowel_room", 0, 0);
+                return new PhoneMapReport(false, "simple_no_vowel_room", 0, 0, timing.SourceSoftSkipMs, 0);
             }
 
-            if (timing.SourceLeadFrames > 0 && timing.TargetFixedFrames > 0) {
-                WriteMappedRegion(sourceMel, sourceStart, Math.Max(1, timing.SourceFixedFrames), output, outputStart, timing.TargetFixedFrames);
-            }
-            if (timing.TargetLeadOnsetFrames > 0) {
-                WriteMappedRegion(
+            if (timing.SourceLeadFrames > 0 && timing.TargetLeadFrames > 0) {
+                WriteLeadMappedRegion(
                     sourceMel,
-                    sourceStart + timing.SourceFixedFrames,
-                    Math.Max(1, timing.SourceLeadOnsetFrames),
+                    sourceStart,
+                    timing.SourceLeadFrames,
                     output,
-                    outputStart + timing.TargetFixedFrames,
-                    timing.TargetLeadOnsetFrames);
+                    outputStart,
+                    timing.TargetLeadFrames,
+                    timing.SourceSoftSkipFrames);
             }
 
             var vowelMap = WriteVowelSourceToTargetMap(
@@ -918,12 +975,14 @@ namespace OpenUtau.Core.HifiNeural {
                 : 0;
             double vowelRatio = (timing.TargetVowelFrames * HifiF0Builder.FrameMs) / Math.Max(SourceFrameMs, timing.SourceVowelFrames * SourceFrameMs);
             Log.Debug(
-                "HifiRoughFeatureBuilder phone_timewarp phoneme={Phoneme} source_frames={SourceFrames} target_frames={TargetFrames} source_preutter_ms={SourcePreutterMs:F2} target_preutter_ms={TargetPreutterMs:F2} source_fixed_frames={SourceFixedFrames} target_fixed_frames={TargetFixedFrames} source_vowel_onset_frames={SourceVowelOnsetFrames} target_vowel_onset_frames={TargetVowelOnsetFrames} source_vowel_frames={SourceVowelFrames} target_vowel_frames={TargetVowelFrames} fixed_ratio={FixedRatio:F4} vowel_ratio={VowelRatio:F4} strategy={Strategy}",
+                "HifiRoughFeatureBuilder phone_timewarp phoneme={Phoneme} source_frames={SourceFrames} target_frames={TargetFrames} source_preutter_ms={SourcePreutterMs:F2} target_preutter_ms={TargetPreutterMs:F2} source_soft_skip_ms={SourceSoftSkipMs:F2} source_soft_skip_frames={SourceSoftSkipFrames} source_fixed_frames={SourceFixedFrames} target_fixed_frames={TargetFixedFrames} source_vowel_onset_frames={SourceVowelOnsetFrames} target_vowel_onset_frames={TargetVowelOnsetFrames} source_vowel_frames={SourceVowelFrames} target_vowel_frames={TargetVowelFrames} fixed_ratio={FixedRatio:F4} vowel_ratio={VowelRatio:F4} strategy={Strategy}",
                 phone.phoneme,
                 sourceFrames,
                 outputFrames,
                 timing.SourcePreutterMs,
                 timing.TargetPreutterMs,
+                timing.SourceSoftSkipMs,
+                timing.SourceSoftSkipFrames,
                 timing.SourceFixedFrames,
                 timing.TargetFixedFrames,
                 timing.SourceLeadOnsetFrames + timing.SourceVowelOnsetFrames,
@@ -939,7 +998,7 @@ namespace OpenUtau.Core.HifiNeural {
             // source and the note sounded muffled/"dead". So we only mask the leading pure-consonant
             // portion, bounded by min(preutter, consonant) and kept strictly inside the region.
             int f0MaskFrames = ResolveConsonantF0MaskFrames(phone, timing.ConsonantMs, timing.TargetFixedFrames);
-            return new PhoneMapReport(true, vowelMap.Strategy, timing.TargetFixedFrames, f0MaskFrames);
+            return new PhoneMapReport(true, vowelMap.Strategy, timing.TargetFixedFrames, f0MaskFrames, timing.SourceSoftSkipMs, 0);
         }
 
         static int[] BuildPhoneStarts(RenderPhrase phrase, double phraseStartMs, int totalFrames, double frameMs) {
@@ -2208,6 +2267,43 @@ namespace OpenUtau.Core.HifiNeural {
             }
         }
 
+        static void WriteLeadMappedRegion(
+            float[,] sourceMel,
+            int sourceStart,
+            int sourceFrames,
+            float[,] output,
+            int outputStart,
+            int outputFrames,
+            int sourceSoftSkipFrames) {
+            if (outputFrames <= 0) {
+                return;
+            }
+            int bins = sourceMel.GetLength(0);
+            int totalSourceFrames = sourceMel.GetLength(1);
+            sourceStart = Math.Clamp(sourceStart, 0, Math.Max(0, totalSourceFrames - 1));
+            sourceFrames = Math.Max(1, Math.Min(sourceFrames, totalSourceFrames - sourceStart));
+            outputFrames = Math.Min(outputFrames, output.GetLength(1) - outputStart);
+            if (outputFrames <= 0) {
+                return;
+            }
+            double previous = 0;
+            for (int t = 0; t < outputFrames; t++) {
+                double sourceIndex = ResolveLeadSourceIndex(t, outputFrames, sourceFrames, sourceSoftSkipFrames);
+                if (t > 0) {
+                    sourceIndex = Math.Max(previous, sourceIndex);
+                }
+                previous = sourceIndex;
+                int left = sourceStart + (int)Math.Floor(sourceIndex);
+                int right = Math.Min(sourceStart + sourceFrames - 1, left + 1);
+                float alpha = (float)(sourceIndex - Math.Floor(sourceIndex));
+                for (int m = 0; m < bins; m++) {
+                    float v0 = sourceMel[m, left];
+                    float v1 = sourceMel[m, right];
+                    output[m, outputStart + t] = v0 + (v1 - v0) * alpha;
+                }
+            }
+        }
+
         static void WriteAreaResampledRegion(
             float[,] sourceMel,
             int sourceStart,
@@ -2353,6 +2449,8 @@ namespace OpenUtau.Core.HifiNeural {
             int sourceVowelFrames = sourceFrames - sourceLeadFrames;
 
             int targetLeadFrames = ResolveTargetLeadFrames(phone, consonantMs, outputFrames);
+            int sourceSoftSkipFrames = ResolveSourceSoftSkipFrames(phone, sourceLeadFrames, targetLeadFrames);
+            double sourceSoftSkipMs = sourceSoftSkipFrames * SourceFrameMs;
             int targetFixedFrames = Math.Min(
                 ResolveTargetFixedFrames(phone, consonantMs, outputFrames, sourcePreutterMs, sourceOverlapMs, stableStartMs),
                 targetLeadFrames);
@@ -2373,6 +2471,8 @@ namespace OpenUtau.Core.HifiNeural {
                 consonantMs,
                 targetPreutterMs,
                 sourcePreutterMs,
+                sourceSoftSkipMs,
+                sourceSoftSkipFrames,
                 sourceLeadFrames,
                 sourceStableStartFrames,
                 sourceVowelOnsetFrames,
@@ -2513,6 +2613,39 @@ namespace OpenUtau.Core.HifiNeural {
                 return Math.Max(0, phone.oto.Preutter);
             }
             return Math.Max(0, phone.preutterMs);
+        }
+
+        static int ResolveSourceSoftSkipFrames(RenderPhone phone, int sourceLeadFrames, int targetLeadFrames) {
+            if (sourceLeadFrames <= 2 || targetLeadFrames <= 2 || sourceLeadFrames <= targetLeadFrames) {
+                return 0;
+            }
+            double skipMs = ResolveClassicSkipOverCandidateMs(phone);
+            if (skipMs <= 0 || !IsFinite(skipMs)) {
+                return 0;
+            }
+            int requestedFrames = (int)Math.Round(skipMs / SourceFrameMs);
+            int maxFrames = Math.Max(0, sourceLeadFrames - Math.Max(2, targetLeadFrames / 2));
+            return Math.Clamp(requestedFrames, 0, maxFrames);
+        }
+
+        static double ResolveClassicSkipOverCandidateMs(RenderPhone phone) {
+            if (phone.oto == null || phone.oto.Preutter <= 0) {
+                return 0;
+            }
+            double velocityPercent = phone.velocity > 0
+                ? phone.velocity * 100.0
+                : 100.0;
+            if (!IsFinite(velocityPercent)) {
+                velocityPercent = 100.0;
+            }
+            velocityPercent = Math.Clamp(velocityPercent, 0.0, 200.0);
+            double stretchRatio = Math.Pow(2.0, 1.0 - velocityPercent * 0.01);
+            double pitchLeadingMs = phone.oto.Preutter * stretchRatio;
+            double targetLeadingMs = phone.leadingMs > 0
+                ? phone.leadingMs
+                : phone.preutterMs;
+            double skipMs = pitchLeadingMs - Math.Max(0, targetLeadingMs);
+            return IsFinite(skipMs) && skipMs > 0 ? skipMs : 0;
         }
 
         static double SourceOverlapMs(RenderPhone phone) {

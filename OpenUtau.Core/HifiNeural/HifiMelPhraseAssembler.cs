@@ -34,6 +34,8 @@ namespace OpenUtau.Core.HifiNeural {
             public int FrameCount;
             public int OverlapFramesWithPrev;
             public int FixedFrames;
+            public double SourceSkipOverMs;
+            public int SourceStartOffsetFrames;
             public string Strategy = string.Empty;
             public HifiPhoneFeatureDiagnostic? Diagnostic;
             public HifiFrameParameterAverages Parameters;
@@ -197,6 +199,8 @@ namespace OpenUtau.Core.HifiNeural {
                 StartFrame = startFrame,
                 FrameCount = frameCount,
                 FixedFrames = report.FixedTargetFrames,
+                SourceSkipOverMs = report.SourceSkipOverMs,
+                SourceStartOffsetFrames = report.SourceStartOffsetFrames,
                 Strategy = report.Strategy,
                 Diagnostic = diagnostic,
                 Parameters = parameters,
@@ -339,8 +343,8 @@ namespace OpenUtau.Core.HifiNeural {
                     LeadingMs = phone.leadingMs,
                     StartFrame = start,
                     FrameCount = Math.Max(1, end - start),
-                    SourceSkipOverMs = 0,
-                    SourceStartOffsetFrames = 0,
+                    SourceSkipOverMs = seg.SourceSkipOverMs,
+                    SourceStartOffsetFrames = seg.SourceStartOffsetFrames,
                     Parameters = new HifiPhoneParameterMetadata {
                         Gender = seg.Parameters.Gender,
                         Breathiness = seg.Parameters.Breathiness,

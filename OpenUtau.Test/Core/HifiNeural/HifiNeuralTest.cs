@@ -329,11 +329,11 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
-        public void SustainTextureResidualRemovesFrameMeanEnergy() {
+        public void SustainTextureBodyRemovesFrameMeanEnergy() {
             var meanMethod = typeof(HifiRoughFeatureBuilder)
                 .GetMethod("TextureResidualMean", BindingFlags.NonPublic | BindingFlags.Static);
             var composeMethod = typeof(HifiRoughFeatureBuilder)
-                .GetMethod("ComposeSustainResidualValue", BindingFlags.NonPublic | BindingFlags.Static);
+                .GetMethod("ComposeSustainTextureBodyValue", BindingFlags.NonPublic | BindingFlags.Static);
             Assert.NotNull(meanMethod);
             Assert.NotNull(composeMethod);
 
@@ -356,7 +356,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
             }
 
             double meanDelta = values.Average() - -4.0;
-            Assert.True(Math.Abs(meanDelta) < 0.01, $"residual should not change frame mean, delta={meanDelta:F6}");
+            Assert.True(Math.Abs(meanDelta) < 0.01, $"texture body should not change frame mean, delta={meanDelta:F6}");
         }
 
         [Fact]
@@ -506,7 +506,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE", "none");
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT", "false");
                 string key = HifiRenderConfig.CacheKey();
-                Assert.Contains("v59-phoneplan-finaledge-audibletargetfixed-sourceotopreutter-conditionaledge-restgapend-finaltail-vowelbudget-anchorlead-targetfixed-envelopeend-directparammap-sustainresidual-meldomainconcat-waveformsustain-naturalrate-f0fallback-postleveler-loud17-grocv1-genc-hnsepslice-rms-sourceparams-tencremixfix-nonlinearparammap-", key);
+                Assert.Contains("v60-phoneplan-softleadskip-vel-support-finaledge-audibletargetfixed-sourceotopreutter-sustaintexturebody-conditionaledge-restgapend-finaltail-vowelbudget-anchorlead-targetfixed-envelopeend-directparammap-meldomainconcat-waveformsustain-naturalrate-f0fallback-postleveler-loud17-grocv1-genc-hnsepslice-rms-sourceparams-tencremixfix-nonlinearparammap-", key);
                 Assert.Contains("enhnone", key);
                 Assert.Contains("dbgFalse", key);
             } finally {
@@ -885,6 +885,14 @@ namespace OpenUtau.Core.Test.HifiNeural {
         [Fact]
         public void RendererSupportsHifiLinearParameterCurves() {
             var renderer = new HifiNeuralPhraseRenderer();
+            Assert.True(renderer.SupportsExpression(new UExpressionDescriptor {
+                name = OpenUtau.Core.Format.Ustx.VEL,
+                abbr = OpenUtau.Core.Format.Ustx.VEL,
+                type = UExpressionType.Numerical,
+                min = 0,
+                max = 200,
+                defaultValue = 100,
+            }));
             foreach (string abbr in new[] {
                 OpenUtau.Core.Format.Ustx.GENC,
                 OpenUtau.Core.Format.Ustx.BREC,
@@ -1276,7 +1284,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
-        public void SourceMapUsesOtoPreutterWhenTargetPreutterIsCapped() {
+        public void SourceMapSoftlyCatchesUpWhenTargetPreutterIsCapped() {
             var phone = CreateRenderPhoneForTiming(
                 preutterMs: 80,
                 overlapMs: 40,
@@ -1291,8 +1299,13 @@ namespace OpenUtau.Core.Test.HifiNeural {
             int targetLeadFrames = ResolveTargetLeadFrames(phone, outputFrames: 80);
             int targetPreutterSourceFrames = SourceFramesForMs(80);
             int rawOtoPreutterSourceFrames = SourceFramesForMs(180);
+            int midLead = Math.Max(2, targetLeadFrames / 2);
+            double linearMid = midLead * (rawOtoPreutterSourceFrames - 1.0) / Math.Max(1, targetLeadFrames - 1);
 
             Assert.True(rawOtoPreutterSourceFrames > targetPreutterSourceFrames);
+            Assert.Equal(0, map[0], 6);
+            Assert.True(map[1] < SourceFramesForMs(25), $"lead should not hard-skip at onset, got frame {map[1]:F3}");
+            Assert.True(map[midLead] > linearMid + 2.0, $"lead should smoothly catch up inside preutter, got {map[midLead]:F3} vs linear {linearMid:F3}");
             Assert.Equal(rawOtoPreutterSourceFrames, map[targetLeadFrames], 1.0);
         }
 
