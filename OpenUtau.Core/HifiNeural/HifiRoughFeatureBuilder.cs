@@ -15,7 +15,8 @@ namespace OpenUtau.Core.HifiNeural {
         const double TargetFixedSourceOnsetBonusMaxMs = 12.0;
         const double TargetFixedSourceOnsetBonusRatio = 0.25;
         const double TargetFixedOverlapRelease = 0.35;
-        const double LeadSoftSkipMaxStrength = 0.55;
+        const double LeadSoftSkipBoostRatio = 0.12;
+        const double LeadSoftSkipMaxSourceRatio = 0.08;
         const int LeadSoftSkipGraceFrames = 1;
         // Historical diagnostic ceiling for the old F0-mask span. The mask is not applied because
         // this NSF vocoder treats F0=0 as silence.
@@ -805,16 +806,13 @@ namespace OpenUtau.Core.HifiNeural {
             if (sourceSoftSkipFrames <= 0 || targetFrame <= LeadSoftSkipGraceFrames) {
                 return linear;
             }
-            double strength = Math.Clamp(sourceSoftSkipFrames / Math.Max(1.0, sourceMax), 0.0, LeadSoftSkipMaxStrength);
-            int catchupFrames = Math.Clamp(
-                (int)Math.Round(targetFrames * 0.42),
-                LeadSoftSkipGraceFrames + 2,
-                Math.Max(LeadSoftSkipGraceFrames + 2, targetFrames - 1));
-            double catchup = Math.Clamp(
-                (targetFrame - LeadSoftSkipGraceFrames) / (double)Math.Max(1, catchupFrames - LeadSoftSkipGraceFrames),
-                0.0,
-                1.0);
-            double boost = sourceMax * strength * SmoothStep(catchup) * (1.0 - u);
+            double graceU = Math.Clamp(LeadSoftSkipGraceFrames / (double)(targetFrames - 1), 0.0, 0.8);
+            double x = Math.Clamp((u - graceU) / Math.Max(1e-6, 1.0 - graceU), 0.0, 1.0);
+            double boostShape = Math.Pow(Math.Sin(Math.PI * x), 2.0);
+            double maxBoost = Math.Min(
+                sourceSoftSkipFrames * LeadSoftSkipBoostRatio,
+                sourceMax * LeadSoftSkipMaxSourceRatio);
+            double boost = maxBoost * boostShape;
             return Math.Clamp(linear + boost, 0.0, sourceMax);
         }
 

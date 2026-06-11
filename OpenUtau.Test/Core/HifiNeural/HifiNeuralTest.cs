@@ -1301,11 +1301,17 @@ namespace OpenUtau.Core.Test.HifiNeural {
             int rawOtoPreutterSourceFrames = SourceFramesForMs(180);
             int midLead = Math.Max(2, targetLeadFrames / 2);
             double linearMid = midLead * (rawOtoPreutterSourceFrames - 1.0) / Math.Max(1, targetLeadFrames - 1);
+            double linearStep = (rawOtoPreutterSourceFrames - 1.0) / Math.Max(1, targetLeadFrames - 1);
+            double maxStep = 0;
+            for (int i = 1; i < targetLeadFrames; i++) {
+                maxStep = Math.Max(maxStep, map[i] - map[i - 1]);
+            }
 
             Assert.True(rawOtoPreutterSourceFrames > targetPreutterSourceFrames);
             Assert.Equal(0, map[0], 6);
             Assert.True(map[1] < SourceFramesForMs(25), $"lead should not hard-skip at onset, got frame {map[1]:F3}");
             Assert.True(map[midLead] > linearMid + 2.0, $"lead should smoothly catch up inside preutter, got {map[midLead]:F3} vs linear {linearMid:F3}");
+            Assert.True(maxStep <= linearStep * 1.30, $"lead catch-up step is too abrupt, max={maxStep:F3} linear={linearStep:F3}");
             Assert.Equal(rawOtoPreutterSourceFrames, map[targetLeadFrames], 1.0);
         }
 
