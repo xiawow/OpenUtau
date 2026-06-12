@@ -5,7 +5,7 @@ using OpenUtau.Core.Render;
 using Serilog;
 
 namespace OpenUtau.Core.HifiNeural {
-    public sealed class HifiRoughFeatureBuilder {
+    public sealed class HifiPhraseFeatureBuilder {
         const int MinSourceFrames = 8;
         const int MinVowelSourceFrames = 4;
         const int MinVowelTargetFrames = 1;
@@ -105,7 +105,7 @@ namespace OpenUtau.Core.HifiNeural {
             int SourceLeadOnsetFrames,
             int TargetVowelFrames);
 
-        public HifiRoughFeatureBuilder(IHifiMelEnhancer melEnhancer) {
+        public HifiPhraseFeatureBuilder(IHifiMelEnhancer melEnhancer) {
             this.melEnhancer = melEnhancer;
         }
 
@@ -132,7 +132,7 @@ namespace OpenUtau.Core.HifiNeural {
 
             double targetDurationMs = targetFrames * HifiF0Builder.FrameMs;
             Log.Information(
-                "HifiRoughFeatureBuilder mel_domain_concat mode=overlap_neural target_duration_ms={TargetDurationMs:F3} target_frames={TargetFrames} phones={Phones}",
+                "HifiPhraseFeatureBuilder mel_domain_concat mode=overlap_neural target_duration_ms={TargetDurationMs:F3} target_frames={TargetFrames} phones={Phones}",
                 targetDurationMs,
                 targetFrames,
                 phrase.phones.Length);
@@ -165,392 +165,6 @@ namespace OpenUtau.Core.HifiNeural {
             }
         }
 
-        static double[] BuildVariableSourcePositions(RenderPhrase phrase, double phraseStartMs, float[] roughSamples, int targetFrames) {
-            var positions = BuildLinearSourcePositions(targetFrames, roughSamples.Length);
-            if (targetFrames <= 0 || roughSamples.Length <= 0 || phrase.phones.Length == 0) {
-                return positions;
-            }
-
-            int[] sourceStarts = BuildPhoneStarts(phrase, phraseStartMs, roughSamples.Length, SourceSampleMs);
-            int[] targetStarts = BuildPhoneStarts(phrase, phraseStartMs, targetFrames, HifiF0Builder.FrameMs);
-            var written = new bool[targetFrames];
-            int splitCount = 0;
-            int fallbackCount = 0;
-            int trimmedCount = 0;
-
-            for (int i = 0; i < phrase.phones.Length; i++) {
-                int sourceStart = Math.Clamp(sourceStarts[i], 0, Math.Max(0, roughSamples.Length - 1));
-                int sourceEnd = i + 1 < sourceStarts.Length ? sourceStarts[i + 1] : roughSamples.Length;
-                sourceEnd = Math.Clamp(sourceEnd, sourceStart + 1, Math.Max(sourceStart + 1, roughSamples.Length));
-                int targetStart = Math.Clamp(targetStarts[i], 0, Math.Max(0, targetFrames - 1));
-                int targetEnd = i + 1 < targetStarts.Length ? targetStarts[i + 1] : targetFrames;
-                targetEnd = Math.Clamp(targetEnd, targetStart + 1, Math.Max(targetStart + 1, targetFrames));
-
-                int sourceCount = Math.Max(1, sourceEnd - sourceStart);
-                int targetCount = Math.Max(1, targetEnd - targetStart);
-                double? consonantMs = EffectiveConsonantMs(phrase.phones[i]);
-                int sourceConsonantSamples = consonantMs.HasValue
-                    ? (int)Math.Round(consonantMs.Value * HifiMelExtractor.SampleRate / 1000.0)
-                    : 0;
-                sourceConsonantSamples = NormalizeSourceConsonantSamples(sourceConsonantSamples, sourceCount, phrase.phones[i].phoneme);
-                int trimmedSourceCount = TrimInactiveTailSamples(
-                    roughSamples,
-                    sourceStart,
-                    sourceCount,
-                    sourceConsonantSamples,
-                    phrase.phones[i].phoneme);
-                if (trimmedSourceCount < sourceCount) {
-                    trimmedCount++;
-                    sourceCount = trimmedSourceCount;
-                    sourceConsonantSamples = NormalizeSourceConsonantSamples(sourceConsonantSamples, sourceCount, phrase.phones[i].phoneme);
-                }
-
-                bool splitApplied = WritePhoneSourcePositionMap(
-                    positions,
-                    targetStart,
-                    targetCount,
-                    sourceStart,
-                    sourceCount,
-                    sourceConsonantSamples,
-                    consonantMs,
-                    phrase.phones[i]);
-                if (splitApplied) {
-                    splitCount++;
-                } else {
-                    fallbackCount++;
-                }
-                for (int t = targetStart; t < targetEnd && t < written.Length; t++) {
-                    written[t] = true;
-                }
-            }
-
-            FillUnwrittenSourcePositions(positions, written, roughSamples.Length);
-            Log.Information(
-                "HifiRoughFeatureBuilder variable_position_time_map phones={Phones} split_segments={SplitSegments} fallback_segments={FallbackSegments} trimmed_segments={TrimmedSegments} rough_samples={RoughSamples} target_frames={TargetFrames}",
-                phrase.phones.Length,
-                splitCount,
-                fallbackCount,
-                trimmedCount,
-                roughSamples.Length,
-                targetFrames);
-            return positions;
-        }
-
-        static double[] BuildLinearSourcePositions(int targetFrames, int sourceSamples) {
-            var positions = new double[Math.Max(0, targetFrames)];
-            if (positions.Length == 0 || sourceSamples <= 0) {
-                return positions;
-            }
-            for (int t = 0; t < positions.Length; t++) {
-                positions[t] = positions.Length == 1 || sourceSamples == 1
-                    ? 0
-                    : t * (sourceSamples - 1.0) / (positions.Length - 1);
-            }
-            return positions;
-        }
-
-        static void FillUnwrittenSourcePositions(double[] positions, bool[] written, int sourceSamples) {
-            var fallback = BuildLinearSourcePositions(positions.Length, sourceSamples);
-            for (int t = 0; t < positions.Length; t++) {
-                if (!written[t]) {
-                    positions[t] = fallback[t];
-                }
-            }
-        }
-
-        static bool WritePhoneSourcePositionMap(
-            double[] positions,
-            int outputStart,
-            int outputFrames,
-            int sourceStart,
-            int sourceSamples,
-            int sourceConsonantSamples,
-            double? consonantMs,
-            RenderPhone phone) {
-            outputFrames = Math.Max(1, Math.Min(outputFrames, positions.Length - outputStart));
-            if (outputFrames <= 0) {
-                return false;
-            }
-            sourceSamples = Math.Max(1, sourceSamples);
-            if (outputFrames <= 2 || sourceSamples < MinSourceSamples) {
-                WriteSourcePositionRegion(positions, outputStart, outputFrames, sourceStart, sourceSamples);
-                return false;
-            }
-
-            sourceConsonantSamples = NormalizeSourceConsonantSamples(sourceConsonantSamples, sourceSamples, phone.phoneme);
-            int sourceVowelSamples = sourceSamples - sourceConsonantSamples;
-            if (!consonantMs.HasValue || sourceConsonantSamples <= 0 || sourceVowelSamples < MinVowelSourceSamples) {
-                WriteSourcePositionRegion(positions, outputStart, outputFrames, sourceStart, sourceSamples);
-                return false;
-            }
-
-            int targetConsonantFrames = (int)Math.Round(consonantMs.Value / HifiF0Builder.FrameMs);
-            targetConsonantFrames = Math.Clamp(targetConsonantFrames, 0, Math.Max(0, outputFrames - MinVowelTargetFrames));
-            int targetVowelFrames = outputFrames - targetConsonantFrames;
-            if (targetVowelFrames < MinVowelTargetFrames) {
-                targetVowelFrames = MinVowelTargetFrames;
-                targetConsonantFrames = Math.Max(0, outputFrames - targetVowelFrames);
-            }
-
-            if (targetConsonantFrames > 0) {
-                WriteSourcePositionRegion(
-                    positions,
-                    outputStart,
-                    targetConsonantFrames,
-                    sourceStart,
-                    sourceConsonantSamples);
-            }
-            var vowelReport = WriteVowelSourcePositionMap(
-                positions,
-                outputStart + targetConsonantFrames,
-                targetVowelFrames,
-                sourceStart + sourceConsonantSamples,
-                sourceVowelSamples);
-
-            double consonantRatio = sourceConsonantSamples > 0
-                ? (targetConsonantFrames * HifiF0Builder.FrameMs) / Math.Max(SourceSampleMs, sourceConsonantSamples * SourceSampleMs)
-                : 0;
-            double vowelRatio = (targetVowelFrames * HifiF0Builder.FrameMs) / Math.Max(SourceSampleMs, sourceVowelSamples * SourceSampleMs);
-            Log.Information(
-                "HifiRoughFeatureBuilder variable_position_phone phoneme={Phoneme} source_samples={SourceSamples} target_frames={TargetFrames} source_consonant_samples={SourceConsonantSamples} target_consonant_frames={TargetConsonantFrames} source_vowel_samples={SourceVowelSamples} target_vowel_frames={TargetVowelFrames} consonant_ratio={ConsonantRatio:F4} vowel_ratio={VowelRatio:F4} strategy={Strategy}",
-                phone.phoneme,
-                sourceSamples,
-                outputFrames,
-                sourceConsonantSamples,
-                targetConsonantFrames,
-                sourceVowelSamples,
-                targetVowelFrames,
-                consonantRatio,
-                vowelRatio,
-                vowelReport.Strategy);
-            return true;
-        }
-
-        static VowelMapReport WriteVowelSourcePositionMap(
-            double[] positions,
-            int outputStart,
-            int outputFrames,
-            int sourceStart,
-            int sourceSamples) {
-            if (outputFrames <= 0) {
-                return new VowelMapReport(0, 0, 0, 0, "empty_vowel_target", 0, 0, 0);
-            }
-            ResolveVowelSectionsSamples(sourceSamples, out int onsetSamples, out int releaseSamples, out int sustainSamples);
-            var (targetOnsetFrames, targetSustainFrames, targetReleaseFrames) = AllocateVowelTargetSections(
-                SamplesToSourceFrames(onsetSamples),
-                SamplesToSourceFrames(sustainSamples),
-                SamplesToSourceFrames(releaseSamples),
-                outputFrames);
-
-            if (targetOnsetFrames > 0) {
-                WriteSourcePositionRegion(positions, outputStart, targetOnsetFrames, sourceStart, onsetSamples);
-            }
-            if (targetSustainFrames > 0) {
-                WriteSustainSourcePositionRegion(
-                    positions,
-                    outputStart + targetOnsetFrames,
-                    targetSustainFrames,
-                    sourceStart + onsetSamples,
-                    sustainSamples);
-            }
-            if (targetReleaseFrames > 0) {
-                WriteSourcePositionRegion(
-                    positions,
-                    outputStart + targetOnsetFrames + targetSustainFrames,
-                    targetReleaseFrames,
-                    sourceStart + sourceSamples - releaseSamples,
-                    releaseSamples);
-            }
-
-            double vowelRatio = (outputFrames * HifiF0Builder.FrameMs) / Math.Max(SourceSampleMs, sourceSamples * SourceSampleMs);
-            string strategy = Math.Abs(vowelRatio - 1.0) < 0.05
-                ? "variable_position_equal"
-                : vowelRatio > 1.0
-                    ? "variable_position_sustain_stretch"
-                    : "variable_position_area_compress";
-            return new VowelMapReport(
-                sourceStart + onsetSamples,
-                sourceStart + onsetSamples + sustainSamples,
-                0,
-                0,
-                strategy,
-                targetOnsetFrames,
-                targetSustainFrames,
-                targetReleaseFrames);
-        }
-
-        static void WriteSourcePositionRegion(
-            double[] positions,
-            int outputStart,
-            int outputFrames,
-            int sourceStart,
-            int sourceSamples) {
-            if (outputFrames <= 0) {
-                return;
-            }
-            sourceSamples = Math.Max(1, sourceSamples);
-            outputFrames = Math.Max(1, Math.Min(outputFrames, positions.Length - outputStart));
-            for (int t = 0; t < outputFrames; t++) {
-                double sourceOffset = outputFrames == 1 || sourceSamples == 1
-                    ? 0
-                    : t * (sourceSamples - 1.0) / (outputFrames - 1);
-                positions[outputStart + t] = sourceStart + sourceOffset;
-            }
-        }
-
-        static void WriteSustainSourcePositionRegion(
-            double[] positions,
-            int outputStart,
-            int outputFrames,
-            int sourceStart,
-            int sourceSamples) {
-            if (outputFrames <= 0) {
-                return;
-            }
-            sourceSamples = Math.Max(1, sourceSamples);
-            outputFrames = Math.Max(1, Math.Min(outputFrames, positions.Length - outputStart));
-            double stretchRatio = (outputFrames * HifiF0Builder.FrameMs) / Math.Max(SourceSampleMs, sourceSamples * SourceSampleMs);
-            for (int t = 0; t < outputFrames; t++) {
-                double u = outputFrames == 1 || sourceSamples == 1
-                    ? 0
-                    : t / (double)(outputFrames - 1);
-                double sourceNorm = ApplyNaturalStretchWarp(u, stretchRatio);
-                positions[outputStart + t] = sourceStart + sourceNorm * (sourceSamples - 1);
-            }
-        }
-
-        static void ResolveVowelSectionsSamples(int sourceSamples, out int onsetSamples, out int releaseSamples, out int sustainSamples) {
-            sourceSamples = Math.Max(1, sourceSamples);
-            if (sourceSamples <= HifiMelExtractor.OriginHopSize * 3) {
-                onsetSamples = Math.Max(1, sourceSamples - 1);
-                releaseSamples = 0;
-                sustainSamples = Math.Max(1, sourceSamples - onsetSamples);
-                return;
-            }
-            onsetSamples = Math.Clamp((int)Math.Round(sourceSamples * 0.10), HifiMelExtractor.OriginHopSize, HifiMelExtractor.OriginHopSize * 5);
-            releaseSamples = Math.Clamp((int)Math.Round(sourceSamples * 0.08), HifiMelExtractor.OriginHopSize, HifiMelExtractor.OriginHopSize * 5);
-            while (onsetSamples + releaseSamples > sourceSamples - HifiMelExtractor.OriginHopSize * 2
-                    && (onsetSamples > HifiMelExtractor.OriginHopSize || releaseSamples > 0)) {
-                if (onsetSamples >= releaseSamples && onsetSamples > HifiMelExtractor.OriginHopSize) {
-                    onsetSamples -= HifiMelExtractor.OriginHopSize;
-                } else if (releaseSamples > 0) {
-                    releaseSamples = Math.Max(0, releaseSamples - HifiMelExtractor.OriginHopSize);
-                } else {
-                    break;
-                }
-            }
-            sustainSamples = Math.Max(1, sourceSamples - onsetSamples - releaseSamples);
-        }
-
-        static int SamplesToSourceFrames(int samples) {
-            if (samples <= 0) {
-                return 0;
-            }
-            return Math.Max(1, (int)Math.Round(samples / (double)HifiMelExtractor.OriginHopSize));
-        }
-
-        static int TrimInactiveTailSamples(
-            float[] samples,
-            int sourceStart,
-            int sourceSamples,
-            int sourceConsonantSamples,
-            string phoneme) {
-            sourceStart = Math.Clamp(sourceStart, 0, Math.Max(0, samples.Length - 1));
-            sourceSamples = Math.Max(1, Math.Min(sourceSamples, samples.Length - sourceStart));
-            if (sourceSamples <= MinSourceSamples * 2) {
-                return sourceSamples;
-            }
-
-            const int energyHop = HifiF0Builder.HopSize / 2;
-            int windows = Math.Max(1, (sourceSamples + energyHop - 1) / energyHop);
-            var rms = new double[windows];
-            double maxRms = 0;
-            for (int w = 0; w < windows; w++) {
-                int start = sourceStart + w * energyHop;
-                int end = Math.Min(sourceStart + sourceSamples, start + energyHop);
-                double sum = 0;
-                int count = Math.Max(1, end - start);
-                for (int i = start; i < end; i++) {
-                    sum += samples[i] * samples[i];
-                }
-                double value = Math.Sqrt(sum / count);
-                rms[w] = value;
-                maxRms = Math.Max(maxRms, value);
-            }
-            if (maxRms <= 1e-6 || !IsFinite(maxRms)) {
-                return sourceSamples;
-            }
-
-            double threshold = maxRms * 0.08;
-            int minKeep = Math.Clamp(sourceConsonantSamples + MinVowelSourceSamples, 1, sourceSamples);
-            int minWindow = Math.Clamp(minKeep / energyHop, 0, windows - 1);
-            int lastActiveWindow = windows - 1;
-            for (int w = windows - 1; w >= minWindow; w--) {
-                if (rms[w] >= threshold) {
-                    lastActiveWindow = w;
-                    break;
-                }
-            }
-
-            int trimmedSamples = Math.Clamp((lastActiveWindow + 1) * energyHop + InactiveTailGuardSamples, minKeep, sourceSamples);
-            if (trimmedSamples < sourceSamples - InactiveTailGuardSamples) {
-                Log.Information(
-                    "HifiRoughFeatureBuilder source_inactive_tail_trimmed_wave phoneme={Phoneme} source_samples={SourceSamples} trimmed_source_samples={TrimmedSourceSamples} max_rms={MaxRms:F6} threshold={Threshold:F6}",
-                    phoneme,
-                    sourceSamples,
-                    trimmedSamples,
-                    maxRms,
-                    threshold);
-            }
-            return trimmedSamples;
-        }
-
-        static int NormalizeSourceConsonantSamples(int sourceConsonantSamples, int sourceSamples, string phoneme) {
-            if (sourceSamples <= 0) {
-                return 0;
-            }
-            sourceConsonantSamples = Math.Clamp(sourceConsonantSamples, 0, sourceSamples - 1);
-            int maxConsonant = Math.Max(0, sourceSamples - MinVowelSourceSamples);
-            if (sourceConsonantSamples > maxConsonant) {
-                Log.Information(
-                    "HifiRoughFeatureBuilder source_consonant_clamped_wave phoneme={Phoneme} source_samples={SourceSamples} original_source_consonant_samples={OriginalSourceConsonantSamples} clamped_source_consonant_samples={ClampedSourceConsonantSamples}",
-                    phoneme,
-                    sourceSamples,
-                    sourceConsonantSamples,
-                    maxConsonant);
-                sourceConsonantSamples = maxConsonant;
-            }
-            return sourceConsonantSamples;
-        }
-
-        static float[,] AlignMelFrames(float[,] sourceMel, int targetFrames) {
-            int bins = sourceMel.GetLength(0);
-            int sourceFrames = sourceMel.GetLength(1);
-            var output = new float[bins, targetFrames];
-            if (sourceFrames <= 0) {
-                FillConstant(output, (float)Math.Log(1e-5));
-                return output;
-            }
-            if (sourceFrames == targetFrames) {
-                BufferCopy(sourceMel, output);
-                return output;
-            }
-            for (int t = 0; t < targetFrames; t++) {
-                double sourceIndex = targetFrames <= 1 || sourceFrames <= 1
-                    ? 0
-                    : (double)t * (sourceFrames - 1) / (targetFrames - 1);
-                int left = (int)Math.Floor(sourceIndex);
-                int right = Math.Min(sourceFrames - 1, left + 1);
-                float alpha = (float)(sourceIndex - left);
-                for (int m = 0; m < bins; m++) {
-                    float v0 = sourceMel[m, left];
-                    float v1 = sourceMel[m, right];
-                    output[m, t] = v0 + (v1 - v0) * alpha;
-                }
-            }
-            return output;
-        }
-
         static void ApplyPhraseEdgeMelGuard(float[,] mel) {
             int frames = mel.GetLength(1);
             if (frames <= 1) {
@@ -581,66 +195,6 @@ namespace OpenUtau.Core.HifiNeural {
             for (int m = 0; m < bins; m++) {
                 mel[m, frame] += logGain;
             }
-        }
-
-        static float[,] AlignMelFramesByPhones(
-            RenderPhrase phrase,
-            double phraseStartMs,
-            float[,] sourceMel,
-            int targetFrames,
-            float[] targetF0) {
-            int bins = sourceMel.GetLength(0);
-            int sourceFrames = sourceMel.GetLength(1);
-            if (phrase.phones.Length == 0 || sourceFrames <= 0 || targetFrames <= 0) {
-                return AlignMelFrames(sourceMel, targetFrames);
-            }
-
-            var output = new float[bins, targetFrames];
-            var written = new bool[targetFrames];
-            int[] sourceStarts = BuildPhoneStarts(phrase, phraseStartMs, sourceFrames, SourceFrameMs);
-            int[] targetStarts = BuildPhoneStarts(phrase, phraseStartMs, targetFrames, HifiF0Builder.FrameMs);
-            int splitCount = 0;
-            int fallbackCount = 0;
-
-            for (int i = 0; i < phrase.phones.Length; i++) {
-                int sourceStart = sourceStarts[i];
-                int sourceEnd = i + 1 < sourceStarts.Length ? sourceStarts[i + 1] : sourceFrames;
-                int targetStart = targetStarts[i];
-                int targetEnd = i + 1 < targetStarts.Length ? targetStarts[i + 1] : targetFrames;
-
-                sourceEnd = Math.Clamp(sourceEnd, sourceStart + 1, Math.Max(sourceStart + 1, sourceFrames));
-                targetEnd = Math.Clamp(targetEnd, targetStart + 1, Math.Max(targetStart + 1, targetFrames));
-                int sourceCount = Math.Max(1, sourceEnd - sourceStart);
-                int targetCount = Math.Max(1, targetEnd - targetStart);
-
-                var report = WritePhoneMappedSegment(
-                    sourceMel,
-                    sourceStart,
-                    sourceCount,
-                    output,
-                    targetStart,
-                    targetCount,
-                    phrase.phones[i],
-                    targetF0);
-                if (report.SplitApplied) {
-                    splitCount++;
-                } else {
-                    fallbackCount++;
-                }
-                for (int t = targetStart; t < targetEnd && t < written.Length; t++) {
-                    written[t] = true;
-                }
-            }
-
-            FillUnwrittenFrames(output, written, AlignMelFrames(sourceMel, targetFrames));
-            Log.Information(
-                "HifiRoughFeatureBuilder phone_timewarp phones={Phones} split_segments={SplitSegments} fallback_segments={FallbackSegments} source_frames={SourceFrames} target_frames={TargetFrames}",
-                phrase.phones.Length,
-                splitCount,
-                fallbackCount,
-                sourceFrames,
-                targetFrames);
-            return output;
         }
 
         internal readonly record struct PhoneMapReport(
@@ -973,7 +527,7 @@ namespace OpenUtau.Core.HifiNeural {
                 : 0;
             double vowelRatio = (timing.TargetVowelFrames * HifiF0Builder.FrameMs) / Math.Max(SourceFrameMs, timing.SourceVowelFrames * SourceFrameMs);
             Log.Debug(
-                "HifiRoughFeatureBuilder phone_timewarp phoneme={Phoneme} source_frames={SourceFrames} target_frames={TargetFrames} source_preutter_ms={SourcePreutterMs:F2} target_preutter_ms={TargetPreutterMs:F2} source_soft_skip_ms={SourceSoftSkipMs:F2} source_soft_skip_frames={SourceSoftSkipFrames} source_fixed_frames={SourceFixedFrames} target_fixed_frames={TargetFixedFrames} source_vowel_onset_frames={SourceVowelOnsetFrames} target_vowel_onset_frames={TargetVowelOnsetFrames} source_vowel_frames={SourceVowelFrames} target_vowel_frames={TargetVowelFrames} fixed_ratio={FixedRatio:F4} vowel_ratio={VowelRatio:F4} strategy={Strategy}",
+                "HifiPhraseFeatureBuilder phone_timewarp phoneme={Phoneme} source_frames={SourceFrames} target_frames={TargetFrames} source_preutter_ms={SourcePreutterMs:F2} target_preutter_ms={TargetPreutterMs:F2} source_soft_skip_ms={SourceSoftSkipMs:F2} source_soft_skip_frames={SourceSoftSkipFrames} source_fixed_frames={SourceFixedFrames} target_fixed_frames={TargetFixedFrames} source_vowel_onset_frames={SourceVowelOnsetFrames} target_vowel_onset_frames={TargetVowelOnsetFrames} source_vowel_frames={SourceVowelFrames} target_vowel_frames={TargetVowelFrames} fixed_ratio={FixedRatio:F4} vowel_ratio={VowelRatio:F4} strategy={Strategy}",
                 phone.phoneme,
                 sourceFrames,
                 outputFrames,
@@ -997,84 +551,6 @@ namespace OpenUtau.Core.HifiNeural {
             // portion, bounded by min(preutter, consonant) and kept strictly inside the region.
             int f0MaskFrames = ResolveConsonantF0MaskFrames(phone, timing.ConsonantMs, timing.TargetFixedFrames);
             return new PhoneMapReport(true, vowelMap.Strategy, timing.TargetFixedFrames, f0MaskFrames, timing.SourceSoftSkipMs, 0);
-        }
-
-        static int[] BuildPhoneStarts(RenderPhrase phrase, double phraseStartMs, int totalFrames, double frameMs) {
-            int phoneCount = phrase.phones.Length;
-            var starts = new int[phoneCount];
-            if (phoneCount == 0 || totalFrames <= 0) {
-                return starts;
-            }
-
-            var durationWeights = new double[phoneCount];
-            double previousMs = phraseStartMs;
-            for (int i = 0; i < phoneCount; i++) {
-                double currentMs = i == 0 ? phraseStartMs : PhoneSegmentStartMs(phrase.phones[i]);
-                currentMs = Math.Max(currentMs, previousMs);
-                double nextMs = i + 1 < phoneCount
-                    ? Math.Max(currentMs, PhoneSegmentStartMs(phrase.phones[i + 1]))
-                    : phraseStartMs + totalFrames * frameMs;
-                durationWeights[i] = Math.Max(0, nextMs - currentMs) / frameMs;
-                previousMs = currentMs;
-            }
-
-            int[] durations = AllocatePhoneDurations(durationWeights, totalFrames);
-            int cursor = 0;
-            for (int i = 0; i < phoneCount; i++) {
-                starts[i] = Math.Clamp(cursor, 0, Math.Max(0, totalFrames - 1));
-                cursor += durations[i];
-            }
-            return starts;
-        }
-
-        static int[] AllocatePhoneDurations(double[] weights, int totalFrames) {
-            int count = weights.Length;
-            var durations = new int[count];
-            if (count == 0 || totalFrames <= 0) {
-                return durations;
-            }
-
-            int activeCount = weights.Count(w => w > 1e-6);
-            bool canKeepEveryPhoneAudible = activeCount > 0 && totalFrames >= activeCount;
-            int used = 0;
-            if (canKeepEveryPhoneAudible) {
-                for (int i = 0; i < count; i++) {
-                    if (weights[i] > 1e-6) {
-                        durations[i] = 1;
-                        used++;
-                    }
-                }
-            }
-
-            int remaining = Math.Max(0, totalFrames - used);
-            double weightSum = weights.Sum();
-            if (remaining > 0 && weightSum > 1e-6) {
-                var fractional = new List<(int Index, double Fraction)>(count);
-                int allocated = 0;
-                for (int i = 0; i < count; i++) {
-                    double exact = remaining * weights[i] / weightSum;
-                    int whole = (int)Math.Floor(exact);
-                    durations[i] += whole;
-                    allocated += whole;
-                    fractional.Add((i, exact - whole));
-                }
-                int left = remaining - allocated;
-                foreach (var item in fractional.OrderByDescending(f => f.Fraction)) {
-                    if (left <= 0) {
-                        break;
-                    }
-                    durations[item.Index]++;
-                    left--;
-                }
-            } else if (remaining > 0) {
-                durations[count - 1] += remaining;
-            }
-
-            int diff = totalFrames - durations.Sum();
-            if (diff != 0) {
-                durations[count - 1] = Math.Max(0, durations[count - 1] + diff);
-            }
-            return durations;
         }
 
         static void WriteCompactPhoneRegion(
@@ -1276,7 +752,7 @@ namespace OpenUtau.Core.HifiNeural {
             }
             if (cutFrames > 0) {
                 Log.Information(
-                    "HifiRoughFeatureBuilder f0_mel_compensation reference_f0={ReferenceF0:F2} cut_frames={CutFrames} max_cut_db={MaxCutDb:F2}",
+                    "HifiPhraseFeatureBuilder f0_mel_compensation reference_f0={ReferenceF0:F2} cut_frames={CutFrames} max_cut_db={MaxCutDb:F2}",
                     referenceF0,
                     cutFrames,
                     maxCut);
@@ -1637,7 +1113,7 @@ namespace OpenUtau.Core.HifiNeural {
             SmoothInternalSustain(output, outputStart, outputFrames, strength: 0.04f);
 
             Log.Debug(
-                "HifiRoughFeatureBuilder sustain_texture_trajectory source_frames={SourceFrames} output_frames={OutputFrames} stable_frames={StableFrames} edge_frames={EdgeFrames} direct_smooth_radius={DirectSmoothRadius} texture_smooth_radius={TextureSmoothRadius} micro_variation={MicroVariation}",
+                "HifiPhraseFeatureBuilder sustain_texture_trajectory source_frames={SourceFrames} output_frames={OutputFrames} stable_frames={StableFrames} edge_frames={EdgeFrames} direct_smooth_radius={DirectSmoothRadius} texture_smooth_radius={TextureSmoothRadius} micro_variation={MicroVariation}",
                 sourceFrames,
                 outputFrames,
                 stableFrames,
@@ -1746,7 +1222,7 @@ namespace OpenUtau.Core.HifiNeural {
                     coreWeight);
             }
             Log.Debug(
-                "HifiRoughFeatureBuilder sustain_waveform_texture_body source_frames={SourceFrames} output_frames={OutputFrames} stable_frames={StableFrames} edge_frames={EdgeFrames} stretch_ratio={StretchRatio:F3} source_samples={SourceSamples}",
+                "HifiPhraseFeatureBuilder sustain_waveform_texture_body source_frames={SourceFrames} output_frames={OutputFrames} stable_frames={StableFrames} edge_frames={EdgeFrames} stretch_ratio={StretchRatio:F3} source_samples={SourceSamples}",
                 sourceFrames,
                 outputFrames,
                 stableFrames,
@@ -2380,7 +1856,7 @@ namespace OpenUtau.Core.HifiNeural {
             int trimmedFrames = Math.Clamp(lastActive + 1 + InactiveTailGuardFrames, minKeep, sourceFrames);
             if (trimmedFrames < sourceFrames - InactiveTailGuardFrames) {
                 Log.Information(
-                    "HifiRoughFeatureBuilder source_inactive_tail_trimmed phoneme={Phoneme} source_frames={SourceFrames} trimmed_source_frames={TrimmedSourceFrames} max_energy={MaxEnergy:F4} threshold={Threshold:F4}",
+                    "HifiPhraseFeatureBuilder source_inactive_tail_trimmed phoneme={Phoneme} source_frames={SourceFrames} trimmed_source_frames={TrimmedSourceFrames} max_energy={MaxEnergy:F4} threshold={Threshold:F4}",
                     phoneme,
                     sourceFrames,
                     trimmedFrames,
@@ -2398,7 +1874,7 @@ namespace OpenUtau.Core.HifiNeural {
             int maxConsonant = Math.Max(0, sourceFrames - MinVowelSourceFrames);
             if (sourceConsonantFrames > maxConsonant) {
                 Log.Information(
-                    "HifiRoughFeatureBuilder source_consonant_clamped phoneme={Phoneme} source_frames={SourceFrames} original_source_consonant_frames={OriginalSourceConsonantFrames} clamped_source_consonant_frames={ClampedSourceConsonantFrames}",
+                    "HifiPhraseFeatureBuilder source_consonant_clamped phoneme={Phoneme} source_frames={SourceFrames} original_source_consonant_frames={OriginalSourceConsonantFrames} clamped_source_consonant_frames={ClampedSourceConsonantFrames}",
                     phoneme,
                     sourceFrames,
                     sourceConsonantFrames,
@@ -2765,27 +2241,6 @@ namespace OpenUtau.Core.HifiNeural {
 
         static bool IsFinite(double value) => !double.IsNaN(value) && !double.IsInfinity(value);
 
-        static void FillUnwrittenFrames(float[,] output, bool[] written, float[,] fallback) {
-            int bins = output.GetLength(0);
-            int frames = output.GetLength(1);
-            for (int t = 0; t < frames; t++) {
-                if (written[t]) {
-                    continue;
-                }
-                for (int m = 0; m < bins; m++) {
-                    output[m, t] = fallback[m, t];
-                }
-            }
-        }
-
-        static void BufferCopy(float[,] source, float[,] destination) {
-            for (int m = 0; m < source.GetLength(0); m++) {
-                for (int t = 0; t < source.GetLength(1); t++) {
-                    destination[m, t] = source[m, t];
-                }
-            }
-        }
-
         static void FillConstant(float[,] values, float value) {
             for (int m = 0; m < values.GetLength(0); m++) {
                 for (int t = 0; t < values.GetLength(1); t++) {
@@ -2821,12 +2276,12 @@ namespace OpenUtau.Core.HifiNeural {
         static void Validate(float[,] mel, float[] f0) {
             foreach (float value in mel) {
                 if (float.IsNaN(value) || float.IsInfinity(value)) {
-                    throw new InvalidOperationException("rough phrase_mel contains NaN or Inf.");
+                    throw new InvalidOperationException("hifi phrase_mel contains NaN or Inf.");
                 }
             }
             foreach (float value in f0) {
                 if (float.IsNaN(value) || float.IsInfinity(value)) {
-                    throw new InvalidOperationException("rough phrase_f0 contains NaN or Inf.");
+                    throw new InvalidOperationException("hifi phrase_f0 contains NaN or Inf.");
                 }
             }
         }

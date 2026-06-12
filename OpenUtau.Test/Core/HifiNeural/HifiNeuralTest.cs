@@ -115,7 +115,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
 
         [Fact]
         public void AlignMelFramesProducesExpectedLength() {
-            var method = typeof(HifiRoughFeatureBuilder)
+            var method = typeof(HifiPhraseFeatureBuilder)
                 .GetMethod("AlignMelFrames", BindingFlags.NonPublic | BindingFlags.Static);
             Assert.NotNull(method);
 
@@ -135,7 +135,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
 
         [Fact]
         public void TrimInactiveTailRemovesRoughSilenceGap() {
-            var method = typeof(HifiRoughFeatureBuilder)
+            var method = typeof(HifiPhraseFeatureBuilder)
                 .GetMethod("TrimInactiveTailFrames", BindingFlags.NonPublic | BindingFlags.Static);
             Assert.NotNull(method);
 
@@ -152,7 +152,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
 
         [Fact]
         public void SustainTemplateHandlesTwoFrameOutput() {
-            var method = typeof(HifiRoughFeatureBuilder)
+            var method = typeof(HifiPhraseFeatureBuilder)
                 .GetMethod(
                     "WriteSustainTemplateExtension",
                     BindingFlags.NonPublic | BindingFlags.Static);
@@ -177,7 +177,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
 
         [Fact]
         public void SustainTextureTrajectoryAnchorsEdges() {
-            var method = typeof(HifiRoughFeatureBuilder)
+            var method = typeof(HifiPhraseFeatureBuilder)
                 .GetMethod(
                     "WriteSustainTemplateExtension",
                     BindingFlags.NonPublic | BindingFlags.Static);
@@ -204,7 +204,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
 
         [Fact]
         public void WaveformSustainTextureWritesValidMelAndAnchorsEdges() {
-            var method = typeof(HifiRoughFeatureBuilder)
+            var method = typeof(HifiPhraseFeatureBuilder)
                 .GetMethod(
                     "TryWriteWaveformSustainTexture",
                     BindingFlags.NonPublic | BindingFlags.Static,
@@ -276,7 +276,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
 
         [Fact]
         public void WaveformSustainEnergyDeltaDoesNotFlattenNormalVariation() {
-            var method = typeof(HifiRoughFeatureBuilder)
+            var method = typeof(HifiPhraseFeatureBuilder)
                 .GetMethod("ResolveWaveformSustainEnergyDelta", BindingFlags.NonPublic | BindingFlags.Static);
             Assert.NotNull(method);
 
@@ -291,7 +291,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
 
         [Fact]
         public void SustainTextureStepAllowsNaturalHopRate() {
-            var method = typeof(HifiRoughFeatureBuilder)
+            var method = typeof(HifiPhraseFeatureBuilder)
                 .GetMethod("LimitTextureIndexStep", BindingFlags.NonPublic | BindingFlags.Static);
             Assert.NotNull(method);
 
@@ -306,7 +306,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
 
         [Fact]
         public void LongSustainParameterMapFollowsDirectContour() {
-            var method = typeof(HifiRoughFeatureBuilder)
+            var method = typeof(HifiPhraseFeatureBuilder)
                 .GetMethod("WriteSustainFrameMap", BindingFlags.NonPublic | BindingFlags.Static);
             Assert.NotNull(method);
 
@@ -330,9 +330,9 @@ namespace OpenUtau.Core.Test.HifiNeural {
 
         [Fact]
         public void SustainTextureBodyRemovesFrameMeanEnergy() {
-            var meanMethod = typeof(HifiRoughFeatureBuilder)
+            var meanMethod = typeof(HifiPhraseFeatureBuilder)
                 .GetMethod("TextureResidualMean", BindingFlags.NonPublic | BindingFlags.Static);
-            var composeMethod = typeof(HifiRoughFeatureBuilder)
+            var composeMethod = typeof(HifiPhraseFeatureBuilder)
                 .GetMethod("ComposeSustainTextureBodyValue", BindingFlags.NonPublic | BindingFlags.Static);
             Assert.NotNull(meanMethod);
             Assert.NotNull(composeMethod);
@@ -361,7 +361,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
 
         [Fact]
         public void VcvPreferredOnsetUsesConsonantBoundary() {
-            var method = typeof(HifiRoughFeatureBuilder)
+            var method = typeof(HifiPhraseFeatureBuilder)
                 .GetMethod(
                     "ResolveVowelSections",
                     BindingFlags.NonPublic | BindingFlags.Static,
@@ -386,7 +386,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
 
         [Fact]
         public void VcvShortTargetPreservesOnsetBeforeCompressingSustain() {
-            var method = typeof(HifiRoughFeatureBuilder)
+            var method = typeof(HifiPhraseFeatureBuilder)
                 .GetMethod(
                     "AllocateVowelTargetSections",
                     BindingFlags.NonPublic | BindingFlags.Static,
@@ -1184,17 +1184,17 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 overlapMs: 80,
                 durationMs: 70,
                 consonantMs: 230,
-                phoneme: "あ");
+                phoneme: "銇?);
 
-            double romajiFixedMs = HifiRoughFeatureBuilder.ResolveTargetFixedMs(romaji);
-            double kanaFixedMs = HifiRoughFeatureBuilder.ResolveTargetFixedMs(kana);
+            double romajiFixedMs = HifiPhraseFeatureBuilder.ResolveTargetFixedMs(romaji);
+            double kanaFixedMs = HifiPhraseFeatureBuilder.ResolveTargetFixedMs(kana);
 
             Assert.Equal(romajiFixedMs, kanaFixedMs, 3);
         }
 
         [Fact]
         public void TargetFixedLeadAdaptsToSourcePreutterBudget() {
-            double shortSourceFixedMs = HifiRoughFeatureBuilder.ResolveTargetFixedMs(
+            double shortSourceFixedMs = HifiPhraseFeatureBuilder.ResolveTargetFixedMs(
                 preutterMs: 180,
                 overlapMs: 80,
                 durationMs: 70,
@@ -1202,7 +1202,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 sourcePreutterMs: 60,
                 sourceOverlapMs: 40,
                 sourceStableStartMs: 90);
-            double longSourceFixedMs = HifiRoughFeatureBuilder.ResolveTargetFixedMs(
+            double longSourceFixedMs = HifiPhraseFeatureBuilder.ResolveTargetFixedMs(
                 preutterMs: 180,
                 overlapMs: 80,
                 durationMs: 70,
@@ -1216,7 +1216,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
 
         [Fact]
         public void TargetFixedLeadDoesNotExceedUpperBudget() {
-            double fixedMs = HifiRoughFeatureBuilder.ResolveTargetFixedMs(
+            double fixedMs = HifiPhraseFeatureBuilder.ResolveTargetFixedMs(
                 preutterMs: 180,
                 overlapMs: 40,
                 durationMs: 25,
@@ -1247,8 +1247,8 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 sourcePreutterMs: 180,
                 sourceOverlapMs: 120);
 
-            double smallOverlapFixedMs = HifiRoughFeatureBuilder.ResolveTargetFixedMs(smallOverlap);
-            double largeOverlapFixedMs = HifiRoughFeatureBuilder.ResolveTargetFixedMs(largeOverlap);
+            double smallOverlapFixedMs = HifiPhraseFeatureBuilder.ResolveTargetFixedMs(smallOverlap);
+            double largeOverlapFixedMs = HifiPhraseFeatureBuilder.ResolveTargetFixedMs(largeOverlap);
 
             Assert.True(smallOverlapFixedMs > largeOverlapFixedMs, $"larger source overlap should reduce fixed lead budget, got small={smallOverlapFixedMs:F3}ms large={largeOverlapFixedMs:F3}ms");
         }
@@ -1275,7 +1275,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 durationMs: 120,
                 consonantMs: 230);
 
-            double[] map = HifiRoughFeatureBuilder.BuildPhoneTargetToSourceFrameMap(sourceFrames, targetFrames, phone);
+            double[] map = HifiPhraseFeatureBuilder.BuildPhoneTargetToSourceFrameMap(sourceFrames, targetFrames, phone);
             int targetLeadFrames = Math.Min(targetFrames - 1, FramesForMs(preutterMs));
             int sourceLeadFrames = Math.Min(sourceFrames - 4, SourceFramesForMs(preutterMs));
 
@@ -1292,7 +1292,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 consonantMs: 250,
                 sourcePreutterMs: 180);
 
-            double[] map = HifiRoughFeatureBuilder.BuildPhoneTargetToSourceFrameMap(
+            double[] map = HifiPhraseFeatureBuilder.BuildPhoneTargetToSourceFrameMap(
                 sourceFrames: 160,
                 outputFrames: 80,
                 phone);
@@ -1333,7 +1333,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
             double overlapMs,
             double durationMs,
             bool hasReliableConsonant) {
-            var method = typeof(HifiRoughFeatureBuilder)
+            var method = typeof(HifiPhraseFeatureBuilder)
                 .GetMethod(
                     "ResolveTargetFixedMs",
                     BindingFlags.NonPublic | BindingFlags.Static,
@@ -1355,7 +1355,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         static int ResolveTargetLeadFrames(RenderPhone phone, int outputFrames) {
-            var method = typeof(HifiRoughFeatureBuilder)
+            var method = typeof(HifiPhraseFeatureBuilder)
                 .GetMethod("ResolveTargetLeadFrames", BindingFlags.NonPublic | BindingFlags.Static);
             Assert.NotNull(method);
             return (int)method!.Invoke(null, new object[] {

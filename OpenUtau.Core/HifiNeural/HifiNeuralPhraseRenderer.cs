@@ -91,7 +91,7 @@ namespace OpenUtau.Core.HifiNeural {
                 return Array.Empty<float>();
             }
             Log.Information("HifiNeuralPhraseRenderer mel_domain_concat mode=overlap_only phones={Phones}", phrase.phones.Length);
-            var featureBuilder = new HifiRoughFeatureBuilder(HifiRenderConfig.CreateMelEnhancer());
+            var featureBuilder = new HifiPhraseFeatureBuilder(HifiRenderConfig.CreateMelEnhancer());
             var features = featureBuilder.Build(phrase, layout);
             string debugKey = $"{phrase.hash:x16}";
             if (HifiRenderConfig.DebugExportEnabled) {

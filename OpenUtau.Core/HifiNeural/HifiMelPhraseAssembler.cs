@@ -8,7 +8,7 @@ namespace OpenUtau.Core.HifiNeural {
     /// <summary>
     /// Builds the phrase mel by extracting a mel spectrogram from each phone's oto source
     /// slice independently, time-stretching it per phone (reusing the exact stretch logic in
-    /// <see cref="HifiRoughFeatureBuilder"/>), then assembling the stretched phone mels onto the
+    /// <see cref="HifiPhraseFeatureBuilder"/>), then assembling the stretched phone mels onto the
     /// phrase frame grid with overlap cross-fades.
     ///
     /// This replaces the previous "SharpWavtool concatenates a rough wav, then variable-position
@@ -169,7 +169,7 @@ namespace OpenUtau.Core.HifiNeural {
 
             var phoneMel = new float[HifiMelExtractor.NMels, frameCount];
             // Local target F0 slice so the (F0-aware) stretch logic sees the right pitch motion.
-            var report = HifiRoughFeatureBuilder.WritePhoneMappedSegment(
+            var report = HifiPhraseFeatureBuilder.WritePhoneMappedSegment(
                 sourceMel,
                 0,
                 sourceFrames,
@@ -220,7 +220,7 @@ namespace OpenUtau.Core.HifiNeural {
             if (sourceFrameCount <= 1) {
                 return targetTrack;
             }
-            var targetToSourceFrameMap = HifiRoughFeatureBuilder.BuildPhoneTargetToSourceFrameMap(
+            var targetToSourceFrameMap = HifiPhraseFeatureBuilder.BuildPhoneTargetToSourceFrameMap(
                 sourceFrameCount,
                 targetFrameCount,
                 phone);
