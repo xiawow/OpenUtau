@@ -157,11 +157,22 @@ namespace OpenUtau.Core.HifiNeural {
             foreach (var phone in metadata.Phones) {
                 int start = Math.Clamp(phone.StartFrame, 0, frameCount);
                 int end = Math.Clamp(start + Math.Min(PhoneStartNoBoostFrames, Math.Max(0, phone.FrameCount)), start, frameCount);
-                for (int frame = start; frame < end; frame++) {
-                    noBoost[frame] = true;
-                }
+                MarkNoBoost(noBoost, start, end);
+            }
+            foreach (var range in metadata.ConsonantFrameRanges) {
+                int start = Math.Clamp(range.StartFrame, 0, frameCount);
+                int end = Math.Clamp(start + Math.Max(0, range.FrameCount), start, frameCount);
+                MarkNoBoost(noBoost, start, end);
             }
             return noBoost;
+        }
+
+        static void MarkNoBoost(bool[] noBoost, int start, int end) {
+            start = Math.Clamp(start, 0, noBoost.Length);
+            end = Math.Clamp(end, start, noBoost.Length);
+            for (int frame = start; frame < end; frame++) {
+                noBoost[frame] = true;
+            }
         }
 
         static double[] SmoothGainEnvelope(double[] desiredGainDb) {

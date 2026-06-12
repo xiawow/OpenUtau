@@ -34,6 +34,7 @@ namespace OpenUtau.Core.HifiNeural {
             public int FrameCount;
             public int OverlapFramesWithPrev;
             public int FixedFrames;
+            public int F0MaskFrames;
             public double SourceSkipOverMs;
             public int SourceStartOffsetFrames;
             public string Strategy = string.Empty;
@@ -199,6 +200,7 @@ namespace OpenUtau.Core.HifiNeural {
                 StartFrame = startFrame,
                 FrameCount = frameCount,
                 FixedFrames = report.FixedTargetFrames,
+                F0MaskFrames = report.F0MaskFrames,
                 SourceSkipOverMs = report.SourceSkipOverMs,
                 SourceStartOffsetFrames = report.SourceStartOffsetFrames,
                 Strategy = report.Strategy,
@@ -333,6 +335,9 @@ namespace OpenUtau.Core.HifiNeural {
                 var phone = seg.Phone;
                 int start = Math.Clamp(seg.StartFrame, 0, targetFrames);
                 int end = Math.Clamp(seg.StartFrame + seg.FrameCount, start + 1, Math.Max(start + 1, targetFrames));
+                int frameCount = Math.Max(1, end - start);
+                int fixedFrames = Math.Clamp(seg.FixedFrames, 0, frameCount);
+                int f0MaskFrames = Math.Clamp(seg.F0MaskFrames, 0, fixedFrames);
                 report.Phones.Add(new HifiPhoneMetadata {
                     Index = seg.PhoneIndex,
                     Phoneme = phone.phoneme,
@@ -342,7 +347,11 @@ namespace OpenUtau.Core.HifiNeural {
                     DurationMs = phone.durationMs,
                     LeadingMs = phone.leadingMs,
                     StartFrame = start,
-                    FrameCount = Math.Max(1, end - start),
+                    FrameCount = frameCount,
+                    FixedFrames = fixedFrames,
+                    F0MaskFrames = f0MaskFrames,
+                    ConsonantStartFrame = start,
+                    ConsonantFrameCount = fixedFrames,
                     SourceSkipOverMs = seg.SourceSkipOverMs,
                     SourceStartOffsetFrames = seg.SourceStartOffsetFrames,
                     Parameters = new HifiPhoneParameterMetadata {

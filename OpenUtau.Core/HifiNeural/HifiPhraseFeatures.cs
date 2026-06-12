@@ -20,6 +20,7 @@ namespace OpenUtau.Core.HifiNeural {
         public List<HifiPhoneMetadata> Phones { get; init; } = new List<HifiPhoneMetadata>();
         public List<HifiNoteMetadata> Notes { get; init; } = new List<HifiNoteMetadata>();
         public List<HifiBoundaryMetadata> Boundaries { get; init; } = new List<HifiBoundaryMetadata>();
+        public List<HifiFrameRangeMetadata> ConsonantFrameRanges { get; init; } = new List<HifiFrameRangeMetadata>();
         public List<HifiPhoneFeatureDiagnostic> PhoneDiagnostics { get; init; } = new List<HifiPhoneFeatureDiagnostic>();
     }
 
@@ -33,9 +34,21 @@ namespace OpenUtau.Core.HifiNeural {
         public double LeadingMs { get; init; }
         public int StartFrame { get; init; }
         public int FrameCount { get; init; }
+        public int FixedFrames { get; init; }
+        public int F0MaskFrames { get; init; }
+        public int ConsonantStartFrame { get; init; }
+        public int ConsonantFrameCount { get; init; }
         public double SourceSkipOverMs { get; init; }
         public int SourceStartOffsetFrames { get; init; }
         public HifiPhoneParameterMetadata Parameters { get; init; } = new HifiPhoneParameterMetadata();
+    }
+
+    public sealed class HifiFrameRangeMetadata {
+        public int PhoneIndex { get; init; }
+        public string Phoneme { get; init; } = string.Empty;
+        public int StartFrame { get; init; }
+        public int FrameCount { get; init; }
+        public string Kind { get; init; } = string.Empty;
     }
 
     public sealed class HifiPhoneParameterMetadata {

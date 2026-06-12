@@ -2269,6 +2269,18 @@ namespace OpenUtau.Core.HifiNeural {
 
             metadata.Phones.AddRange(assemblyReport.Phones);
             metadata.Boundaries.AddRange(assemblyReport.Boundaries);
+            foreach (var phone in metadata.Phones) {
+                if (phone.ConsonantFrameCount <= 0) {
+                    continue;
+                }
+                metadata.ConsonantFrameRanges.Add(new HifiFrameRangeMetadata {
+                    PhoneIndex = phone.Index,
+                    Phoneme = phone.Phoneme,
+                    StartFrame = phone.ConsonantStartFrame,
+                    FrameCount = phone.ConsonantFrameCount,
+                    Kind = phone.F0MaskFrames > 0 ? "fixed+f0-mask" : "fixed",
+                });
+            }
             metadata.PhoneDiagnostics.AddRange(assemblyReport.PhoneDiagnostics);
             return metadata;
         }
