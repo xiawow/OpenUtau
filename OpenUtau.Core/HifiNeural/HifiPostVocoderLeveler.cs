@@ -26,8 +26,10 @@ namespace OpenUtau.Core.HifiNeural {
         const double BoostStrength = 0.22;
         const double MaxCutDb = 5.5;
         const double MaxBoostDb = 1.2;
-        const int PhoneStartNoBoostFrames = 4;
+        const int PhoneStartNoBoostFrames = 2;
         const int PhraseEdgeNoBoostFrames = 5;
+        const int ConsonantHardNoBoostFrames = 2;
+        const double ConsonantTailBoostAllowance = 0.45;
         const int SmoothHalfFrames = 4;
         const double MaxCutStepDb = 1.15;
         const double MaxReleaseStepDb = 0.40;
@@ -64,7 +66,7 @@ namespace OpenUtau.Core.HifiNeural {
 
             double referenceDb = Percentile(activeDbs, ReferencePercentile);
             double referenceF0 = voicedF0s.Count >= 3 ? Percentile(voicedF0s, F0ReferencePercentile) : 0;
-            bool[] noBoost = BuildNoBoostMask(frameCount, features.Metadata);
+            double[] boostAllowance = BuildBoostAllowance(frameCount, features.Metadata);
             var desiredGainDb = new double[frameCount];
 
             for (int i = 0; i < frameCount; i++) {
@@ -81,10 +83,11 @@ namespace OpenUtau.Core.HifiNeural {
                 }
 
                 bool voiced = frameF0[i] >= 55 && frameF0[i] <= 1400;
-                if (!noBoost[i] && voiced) {
+                if (boostAllowance[i] > 0 && voiced) {
                     double quietDeficit = (referenceDb - QuietToleranceDb) - localDb;
                     if (quietDeficit > 0) {
-                        gainDb += Math.Min(MaxBoostDb, quietDeficit * BoostStrength);
+                        double allowance = Math.Clamp(boostAllowance[i], 0.0, 1.0);
+                        gainDb += Math.Min(MaxBoostDb * allowance, quietDeficit * BoostStrength * allowance);
                     }
                 }
 
@@ -148,31 +151,59 @@ namespace OpenUtau.Core.HifiNeural {
             return rms;
         }
 
-        static bool[] BuildNoBoostMask(int frameCount, HifiPhraseMetadata metadata) {
-            var noBoost = new bool[frameCount];
+        static double[] BuildBoostAllowance(int frameCount, HifiPhraseMetadata metadata) {
+            var allowance = new double[frameCount];
+            Array.Fill(allowance, 1.0);
             for (int i = 0; i < Math.Min(PhraseEdgeNoBoostFrames, frameCount); i++) {
-                noBoost[i] = true;
-                noBoost[frameCount - 1 - i] = true;
+                allowance[i] = 0;
+                allowance[frameCount - 1 - i] = 0;
             }
             foreach (var phone in metadata.Phones) {
                 int start = Math.Clamp(phone.StartFrame, 0, frameCount);
                 int end = Math.Clamp(start + Math.Min(PhoneStartNoBoostFrames, Math.Max(0, phone.FrameCount)), start, frameCount);
-                MarkNoBoost(noBoost, start, end);
+                CapBoostAllowance(allowance, start, end, 0);
             }
             foreach (var range in metadata.ConsonantFrameRanges) {
                 int start = Math.Clamp(range.StartFrame, 0, frameCount);
                 int end = Math.Clamp(start + Math.Max(0, range.FrameCount), start, frameCount);
-                MarkNoBoost(noBoost, start, end);
+                CapConsonantBoostAllowance(allowance, start, end);
             }
-            return noBoost;
+            return allowance;
         }
 
-        static void MarkNoBoost(bool[] noBoost, int start, int end) {
-            start = Math.Clamp(start, 0, noBoost.Length);
-            end = Math.Clamp(end, start, noBoost.Length);
-            for (int frame = start; frame < end; frame++) {
-                noBoost[frame] = true;
+        static void CapConsonantBoostAllowance(double[] allowance, int start, int end) {
+            start = Math.Clamp(start, 0, allowance.Length);
+            end = Math.Clamp(end, start, allowance.Length);
+            int length = end - start;
+            if (length <= 0) {
+                return;
             }
+
+            int hardEnd = Math.Min(end, start + Math.Min(ConsonantHardNoBoostFrames, length));
+            CapBoostAllowance(allowance, start, hardEnd, 0);
+            int tailFrames = end - hardEnd;
+            if (tailFrames <= 0) {
+                return;
+            }
+            for (int frame = hardEnd; frame < end; frame++) {
+                double t = tailFrames <= 1 ? 1.0 : (frame - hardEnd) / (double)(tailFrames - 1);
+                double maxAllowance = SmoothStep(t) * ConsonantTailBoostAllowance;
+                allowance[frame] = Math.Min(allowance[frame], maxAllowance);
+            }
+        }
+
+        static void CapBoostAllowance(double[] allowance, int start, int end, double maxAllowance) {
+            start = Math.Clamp(start, 0, allowance.Length);
+            end = Math.Clamp(end, start, allowance.Length);
+            maxAllowance = Math.Clamp(maxAllowance, 0.0, 1.0);
+            for (int frame = start; frame < end; frame++) {
+                allowance[frame] = Math.Min(allowance[frame], maxAllowance);
+            }
+        }
+
+        static double SmoothStep(double value) {
+            value = Math.Clamp(value, 0.0, 1.0);
+            return value * value * (3.0 - 2.0 * value);
         }
 
         static double[] SmoothGainEnvelope(double[] desiredGainDb) {

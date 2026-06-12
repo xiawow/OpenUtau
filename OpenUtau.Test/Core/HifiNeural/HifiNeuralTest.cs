@@ -506,7 +506,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE", "none");
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT", "false");
                 string key = HifiRenderConfig.CacheKey();
-                Assert.Contains("v60-phoneplan-softleadskip-vel-support-finaledge-audibletargetfixed-sourceotopreutter-sustaintexturebody-conditionaledge-restgapend-finaltail-vowelbudget-anchorlead-targetfixed-envelopeend-directparammap-meldomainconcat-waveformsustain-naturalrate-f0fallback-postleveler-loud17-grocv1-genc-hnsepslice-rms-sourceparams-tencremixfix-nonlinearparammap-", key);
+                Assert.Contains("v62-soft-consonant-boost-phoneplan-softleadskip-vel-support-finaledge-audibletargetfixed-sourceotopreutter-sustaintexturebody-conditionaledge-restgapend-finaltail-vowelbudget-anchorlead-targetfixed-envelopeend-directparammap-meldomainconcat-waveformsustain-naturalrate-f0fallback-postleveler-loud17-grocv1-genc-hnsepslice-rms-sourceparams-tencremixfix-nonlinearparammap-", key);
                 Assert.Contains("enhnone", key);
                 Assert.Contains("dbgFalse", key);
             } finally {
@@ -1184,7 +1184,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 overlapMs: 80,
                 durationMs: 70,
                 consonantMs: 230,
-                phoneme: "銇?);
+                phoneme: "か");
 
             double romajiFixedMs = HifiPhraseFeatureBuilder.ResolveTargetFixedMs(romaji);
             double kanaFixedMs = HifiPhraseFeatureBuilder.ResolveTargetFixedMs(kana);

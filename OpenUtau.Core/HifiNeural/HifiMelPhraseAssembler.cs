@@ -23,7 +23,7 @@ namespace OpenUtau.Core.HifiNeural {
         const double RestGapToleranceMs = 8.0;
         const double RestReleaseGuardMs = 18.0;
 
-        readonly HifiMelExtractor melExtractor = new HifiMelExtractor();
+        readonly HifiMelExtractor melExtractor = HifiMelExtractor.Shared;
 
         sealed class PhoneMelSegment {
             public int PhoneIndex;
@@ -311,9 +311,17 @@ namespace OpenUtau.Core.HifiNeural {
                     if (inOverlap) {
                         // Equal-power cross-fade in linear (power) domain. The previous segment is
                         // already written into output[t]; blend it with this segment.
-                        double u = CrossfadeProgress(t - overlapStart, overlapFrames);
+                        // Weights depend only on progress u, so compute once for all bins.
+                        double u = Math.Clamp(CrossfadeProgress(t - overlapStart, overlapFrames), 0.0, 1.0);
+                        double wNew = Math.Sin(0.5 * Math.PI * u);
+                        double wOld = Math.Cos(0.5 * Math.PI * u);
+                        double wOld2 = wOld * wOld;
+                        double wNew2 = wNew * wNew;
                         for (int m = 0; m < bins; m++) {
-                            output[m, t] = CrossfadeLogMel(output[m, t], seg.Mel[m, local], u);
+                            double pOld = Math.Exp(output[m, t]);
+                            double pNew = Math.Exp(seg.Mel[m, local]);
+                            double mixed = pOld * wOld2 + pNew * wNew2;
+                            output[m, t] = (float)Math.Log(Math.Max(mixed, 1e-5));
                         }
                     } else {
                         for (int m = 0; m < bins; m++) {
@@ -474,8 +482,7 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         static float[] melExtractorLoad(string file) {
-            var extractor = new HifiMelExtractor();
-            return extractor.LoadMono(file).Select(s => Math.Clamp(s, -1f, 1f)).ToArray();
+            return HifiMelExtractor.Shared.LoadMono(file);
         }
 
         internal static float[] SliceWithOto(float[] source, RenderPhone phone) {

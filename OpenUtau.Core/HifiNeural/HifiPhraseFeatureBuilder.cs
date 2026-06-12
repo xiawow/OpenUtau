@@ -64,11 +64,11 @@ namespace OpenUtau.Core.HifiNeural {
         const int InactiveTailGuardSamples = InactiveTailGuardFrames * HifiMelExtractor.OriginHopSize;
         const double F0AwareMaxSlopeCentsPerFrame = 160.0;
 
-        readonly HifiMelExtractor melExtractor = new HifiMelExtractor();
+        readonly HifiMelExtractor melExtractor = HifiMelExtractor.Shared;
         readonly HifiF0Builder f0Builder = new HifiF0Builder();
         readonly HifiMelPhraseAssembler melAssembler = new HifiMelPhraseAssembler();
         readonly IHifiMelEnhancer melEnhancer;
-        static readonly HifiMelExtractor sustainMelExtractor = new HifiMelExtractor();
+        static readonly HifiMelExtractor sustainMelExtractor = HifiMelExtractor.Shared;
 
         readonly record struct VowelMapReport(
             int LoopStartFrame,

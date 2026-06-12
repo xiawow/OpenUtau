@@ -18,7 +18,10 @@ namespace OpenUtau.Core.HifiNeural {
     public sealed class HifiNeuralPhraseRenderer : IRenderer {
         public const string RendererId = "HIFI-NEURA";
 
-        static readonly object lockObj = new object();
+        // Limit concurrent renders to avoid saturating CPU/memory while still allowing
+        // multi-phrase parallelism. The previous global lock serialized all renders.
+        static readonly SemaphoreSlim renderGate = new SemaphoreSlim(
+            Math.Max(1, Environment.ProcessorCount - 1));
 
         public USingerType SingerType => USingerType.Classic;
         public bool SupportsRenderPitch => false;
@@ -52,7 +55,8 @@ namespace OpenUtau.Core.HifiNeural {
 
         public Task<RenderResult> Render(RenderPhrase phrase, Progress progress, int trackNo, CancellationTokenSource cancellation, bool isPreRender = false) {
             return Task.Run(() => {
-                lock (lockObj) {
+                renderGate.Wait(cancellation.Token);
+                try {
                     var result = Layout(phrase);
                     string progressInfo = $"Track {trackNo + 1}: {this} notes={phrase.notes.Length} phones={phrase.phones.Length} duration={result.estimatedLengthMs:F1}ms sr={HifiMelExtractor.SampleRate}";
                     progress.Complete(0, progressInfo);
@@ -80,6 +84,8 @@ namespace OpenUtau.Core.HifiNeural {
                     }
                     progress.Complete(Math.Max(1, phrase.phones.Length), progressInfo);
                     return result;
+                } finally {
+                    renderGate.Release();
                 }
             });
         }
@@ -113,6 +119,17 @@ namespace OpenUtau.Core.HifiNeural {
 
             using var vocoder = new HifiOnnxVocoder(modelPath);
             float[] samples = vocoder.Infer(features);
+            // Post-processing chain order:
+            // 1. Leveler: per-frame RMS leveling to even out dynamics within the phrase.
+            //    Runs first because it operates on the raw vocoder output's local loudness profile.
+            // 2. Growl: pitch modulation on highpass band. Runs after the leveler so it operates
+            //    on a dynamically balanced signal; its internal RMS matching compensates for any
+            //    level change it introduces.
+            // 3. Normalizer: global RMS targeting to -17 dBFS with soft-knee limiting. Runs last
+            //    among the DSP processors because it sets the final loudness for the OpenUtau
+            //    dynamics/mixing stage that follows.
+            // 4. Edge guard: cosine fade-in/fade-out at phrase boundaries to suppress clicks.
+            //    Runs after all DSP to ensure the fades see the final signal.
             HifiPostVocoderLeveler.LevelInPlace(samples, features, HifiMelExtractor.SampleRate);
             HifiGrowlProcessor.ApplyInPlace(samples, phrase, layout.positionMs - layout.leadingMs, HifiMelExtractor.SampleRate);
             HifiLoudnessNormalizer.NormalizeInPlace(samples, HifiMelExtractor.SampleRate);

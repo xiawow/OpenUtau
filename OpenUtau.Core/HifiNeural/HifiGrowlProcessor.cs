@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Linq;
 using OpenUtau.Core.Render;
 
@@ -42,29 +43,38 @@ namespace OpenUtau.Core.HifiNeural {
                 return;
             }
 
-            var band = samples.Take(length).ToArray();
-            ApplyHighpassInPlace(band, sampleRate, HighpassHz);
-            var complement = new float[length];
-            for (int i = 0; i < length; i++) {
-                complement[i] = samples[i] - band[i];
-            }
-
-            var modulated = ApplyPitchModulation(band, sampleRate, strength);
-            double bandRms = Rms(band);
-            double modRms = Rms(modulated);
-            if (bandRms > 1e-8 && modRms > 1e-8) {
-                double gain = bandRms / modRms;
+            var pool = ArrayPool<float>.Shared;
+            var band = pool.Rent(length);
+            var complement = pool.Rent(length);
+            var modulated = pool.Rent(length);
+            try {
+                Array.Copy(samples, band, length);
+                ApplyHighpassInPlace(band, sampleRate, HighpassHz);
                 for (int i = 0; i < length; i++) {
-                    modulated[i] = (float)(modulated[i] * gain);
+                    complement[i] = samples[i] - band[i];
                 }
-            }
 
-            double originalRms = Rms(samples, length);
-            for (int i = 0; i < length; i++) {
-                samples[i] = complement[i] + modulated[i];
+                ApplyPitchModulation(band, modulated, sampleRate, strength, length);
+                double bandRms = Rms(band, length);
+                double modRms = Rms(modulated, length);
+                if (bandRms > 1e-8 && modRms > 1e-8) {
+                    double gain = bandRms / modRms;
+                    for (int i = 0; i < length; i++) {
+                        modulated[i] = (float)(modulated[i] * gain);
+                    }
+                }
+
+                double originalRms = Rms(samples, length);
+                for (int i = 0; i < length; i++) {
+                    samples[i] = complement[i] + modulated[i];
+                }
+                MatchRms(samples, length, originalRms);
+                LimitPeak(samples);
+            } finally {
+                pool.Return(band);
+                pool.Return(complement);
+                pool.Return(modulated);
             }
-            MatchRms(samples, length, originalRms);
-            LimitPeak(samples);
         }
 
         static float[] BuildStrengthEnvelope(RenderPhrase phrase, float[] curve, int sampleCount, int sampleRate, double phraseStartMs) {
@@ -94,11 +104,9 @@ namespace OpenUtau.Core.HifiNeural {
             return strength;
         }
 
-        static float[] ApplyPitchModulation(float[] band, int sampleRate, float[] strength) {
-            int length = Math.Min(band.Length, strength.Length);
-            var output = new float[length];
+        static void ApplyPitchModulation(float[] band, float[] output, int sampleRate, float[] strength, int length) {
             if (length == 0) {
-                return output;
+                return;
             }
             var drift = new double[length];
             double phase = 0;
@@ -117,7 +125,6 @@ namespace OpenUtau.Core.HifiNeural {
                 double sourceIndex = Math.Clamp(i + drift[i], 0, length - 1);
                 output[i] = SampleLinear(band, sourceIndex);
             }
-            return output;
         }
 
         static void ApplyHighpassInPlace(float[] samples, int sampleRate, double cutoffHz) {
@@ -175,7 +182,8 @@ namespace OpenUtau.Core.HifiNeural {
             if (values.Length == 0 || radius <= 0) {
                 return;
             }
-            var copy = values.ToArray();
+            var copy = new float[values.Length];
+            Array.Copy(values, copy, values.Length);
             for (int i = 0; i < values.Length; i++) {
                 double sum = 0;
                 double weightSum = 0;

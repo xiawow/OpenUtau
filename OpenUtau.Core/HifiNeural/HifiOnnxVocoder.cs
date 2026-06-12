@@ -19,15 +19,21 @@ namespace OpenUtau.Core.HifiNeural {
         public const int MelBins = 128;
 
         static readonly ConcurrentDictionary<string, Lazy<InferenceSession>> sessionCache = new();
+        // Cache immutable session input metadata (dimensions) keyed by session cache key.
+        // Avoids re-querying InputMetadata and re-allocating dimension arrays on every inference.
+        static readonly ConcurrentDictionary<string, int[][]> sessionDimsCache = new();
 
         readonly string modelPath;
         readonly InferenceSession session;
+        readonly int[] melDims;
+        readonly int[] f0Dims;
 
         public string ModelPath => modelPath;
 
         public HifiOnnxVocoder(string? modelPath = null) {
             this.modelPath = ResolveModelPath(modelPath);
             session = GetCachedSession(this.modelPath);
+            (melDims, f0Dims) = GetCachedDims(session, this.modelPath);
         }
 
         public float[] Infer(HifiPhraseFeatures features) {
@@ -68,8 +74,7 @@ namespace OpenUtau.Core.HifiNeural {
         DenseTensor<float> CreateMelTensor(float[,] mel) {
             int bins = mel.GetLength(0);
             int frames = mel.GetLength(1);
-            var metadata = session.InputMetadata.TryGetValue("mel", out var value) ? value : null;
-            var dims = metadata?.Dimensions?.ToArray() ?? Array.Empty<int>();
+            var dims = melDims;
 
             bool channelLast = true;
             if (dims.Length == 3) {
@@ -100,8 +105,7 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         DenseTensor<float> CreateF0Tensor(float[] f0) {
-            var metadata = session.InputMetadata.TryGetValue("f0", out var value) ? value : null;
-            var dims = metadata?.Dimensions?.ToArray() ?? Array.Empty<int>();
+            var dims = f0Dims;
             if (dims.Length == 3) {
                 if (DimensionMatches(dims[1], 1)) {
                     return new DenseTensor<float>(f0, new[] { 1, 1, f0.Length });
@@ -200,7 +204,7 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         public void Dispose() {
-            // Sessions are shared across phrases. Keep them alive for the process lifetime.
+            // No-op: sessions are shared across phrases and live for the process lifetime.
         }
 
         static InferenceSession GetCachedSession(string modelPath) {
@@ -220,6 +224,21 @@ namespace OpenUtau.Core.HifiNeural {
                 },
                 LazyThreadSafetyMode.ExecutionAndPublication));
             return lazy.Value;
+        }
+
+        static (int[] MelDims, int[] F0Dims) GetCachedDims(InferenceSession session, string modelPath) {
+            string fullPath = Path.GetFullPath(modelPath);
+            var sessionContext = ResolveSessionContext();
+            string cacheKey = BuildSessionCacheKey(fullPath, sessionContext.Runner, sessionContext.Gpu);
+            var dims = sessionDimsCache.GetOrAdd(cacheKey, _ => {
+                var melMeta = session.InputMetadata.TryGetValue("mel", out var melVal) ? melVal : null;
+                var f0Meta = session.InputMetadata.TryGetValue("f0", out var f0Val) ? f0Val : null;
+                return new[] {
+                    melMeta?.Dimensions?.ToArray() ?? Array.Empty<int>(),
+                    f0Meta?.Dimensions?.ToArray() ?? Array.Empty<int>(),
+                };
+            });
+            return (dims[0], dims[1]);
         }
 
         static string BuildSessionCacheKey(string fullPath, string runner, int gpu) {

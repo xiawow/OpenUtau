@@ -19,6 +19,9 @@ namespace OpenUtau.Core.HifiNeural {
         public const double FMin = 40;
         public const double FMax = 16000;
 
+        // Shared singleton: all fields are readonly after construction, so concurrent use is safe.
+        public static readonly HifiMelExtractor Shared = new HifiMelExtractor();
+
         readonly float[] hann;
         readonly float[,] melFilterbank;
         // Sparse projection ranges: each mel triangular filter is non-zero only over a small,
@@ -26,13 +29,19 @@ namespace OpenUtau.Core.HifiNeural {
         // inner loop from O(NMels * Nfft/2) into O(sum of band widths) ~ a few thousand vs 130k.
         readonly int[] melBinStart;
         readonly int[] melBinEnd; // inclusive
+        // Precomputed twiddle factor table for the FFT. Each stage of the Cooley-Tukey butterfly
+        // needs len/2 twiddle factors; they are stored contiguously so the inner loop indexes
+        // into the table instead of computing cos/sin per iteration.
+        readonly Complex[] twiddles;
 
         public HifiMelExtractor() {
-            hann = Enumerable.Range(0, WinSize)
-                .Select(i => (float)(0.5 - 0.5 * Math.Cos(2.0 * Math.PI * i / WinSize)))
-                .ToArray();
+            hann = new float[WinSize];
+            for (int i = 0; i < WinSize; i++) {
+                hann[i] = (float)(0.5 - 0.5 * Math.Cos(2.0 * Math.PI * i / WinSize));
+            }
             melFilterbank = BuildMelFilterbank();
             (melBinStart, melBinEnd) = BuildMelBinRanges(melFilterbank);
+            twiddles = BuildTwiddles(Nfft);
         }
 
         static (int[] Start, int[] End) BuildMelBinRanges(float[,] filterbank) {
@@ -71,7 +80,11 @@ namespace OpenUtau.Core.HifiNeural {
             if (provider.WaveFormat.SampleRate != SampleRate) {
                 provider = new WdlResamplingSampleProvider(provider, SampleRate);
             }
-            return Wave.GetSamples(provider).Select(s => Math.Clamp(s, -1f, 1f)).ToArray();
+            var samples = Wave.GetSamples(provider);
+            for (int i = 0; i < samples.Length; i++) {
+                samples[i] = Math.Clamp(samples[i], -1f, 1f);
+            }
+            return samples;
         }
 
         public float[,] ExtractFromFile(string path) {
@@ -135,7 +148,10 @@ namespace OpenUtau.Core.HifiNeural {
                     _ => { });
             }
 
-            LogStats(mel);
+            ValidateMel(mel);
+            if (Log.IsEnabled(Serilog.Events.LogEventLevel.Debug)) {
+                LogStats(mel);
+            }
             return mel;
         }
 
@@ -146,7 +162,7 @@ namespace OpenUtau.Core.HifiNeural {
             for (int n = 0; n < WinSize; n++) {
                 fft[n] = new Complex(padded[start + n] * hann[n], 0);
             }
-            ForwardFft(fft);
+            ForwardFft(fft, twiddles);
             ComputeMagnitudes(fft, scratch.Magnitude);
             ProjectMel(ResolveMagnitudeForKeyShift(scratch, keyShiftSemitones), mel, frame);
         }
@@ -159,12 +175,10 @@ namespace OpenUtau.Core.HifiNeural {
             int frames = centerSamplePositions.Count;
             var mel = new float[NMels, frames];
             if (frames == 0) {
-                LogStats(mel);
                 return mel;
             }
             if (samples.Length == 0) {
                 FillConstant(mel, (float)Math.Log(1e-5));
-                LogStats(mel);
                 return mel;
             }
 
@@ -191,7 +205,10 @@ namespace OpenUtau.Core.HifiNeural {
                 NMels,
                 frames,
                 samples.Length);
-            LogStats(mel);
+            ValidateMel(mel);
+            if (Log.IsEnabled(Serilog.Events.LogEventLevel.Debug)) {
+                LogStats(mel);
+            }
             return mel;
         }
 
@@ -206,7 +223,7 @@ namespace OpenUtau.Core.HifiNeural {
             for (int n = 0; n < WinSize; n++) {
                 fft[n] = new Complex(SampleReflectedLinear(samples, start + n) * hann[n], 0);
             }
-            ForwardFft(fft);
+            ForwardFft(fft, twiddles);
             ComputeMagnitudes(fft, scratch.Magnitude);
             ProjectMel(ResolveMagnitudeForKeyShift(scratch, keyShiftSemitones), mel, frame);
         }
@@ -306,7 +323,7 @@ namespace OpenUtau.Core.HifiNeural {
             return index;
         }
 
-        static void ForwardFft(Complex[] buffer) {
+        static void ForwardFft(Complex[] buffer, Complex[] twiddles) {
             int n = buffer.Length;
             for (int i = 1, j = 0; i < n; i++) {
                 int bit = n >> 1;
@@ -318,20 +335,45 @@ namespace OpenUtau.Core.HifiNeural {
                     (buffer[i], buffer[j]) = (buffer[j], buffer[i]);
                 }
             }
+            int twiddleIdx = 0;
             for (int len = 2; len <= n; len <<= 1) {
-                double angle = -2.0 * Math.PI / len;
-                var wlen = new Complex(Math.Cos(angle), Math.Sin(angle));
+                int halfLen = len / 2;
                 for (int i = 0; i < n; i += len) {
-                    var w = Complex.One;
-                    for (int j = 0; j < len / 2; j++) {
+                    int twBase = twiddleIdx;
+                    for (int j = 0; j < halfLen; j++) {
                         var u = buffer[i + j];
-                        var v = buffer[i + j + len / 2] * w;
+                        var v = buffer[i + j + halfLen] * twiddles[twBase + j];
                         buffer[i + j] = u + v;
-                        buffer[i + j + len / 2] = u - v;
-                        w *= wlen;
+                        buffer[i + j + halfLen] = u - v;
                     }
                 }
+                twiddleIdx += halfLen;
             }
+        }
+
+        static Complex[] BuildTwiddles(int n) {
+            // Precompute all twiddle factors for a radix-2 Cooley-Tukey FFT.
+            // Stage with length len needs len/2 factors; they are stored contiguously.
+            int count = 0;
+            for (int len = 2; len <= n; len <<= 1) {
+                count += len / 2;
+            }
+            var table = new Complex[count];
+            int idx = 0;
+            for (int len = 2; len <= n; len <<= 1) {
+                double angle = -2.0 * Math.PI / len;
+                double wRe = Math.Cos(angle);
+                double wIm = Math.Sin(angle);
+                double curRe = 1.0, curIm = 0.0;
+                for (int j = 0; j < len / 2; j++) {
+                    table[idx++] = new Complex(curRe, curIm);
+                    double nextRe = curRe * wRe - curIm * wIm;
+                    double nextIm = curRe * wIm + curIm * wRe;
+                    curRe = nextRe;
+                    curIm = nextIm;
+                }
+            }
+            return table;
         }
 
         static float[] ReflectPad(float[] samples, int left, int right) {
@@ -409,6 +451,14 @@ namespace OpenUtau.Core.HifiNeural {
             return filterbank;
         }
 
+        static void ValidateMel(float[,] mel) {
+            foreach (var v in mel) {
+                if (float.IsNaN(v) || float.IsInfinity(v)) {
+                    throw new InvalidOperationException("HifiMelExtractor produced NaN or Inf.");
+                }
+            }
+        }
+
         static void LogStats(float[,] mel) {
             if (mel.Length == 0) {
                 Log.Debug("HifiMelExtractor mel shape=[128,0]");
@@ -418,9 +468,6 @@ namespace OpenUtau.Core.HifiNeural {
             float max = float.NegativeInfinity;
             double sum = 0;
             foreach (var v in mel) {
-                if (float.IsNaN(v) || float.IsInfinity(v)) {
-                    throw new InvalidOperationException("HifiMelExtractor produced NaN or Inf.");
-                }
                 min = Math.Min(min, v);
                 max = Math.Max(max, v);
                 sum += v;
