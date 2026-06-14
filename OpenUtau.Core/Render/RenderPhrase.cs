@@ -74,6 +74,7 @@ namespace OpenUtau.Core.Render {
 
         // voicevox & enunu args
         public readonly int toneShift;
+        public readonly int hifiSustainMode;
 
         public readonly UOto oto;
         public readonly ulong hash;
@@ -127,6 +128,9 @@ namespace OpenUtau.Core.Render {
             envelope = phoneme.envelope.data.ToArray();
             direct = phoneme.GetExpression(project, track, Format.Ustx.DIR).Item1 == 1;
             toneShift = (int)phoneme.GetExpression(project, track, Format.Ustx.SHFT).Item1;
+            hifiSustainMode = track.TryGetExpDescriptor(project, Format.Ustx.HE, out _)
+                ? (int)phoneme.GetExpression(project, track, Format.Ustx.HE).Item1
+                : 0;
 
             oto = phoneme.oto;
             hash = Hash();
@@ -151,6 +155,7 @@ namespace OpenUtau.Core.Render {
                     writer.Write(velocity);
                     writer.Write(modulation);
                     writer.Write(direct);
+                    writer.Write(hifiSustainMode);
                     writer.Write(leadingMs);
                     foreach (var point in envelope) {
                         writer.Write(point.X);

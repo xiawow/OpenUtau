@@ -180,7 +180,8 @@ namespace OpenUtau.Core.HifiNeural {
                 phone,
                 localTargetF0,
                 sourceSamples,
-                parameters.GenderKeyShiftSemitones);
+                parameters.GenderKeyShiftSemitones,
+                phone.hifiSustainMode);
             var diagnostic = HifiClickDiagnostic.BuildPhoneFeatureDiagnostic(
                 phoneIndex,
                 phone.phoneme,

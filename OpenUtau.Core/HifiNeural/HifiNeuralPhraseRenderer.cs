@@ -35,6 +35,7 @@ namespace OpenUtau.Core.HifiNeural {
                 || descriptor.abbr == Format.Ustx.BREC
                 || descriptor.abbr == Format.Ustx.TENC
                 || descriptor.abbr == Format.Ustx.VOIC
+                || descriptor.abbr == Format.Ustx.HE
                 || string.Equals(descriptor.abbr, HifiGrowlProcessor.CurveAbbr, StringComparison.OrdinalIgnoreCase);
         }
 
@@ -245,6 +246,11 @@ namespace OpenUtau.Core.HifiNeural {
                     defaultValue = 0,
                     isFlag = false,
                 },
+                new UExpressionDescriptor(
+                    "Hifi sustain mode",
+                    Format.Ustx.HE,
+                    false,
+                    (string[])HifiSustainModes.Options.Clone()),
             };
         }
 
