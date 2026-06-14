@@ -19,6 +19,9 @@ namespace OpenUtau.Core.HifiNeural {
     }
 
     public sealed class HifiHnsepOnnx {
+        public const string RunnerCpu = "CPU";
+        public const string RunnerDirectML = "DirectML";
+
         const int DefaultNfft = 2048;
         const int DefaultHop = 512;
         const int ParallelFrameThreshold = 16;
@@ -69,8 +72,24 @@ namespace OpenUtau.Core.HifiNeural {
 
         public static string ModelCacheKey(string path) {
             var info = new FileInfo(path);
-            string key = $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}";
+            string key = $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}|runner={ResolveHnsepRunner(Path.GetFullPath(path))}";
             return $"{XXH64.DigestOf(Encoding.UTF8.GetBytes(key)):x16}";
+        }
+
+        public static List<string> RunnerOptions() {
+            var options = new List<string> { RunnerCpu };
+            if (Onnx.getRunnerOptions().Contains(RunnerDirectML)) {
+                options.Add(RunnerDirectML);
+            }
+            return options;
+        }
+
+        public static string NormalizeRunner(string? runner) {
+            if (string.Equals(runner, RunnerDirectML, StringComparison.OrdinalIgnoreCase)
+                    && Onnx.getRunnerOptions().Contains(RunnerDirectML)) {
+                return RunnerDirectML;
+            }
+            return RunnerCpu;
         }
 
         public HifiHnsepResult Separate(float[] samples) {
@@ -166,15 +185,16 @@ namespace OpenUtau.Core.HifiNeural {
         static bool TryResolveModelPath(out string path, out string diagnostic) {
             var candidates = new List<string>();
             AddExplicitCandidate(candidates, Environment.GetEnvironmentVariable("HIFI_NEURAL_HNSEP_ONNX"));
+            bool preferDmlSafe = IsAcceleratedRunnerRequested();
             foreach (var root in CandidateRoots(AppContext.BaseDirectory).Concat(CandidateRoots(Directory.GetCurrentDirectory())).Distinct()) {
-                AddCandidates(candidates, root);
+                AddCandidates(candidates, root, preferDmlSafe);
             }
             path = candidates.FirstOrDefault(File.Exists) ?? string.Empty;
             if (!string.IsNullOrWhiteSpace(path)) {
                 diagnostic = string.Empty;
                 return true;
             }
-            diagnostic = "Hifi HNSEP ONNX model was not found. Set HIFI_NEURAL_HNSEP_ONNX or place hnsep.onnx next to the HIFI-NEURA model.";
+            diagnostic = "Hifi HNSEP ONNX model was not found. Set HIFI_NEURAL_HNSEP_ONNX or place model.onnx/model_dml.onnx/hnsep.onnx next to the HIFI-NEURA model.";
             return false;
         }
 
@@ -192,25 +212,34 @@ namespace OpenUtau.Core.HifiNeural {
             }
         }
 
-        static void AddCandidates(List<string> candidates, string dir) {
+        static void AddCandidates(List<string> candidates, string dir, bool preferDmlSafe) {
             try {
                 if (!Directory.Exists(dir)) {
                     return;
                 }
-                candidates.Add(Path.Combine(dir, "hnsep.onnx"));
-                candidates.Add(Path.Combine(dir, "hnsep_model.onnx"));
+                AddModelCandidates(candidates, dir, preferDmlSafe);
                 foreach (var sub in Directory.EnumerateDirectories(dir, "*hnsep*")) {
-                    candidates.Add(Path.Combine(sub, "model.onnx"));
-                    candidates.Add(Path.Combine(sub, "hnsep.onnx"));
+                    AddModelCandidates(candidates, sub, preferDmlSafe);
                     candidates.AddRange(Directory.EnumerateFiles(sub, "*.onnx"));
                     foreach (var child in Directory.EnumerateDirectories(sub)) {
-                        candidates.Add(Path.Combine(child, "model.onnx"));
-                        candidates.Add(Path.Combine(child, "hnsep.onnx"));
+                        AddModelCandidates(candidates, child, preferDmlSafe);
                         candidates.AddRange(Directory.EnumerateFiles(child, "*.onnx"));
                     }
                 }
             } catch (Exception e) {
                 Log.Warning(e, "Failed to search Hifi HNSEP candidates in {Dir}", dir);
+            }
+        }
+
+        static void AddModelCandidates(List<string> candidates, string dir, bool preferDmlSafe) {
+            if (preferDmlSafe) {
+                candidates.Add(Path.Combine(dir, "model_dml.onnx"));
+            }
+            candidates.Add(Path.Combine(dir, "model.onnx"));
+            candidates.Add(Path.Combine(dir, "hnsep.onnx"));
+            candidates.Add(Path.Combine(dir, "hnsep_model.onnx"));
+            if (!preferDmlSafe) {
+                candidates.Add(Path.Combine(dir, "model_dml.onnx"));
             }
         }
 
@@ -336,10 +365,26 @@ namespace OpenUtau.Core.HifiNeural {
 
         static InferenceSession GetCachedSession(string modelPath, int workerThreads, int maxConcurrentSeparations) {
             string fullPath = Path.GetFullPath(modelPath);
-            string key = $"{fullPath}|runner=CPU|threads={workerThreads}";
+            string runner = ResolveHnsepRunner(fullPath);
+            string key = $"{fullPath}|runner={runner}|gpu={Math.Max(0, Preferences.Default.OnnxGpu)}|threads={workerThreads}";
             var lazy = sessionCache.GetOrAdd(key, _ => new Lazy<InferenceSession>(() => {
-                // DirectML currently creates this HNSEP graph but fails at runtime on Resize nodes.
-                // Keep HNSEP on CPU; the vocoder still uses the user's ONNX runner choice.
+                if (runner != "CPU") {
+                    try {
+                        var accelerated = CreateAcceleratedSession(fullPath, runner);
+                        Log.Information(
+                            "Loaded Hifi HNSEP ONNX model path={Path} runner={Runner} gpu={Gpu} max_concurrent={MaxConcurrent}",
+                            fullPath,
+                            runner,
+                            Math.Max(0, Preferences.Default.OnnxGpu),
+                            maxConcurrentSeparations);
+                        return accelerated;
+                    } catch (Exception e) {
+                        Log.Warning(e, "Failed to load Hifi HNSEP ONNX model path={Path} runner={Runner}; falling back to CPU", fullPath, runner);
+                    }
+                }
+
+                // The original HNSEP ONNX graph contains Resize nodes that fail on DirectML.
+                // Keep that model on CPU. DML-safe exports are named model_dml.onnx.
                 var options = new SessionOptions {
                     GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
                     IntraOpNumThreads = workerThreads,
@@ -354,6 +399,38 @@ namespace OpenUtau.Core.HifiNeural {
                 return session;
             }));
             return lazy.Value;
+        }
+
+        static string ResolveHnsepRunner(string fullPath) {
+            if (!IsDmlSafeModelPath(fullPath)) {
+                return RunnerCpu;
+            }
+            string runner = Environment.GetEnvironmentVariable("HIFI_NEURAL_HNSEP_RUNNER");
+            if (string.IsNullOrWhiteSpace(runner)) {
+                runner = Preferences.Default.HifiNeuralHnsepRunner;
+            }
+            return NormalizeRunner(runner);
+        }
+
+        static bool IsAcceleratedRunnerRequested() {
+            return NormalizeRunner(Environment.GetEnvironmentVariable("HIFI_NEURAL_HNSEP_RUNNER")
+                ?? Preferences.Default.HifiNeuralHnsepRunner) != RunnerCpu;
+        }
+
+        static InferenceSession CreateAcceleratedSession(string fullPath, string runner) {
+            if (!string.Equals(runner, RunnerDirectML, StringComparison.OrdinalIgnoreCase)) {
+                throw new NotSupportedException($"Unsupported HNSEP runner: {runner}");
+            }
+            var options = new SessionOptions {
+                GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
+            };
+            options.AppendExecutionProvider_DML(Math.Max(0, Preferences.Default.OnnxGpu));
+            return new InferenceSession(fullPath, options);
+        }
+
+        static bool IsDmlSafeModelPath(string fullPath) {
+            string fileName = Path.GetFileNameWithoutExtension(fullPath);
+            return fileName.Contains("dml", StringComparison.OrdinalIgnoreCase);
         }
 
         internal static int ResolveCpuThreadCount() {
