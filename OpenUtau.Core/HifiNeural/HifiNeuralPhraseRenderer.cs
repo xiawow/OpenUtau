@@ -250,7 +250,9 @@ namespace OpenUtau.Core.HifiNeural {
                     "Hifi sustain mode",
                     Format.Ustx.HE,
                     false,
-                    (string[])HifiSustainModes.Options.Clone()),
+                    (string[])HifiSustainModes.Options.Clone()) {
+                    defaultValue = HifiSustainModes.Auto,
+                },
             };
         }
 

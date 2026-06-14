@@ -128,9 +128,18 @@ namespace OpenUtau.Core.Render {
             envelope = phoneme.envelope.data.ToArray();
             direct = phoneme.GetExpression(project, track, Format.Ustx.DIR).Item1 == 1;
             toneShift = (int)phoneme.GetExpression(project, track, Format.Ustx.SHFT).Item1;
-            hifiSustainMode = track.TryGetExpDescriptor(project, Format.Ustx.HE, out _)
-                ? (int)phoneme.GetExpression(project, track, Format.Ustx.HE).Item1
-                : 0;
+            if (track.TryGetExpDescriptor(project, Format.Ustx.HE, out var hifiSustainDescriptor)) {
+                var (value, overridden) = phoneme.GetExpression(project, track, Format.Ustx.HE);
+                bool legacyDescriptor = hifiSustainDescriptor.options == null
+                    || !hifiSustainDescriptor.options.Contains("auto");
+                hifiSustainMode = legacyDescriptor
+                        && !overridden
+                        && (int)Math.Round(value) == OpenUtau.Core.HifiNeural.HifiSustainModes.Loop
+                    ? OpenUtau.Core.HifiNeural.HifiSustainModes.Auto
+                    : (int)value;
+            } else {
+                hifiSustainMode = OpenUtau.Core.HifiNeural.HifiSustainModes.Auto;
+            }
 
             oto = phoneme.oto;
             hash = Hash();

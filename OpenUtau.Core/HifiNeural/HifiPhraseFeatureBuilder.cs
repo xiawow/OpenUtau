@@ -251,7 +251,8 @@ namespace OpenUtau.Core.HifiNeural {
                 timing.TargetVowelFrames,
                 timing.SourceLeadFrames,
                 timing.SourceVowelFrames,
-                timing.SourceVowelOnsetFrames);
+                timing.SourceVowelOnsetFrames,
+                phone.hifiSustainMode);
             return map;
         }
 
@@ -300,7 +301,8 @@ namespace OpenUtau.Core.HifiNeural {
             int outputFrames,
             int sourceStart,
             int sourceFrames,
-            int preferredOnsetFrames) {
+            int preferredOnsetFrames,
+            int sustainMode) {
             if (outputFrames <= 0) {
                 return;
             }
@@ -317,10 +319,11 @@ namespace OpenUtau.Core.HifiNeural {
             if (targetSustainFrames > 0) {
                 WriteSustainFrameMap(
                     map,
-                    outputStart + targetOnsetFrames,
-                    targetSustainFrames,
-                    sourceStart + onsetFrames,
-                    sustainFrames);
+                outputStart + targetOnsetFrames,
+                targetSustainFrames,
+                sourceStart + onsetFrames,
+                sustainFrames,
+                sustainMode);
             }
             if (targetReleaseFrames > 0) {
                 WriteFrameMapRegion(
@@ -385,17 +388,18 @@ namespace OpenUtau.Core.HifiNeural {
             int outputStart,
             int outputFrames,
             int sourceStart,
-            int sourceFrames) {
+            int sourceFrames,
+            int sustainMode) {
             double stretchRatio = SourceToTargetDurationRatio(sourceFrames, outputFrames);
             if (sourceFrames <= 2 || stretchRatio <= 1.05) {
                 WriteFrameMapRegion(map, outputStart, outputFrames, sourceStart, sourceFrames);
                 return;
             }
-            if (stretchRatio < SustainTemplateStretchThreshold) {
+            if (HifiSustainModes.ResolveEffectiveMode(sustainMode, stretchRatio) == HifiSustainModes.Natural) {
                 WriteNaturalFrameMapRegion(map, outputStart, outputFrames, sourceStart, sourceFrames);
                 return;
             }
-            // Long sustain mel uses directContour as the main body and texture only as a residual.
+            // Stretched sustain mel uses directContour as the main body and texture only as a residual.
             // Keep source-frame-aware parameters aligned to that main contour instead of the residual
             // wander path, otherwise HNSEP parameters drift away from the audible vowel body.
             WriteFrameMapRegion(map, outputStart, outputFrames, sourceStart, sourceFrames);
@@ -489,7 +493,7 @@ namespace OpenUtau.Core.HifiNeural {
             float[] targetF0,
             float[]? sourceSamples,
             double sourceKeyShiftSemitones = 0,
-            int sustainMode = HifiSustainModes.Loop) {
+            int sustainMode = HifiSustainModes.Auto) {
             sourceFrames = Math.Max(1, Math.Min(sourceFrames, sourceMel.GetLength(1) - sourceStart));
             outputFrames = Math.Max(1, Math.Min(outputFrames, output.GetLength(1) - outputStart));
             var initialTiming = BuildPhoneTimingPlan(sourceFrames, outputFrames, phone);
@@ -637,7 +641,7 @@ namespace OpenUtau.Core.HifiNeural {
             float[]? sourceSamples = null,
             int sourceTone = 0,
             double sourceKeyShiftSemitones = 0,
-            int sustainMode = HifiSustainModes.Loop) {
+            int sustainMode = HifiSustainModes.Auto) {
             if (dstFrames <= 0) {
                 return new VowelMapReport(0, 0, 0, 0, "empty_vowel_target", 0, 0, 0);
             }
@@ -689,15 +693,12 @@ namespace OpenUtau.Core.HifiNeural {
                     ? "continuous_sustain_stretch"
                     : "area_compress";
             if (sustainRatio > 1.05) {
-                strategy += "_natural";
+                strategy += "_" + HifiSustainModes.StrategyName(sustainMode, sustainRatio);
                 if (transientAnchor.Enabled) {
                     strategy += "_transient_lock";
                 }
                 if (sustainMicroVariationApplied) {
                     strategy += "_microvar";
-                }
-                if (sustainRatio >= SustainTemplateStretchThreshold) {
-                    strategy += "_" + HifiSustainModes.StrategyName(sustainMode);
                 }
             }
             if (HasFastF0Motion(targetF0, dstStart, dstFrames)) {
@@ -960,7 +961,7 @@ namespace OpenUtau.Core.HifiNeural {
             int targetF0Start = 0,
             int sourceTone = 0,
             double sourceKeyShiftSemitones = 0,
-            int sustainMode = HifiSustainModes.Loop) {
+            int sustainMode = HifiSustainModes.Auto) {
             if (outputFrames <= 0) {
                 return false;
             }
@@ -968,17 +969,6 @@ namespace OpenUtau.Core.HifiNeural {
             if (sourceFrames <= 2 || stretchRatio <= 1.05) {
                 WriteMappedRegion(sourceMel, sourceStart, sourceFrames, output, outputStart, outputFrames);
                 return false;
-            }
-            if (stretchRatio < SustainTemplateStretchThreshold) {
-                return WriteMappedRegionNaturalStretch(
-                    sourceMel,
-                    sourceStart,
-                    sourceFrames,
-                    output,
-                    outputStart,
-                    outputFrames,
-                    transientAnchor,
-                    allowMicroVariation);
             }
             return WriteSustainTemplateExtension(
                 sourceMel,
@@ -1009,7 +999,7 @@ namespace OpenUtau.Core.HifiNeural {
             int targetF0Start = 0,
             int sourceTone = 0,
             double sourceKeyShiftSemitones = 0,
-            int sustainMode = HifiSustainModes.Loop) {
+            int sustainMode = HifiSustainModes.Auto) {
             int bins = sourceMel.GetLength(0);
             int totalSourceFrames = sourceMel.GetLength(1);
             sourceStart = Math.Clamp(sourceStart, 0, Math.Max(0, totalSourceFrames - 1));
@@ -1050,8 +1040,8 @@ namespace OpenUtau.Core.HifiNeural {
             int directSmoothRadius = Math.Clamp(sourceFrames / 5, 1, 10);
             int textureSmoothRadius = Math.Clamp(stableFrames / 10, 1, 3);
             int edgeFrames = ResolveSustainEdgeFrames(outputFrames);
-            int normalizedSustainMode = HifiSustainModes.Normalize(sustainMode);
-            if (normalizedSustainMode == HifiSustainModes.Natural) {
+            int effectiveSustainMode = HifiSustainModes.ResolveEffectiveMode(sustainMode, stretchRatio);
+            if (effectiveSustainMode == HifiSustainModes.Natural) {
                 return WriteMappedRegionNaturalStretch(
                     sourceMel,
                     sourceStart,
@@ -1062,7 +1052,7 @@ namespace OpenUtau.Core.HifiNeural {
                     new TransientAnchorPlan(false, 0, 0, 0, 0, "he_natural"),
                     allowMicroVariation);
             }
-            if (normalizedSustainMode == HifiSustainModes.Loop && TryWriteStableSustainLoop(
+            if (effectiveSustainMode == HifiSustainModes.Loop && TryWriteStableSustainLoop(
                     sourceMel,
                     sourceStart,
                     sourceFrames,
