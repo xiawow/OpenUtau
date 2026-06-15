@@ -395,7 +395,7 @@ namespace OpenUtau.Core.HifiNeural {
                 WriteFrameMapRegion(map, outputStart, outputFrames, sourceStart, sourceFrames);
                 return;
             }
-            if (HifiSustainModes.ResolveEffectiveMode(sustainMode, stretchRatio) == HifiSustainModes.Natural) {
+            if (HifiSustainModes.ResolveEffectiveMode(sustainMode, stretchRatio) == HifiSustainModes.TimeWarp) {
                 WriteNaturalFrameMapRegion(map, outputStart, outputFrames, sourceStart, sourceFrames);
                 return;
             }
@@ -1041,7 +1041,7 @@ namespace OpenUtau.Core.HifiNeural {
             int textureSmoothRadius = Math.Clamp(stableFrames / 10, 1, 3);
             int edgeFrames = ResolveSustainEdgeFrames(outputFrames);
             int effectiveSustainMode = HifiSustainModes.ResolveEffectiveMode(sustainMode, stretchRatio);
-            if (effectiveSustainMode == HifiSustainModes.Natural) {
+            if (effectiveSustainMode == HifiSustainModes.TimeWarp) {
                 return WriteMappedRegionNaturalStretch(
                     sourceMel,
                     sourceStart,
@@ -1049,7 +1049,7 @@ namespace OpenUtau.Core.HifiNeural {
                     output,
                     outputStart,
                     outputFrames,
-                    new TransientAnchorPlan(false, 0, 0, 0, 0, "he_natural"),
+                    new TransientAnchorPlan(false, 0, 0, 0, 0, "he_timewarp"),
                     allowMicroVariation);
             }
             if (effectiveSustainMode == HifiSustainModes.Loop && TryWriteStableSustainLoop(

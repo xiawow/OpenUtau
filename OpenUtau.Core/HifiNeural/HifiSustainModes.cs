@@ -2,10 +2,10 @@ namespace OpenUtau.Core.HifiNeural {
     internal static class HifiSustainModes {
         public const int Loop = 0;
         public const int Texture = 1;
-        public const int Natural = 2;
+        public const int TimeWarp = 2;
         public const int Auto = 3;
 
-        public static readonly string[] Options = { "loop", "texture", "natural", "auto" };
+        public static readonly string[] Options = { "loop", "texture", "timewarp", "auto" };
 
         public static int Normalize(double value) {
             int mode = (int)System.Math.Round(value);
@@ -21,7 +21,7 @@ namespace OpenUtau.Core.HifiNeural {
                 return mode;
             }
             if (stretchRatio < 1.5) {
-                return Natural;
+                return TimeWarp;
             }
             if (stretchRatio < 2.0) {
                 return Texture;
@@ -34,7 +34,7 @@ namespace OpenUtau.Core.HifiNeural {
             int effectiveMode = ResolveEffectiveMode(mode, stretchRatio);
             string name = effectiveMode switch {
                 Texture => "texture",
-                Natural => "natural",
+                TimeWarp => "timewarp",
                 Loop => "loop",
                 _ => "auto",
             };

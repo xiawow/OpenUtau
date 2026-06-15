@@ -38,7 +38,7 @@ namespace OpenUtau.Core.Format {
         public const string HE = "he";
 
         public static readonly string[] required = { DYN, PITD, CLR, ENG, VEL, VOL, ATK, DEC };
-        static readonly string[] HifiSustainModeOptions = { "loop", "texture", "natural", "auto" };
+        static readonly string[] HifiSustainModeOptions = { "loop", "texture", "timewarp", "auto" };
 
         public static void AddDefaultExpressions(UProject project) {
             project.RegisterExpression(new UExpressionDescriptor("dynamics (curve)", DYN, -240, 120, 0) { type = UExpressionType.Curve });
