@@ -96,10 +96,13 @@ namespace OpenUtau.Classic {
                 // Legacy detection code. Do not add more here.
                 var enuconfigFile = Path.Combine(dir, kEnuconfigYaml);
                 var dsconfigFile = Path.Combine(dir, kDsconfigYaml);
+                var neutrinoModel = Path.Combine(dir, "model", "info.toml");
                 if (File.Exists(enuconfigFile)) {
                     voicebank.SingerType = USingerType.Enunu;
                 } else if (File.Exists(dsconfigFile)) {
                     voicebank.SingerType = USingerType.DiffSinger;
+                } else if (File.Exists(neutrinoModel)) {
+                    voicebank.SingerType = USingerType.Neutrino;
                 } else if (voicebank.SingerType != USingerType.Enunu) {
                     voicebank.SingerType = USingerType.Classic;
                 }
