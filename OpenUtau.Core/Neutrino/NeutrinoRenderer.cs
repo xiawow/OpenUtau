@@ -21,7 +21,7 @@ namespace OpenUtau.Core.Neutrino {
         const int sampleRate = 48000;
         const int hopSize = 480;
         const int numMelBins = 100;
-        const int cacheVersion = 4;
+        const int cacheVersion = 6;
         const int edgeSilenceSamples = 240;
         const int fadeInSamples = 240;
         const int fadeOutSamples = 240;
@@ -109,7 +109,7 @@ namespace OpenUtau.Core.Neutrino {
             var singer = phrase.singer as NeutrinoSinger;
             singer.EnsureSessions();
 
-            var (phonemeIds, scorePitchesHz, scoreDurations, phonePositions) =
+            var (phonemeIds, scorePitchesHz, scoreDurations, phonePositions, manualBoundaries) =
                 BuildPhonemeSequence(phrase);
 
             if (cancellation.IsCancellationRequested) return null;
@@ -130,13 +130,11 @@ namespace OpenUtau.Core.Neutrino {
             };
 
             float[] boundaryShifts;
-            lock (singer.timingSession) {
-                using var outputs = singer.timingSession.Run(timingInputs);
-                boundaryShifts = outputs.First().AsTensor<float>().ToArray();
-            }
+            boundaryShifts = singer.RunTiming(timingInputs);
 
             var baseBoundaries = BuildBaseBoundaryTimes(scoreDurations, phonePositions);
             var boundaries = ApplyTimingBoundaryShifts(baseBoundaries, boundaryShifts);
+            ApplyManualBoundaryOverrides(boundaries, manualBoundaries);
             var timingDurations = BuildTimingDurations(boundaries);
             int totalFrames = Math.Max(1, (int)Math.Round(boundaries[^1] * sampleRate / hopSize));
             var stauData = BuildFramePhonemeMap(timingDurations, totalFrames);
@@ -159,10 +157,7 @@ namespace OpenUtau.Core.Neutrino {
             };
 
             float[] f0;
-            lock (singer.pitchSession) {
-                using var outputs = singer.pitchSession.Run(pitchInputs);
-                f0 = outputs.First().AsTensor<float>().ToArray();
-            }
+            f0 = singer.RunPitch(pitchInputs);
             ClampF0(f0);
             ApplyPitchCurve(phrase, f0);
             ClampF0(f0);
@@ -188,10 +183,7 @@ namespace OpenUtau.Core.Neutrino {
             };
 
             float[] melSpectrogram;
-            lock (singer.melspecSession) {
-                using var outputs = singer.melspecSession.Run(melspecInputs);
-                melSpectrogram = outputs.First().AsTensor<float>().ToArray();
-            }
+            melSpectrogram = singer.RunMelspec(melspecInputs);
             melSpectrogram = FitLength(melSpectrogram, totalFrames * numMelBins);
             ClampMelspec(melSpectrogram);
 
@@ -213,10 +205,7 @@ namespace OpenUtau.Core.Neutrino {
             };
 
             float[] waveform;
-            lock (singer.vocoderSession) {
-                using var outputs = singer.vocoderSession.Run(vocoderInputs);
-                waveform = outputs.First().AsTensor<float>().ToArray();
-            }
+            waveform = singer.RunVocoder(vocoderInputs);
             PostProcessWaveform(waveform);
 
             var layout = Layout(phrase);
@@ -238,61 +227,72 @@ namespace OpenUtau.Core.Neutrino {
             return result;
         }
 
-        (long[] phonemeIds, float[] scorePitchesHz, float[] scoreDurations, long[] phonePositions)
+        (long[] phonemeIds, float[] scorePitchesHz, float[] scoreDurations, long[] phonePositions, double?[] manualBoundaries)
             BuildPhonemeSequence(RenderPhrase phrase) {
 
             var phonemeIds = new List<long>();
             var scorePitchesHz = new List<float>();
             var scoreDurations = new List<float>();
             var phonePositions = new List<long>();
-            var lastNotePhoneIndices = new List<int>();
+            var manualBoundaries = new List<double?>();
+            int lastNoteIndex = -1;
+            int positionInNote = 0;
 
-            foreach (var note in phrase.notes) {
-                var lyric = note.lyric;
-                if (lyric == "+" || lyric == "-") {
-                    if (lastNotePhoneIndices.Count > 0) {
-                        float addDur = (float)(note.durationMs / 1000.0);
-                        foreach (int idx in lastNotePhoneIndices) {
-                            scoreDurations[idx] += addDur;
-                        }
-                    }
-                    continue;
+            foreach (var phone in phrase.phones) {
+                var phoneStrs = NeutrinoPhoneme.KanaToPhonemes(phone.phoneme);
+                int noteIndex = Math.Clamp(phone.noteIndex, 0, phrase.notes.Length - 1);
+                if (noteIndex != lastNoteIndex) {
+                    positionInNote = 0;
+                    lastNoteIndex = noteIndex;
                 }
 
-                var phoneStrs = NeutrinoPhoneme.KanaToPhonemes(lyric);
-                var ids = phoneStrs.Select(p => NeutrinoPhoneme.GetPhonemeId(p)).ToArray();
-                if (ids.Length == 1 && ids[0] == NeutrinoPhoneme.PAU
-                    && lyric != "R" && lyric != "r" && lyric != "rest") {
-                    var parts = lyric.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                    if (parts.Length > 1) {
-                        ids = parts.Select(p => NeutrinoPhoneme.GetPhonemeId(p)).ToArray();
-                    } else {
-                        ids = new[] { NeutrinoPhoneme.GetPhonemeId(lyric) };
-                    }
-                }
-
-                lastNotePhoneIndices.Clear();
-                float pitchHz = ids.All(id => id == NeutrinoPhoneme.PAU)
+                var note = phrase.notes[noteIndex];
+                float notePitchHz = phoneStrs.All(p => NeutrinoPhoneme.GetPhonemeId(p) == NeutrinoPhoneme.PAU)
                     ? 0
                     : (float)NeutrinoConfig.MidiToFreq(note.tone + note.tuning * 0.01f);
-                float durationSec = Math.Max(0.001f, (float)(note.durationMs / 1000.0));
+                float noteDurationSec = Math.Max(0.001f, (float)(GetExtendedNoteDurationMs(phrase.notes, noteIndex) / 1000.0));
 
-                for (int i = 0; i < ids.Length; i++) {
-                    int index = phonemeIds.Count;
-                    phonemeIds.Add(ids[i]);
-                    scorePitchesHz.Add(ids[i] == NeutrinoPhoneme.PAU ? 0 : pitchHz);
-                    scoreDurations.Add(durationSec);
-                    phonePositions.Add(i);
-                    lastNotePhoneIndices.Add(index);
+                for (int i = 0; i < phoneStrs.Length; i++) {
+                    int id = NeutrinoPhoneme.GetPhonemeId(phoneStrs[i]);
+                    phonemeIds.Add(id);
+                    scorePitchesHz.Add(id == NeutrinoPhoneme.PAU ? 0 : notePitchHz);
+                    scoreDurations.Add(noteDurationSec);
+                    phonePositions.Add(positionInNote++);
+                    manualBoundaries.Add(phone.positionOverridden && i == 0
+                        ? Math.Max(0, (phone.positionMs - phrase.positionMs) / 1000.0)
+                        : null);
                 }
             }
 
+            if (phonemeIds.Count == 0) {
+                return (
+                    Array.Empty<long>(),
+                    Array.Empty<float>(),
+                    Array.Empty<float>(),
+                    Array.Empty<long>(),
+                    new double?[] { null }
+                );
+            }
+            manualBoundaries.Add(null);
             return (
                 phonemeIds.ToArray(),
                 scorePitchesHz.ToArray(),
                 scoreDurations.ToArray(),
-                phonePositions.ToArray()
+                phonePositions.ToArray(),
+                manualBoundaries.ToArray()
             );
+        }
+
+        double GetExtendedNoteDurationMs(RenderNote[] notes, int noteIndex) {
+            double endMs = notes[noteIndex].endMs;
+            for (int i = noteIndex + 1; i < notes.Length && IsExtensionLyric(notes[i].lyric); i++) {
+                endMs = notes[i].endMs;
+            }
+            return Math.Max(1, endMs - notes[noteIndex].positionMs);
+        }
+
+        bool IsExtensionLyric(string lyric) {
+            return lyric == "+" || lyric == "-";
         }
 
         double[] BuildBaseBoundaryTimes(float[] scoreDurations, long[] phonePositions) {
@@ -324,6 +324,33 @@ namespace OpenUtau.Core.Neutrino {
                 }
             }
             return boundaries;
+        }
+
+        void ApplyManualBoundaryOverrides(double[] boundaries, double?[] manualBoundaries) {
+            if (manualBoundaries == null || manualBoundaries.Length == 0) {
+                return;
+            }
+
+            double frameSec = (double)hopSize / sampleRate;
+            int count = Math.Min(boundaries.Length - 1, manualBoundaries.Length - 1);
+            for (int i = 1; i < count; i++) {
+                if (!manualBoundaries[i].HasValue) {
+                    continue;
+                }
+
+                double min = boundaries[i - 1] + frameSec;
+                double max = boundaries[i + 1] - frameSec;
+                if (max < min) {
+                    max = min;
+                }
+                boundaries[i] = Math.Round(Math.Clamp(manualBoundaries[i].Value, min, max) * 1000.0) / 1000.0;
+            }
+
+            for (int i = 1; i < boundaries.Length; i++) {
+                if (boundaries[i] <= boundaries[i - 1]) {
+                    boundaries[i] = Math.Round((boundaries[i - 1] + frameSec) * 1000.0) / 1000.0;
+                }
+            }
         }
 
         float[] BuildTimingDurations(double[] boundaries) {

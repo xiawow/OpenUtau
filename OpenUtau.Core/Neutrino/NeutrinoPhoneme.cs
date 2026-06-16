@@ -183,6 +183,26 @@ namespace OpenUtau.Core.Neutrino {
                 {"fi", new[] {"f", "i"}},
                 {"fe", new[] {"f", "e"}},
                 {"fo", new[] {"f", "o"}},
+                {"ba", new[] {"b", "a"}},
+                {"bi", new[] {"b", "i"}},
+                {"bu", new[] {"b", "u"}},
+                {"be", new[] {"b", "e"}},
+                {"bo", new[] {"b", "o"}},
+                {"bya", new[] {"by", "a"}},
+                {"byi", new[] {"by", "i"}},
+                {"byu", new[] {"by", "u"}},
+                {"bye", new[] {"by", "e"}},
+                {"byo", new[] {"by", "o"}},
+                {"pa", new[] {"p", "a"}},
+                {"pi", new[] {"p", "i"}},
+                {"pu", new[] {"p", "u"}},
+                {"pe", new[] {"p", "e"}},
+                {"po", new[] {"p", "o"}},
+                {"pya", new[] {"py", "a"}},
+                {"pyi", new[] {"py", "i"}},
+                {"pyu", new[] {"py", "u"}},
+                {"pye", new[] {"py", "e"}},
+                {"pyo", new[] {"py", "o"}},
                 {"ma", new[] {"m", "a"}},
                 {"mi", new[] {"m", "i"}},
                 {"mu", new[] {"m", "u"}},
@@ -278,6 +298,18 @@ namespace OpenUtau.Core.Neutrino {
 
         public static int[] KanaToPhonemeIds(string kana) {
             return KanaToPhonemes(kana).Select(p => GetPhonemeId(p)).ToArray();
+        }
+
+        public static bool IsVowelPhoneme(string phoneme) {
+            phoneme = NormalizePhoneme(phoneme?.Trim() ?? string.Empty);
+            return phoneme == "a"
+                || phoneme == "i"
+                || phoneme == "u"
+                || phoneme == "e"
+                || phoneme == "o"
+                || phoneme == "N"
+                || phoneme == "pau"
+                || phoneme == "AP";
         }
 
         public static string[] KanaToPhonemes(string kana) {

@@ -4,8 +4,10 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using Microsoft.ML.OnnxRuntime;
+using Microsoft.ML.OnnxRuntime.Tensors;
 using OpenUtau.Classic;
 using OpenUtau.Core.Ustx;
+using OpenUtau.Core.Util;
 using Serilog;
 
 namespace OpenUtau.Core.Neutrino {
@@ -46,6 +48,10 @@ namespace OpenUtau.Core.Neutrino {
         public InferenceSession pitchSession;
         public InferenceSession melspecSession;
         public InferenceSession vocoderSession;
+        string timingModelPath = string.Empty;
+        string pitchModelPath = string.Empty;
+        string melspecModelPath = string.Empty;
+        string vocoderModelPath = string.Empty;
 
         static readonly object sessionLock = new object();
 
@@ -141,16 +147,42 @@ namespace OpenUtau.Core.Neutrino {
         /// Get or create ONNX inference sessions. Lazy-loaded with DML support.
         /// </summary>
         public void EnsureSessions() {
-            if (timingSession != null) return;
+            if (timingSession != null
+                && pitchSession != null
+                && melspecSession != null
+                && vocoderSession != null) {
+                return;
+            }
             lock (sessionLock) {
-                if (timingSession != null) return;
-                var modelDir = ResolveModelDir();
-                timingSession = LoadSession(Path.Combine(modelDir, "t.bin"));
-                pitchSession = LoadSession(Path.Combine(modelDir, "p.bin"));
-                melspecSession = LoadSession(Path.Combine(modelDir, "s.bin"));
-                vocoderSession = LoadSession(Path.Combine(modelDir, "v.bin"));
+                EnsureModelPaths();
+                timingSession ??= LoadSession(timingModelPath, OnnxRunnerChoice.Default);
+                pitchSession ??= LoadSession(pitchModelPath, OnnxRunnerChoice.Default);
+                melspecSession ??= LoadSession(melspecModelPath, OnnxRunnerChoice.Default);
+                vocoderSession ??= LoadSession(vocoderModelPath, OnnxRunnerChoice.Default);
                 Log.Information($"Loaded NEUTRINO ONNX sessions for {Name}");
             }
+        }
+
+        public void EnsureTimingSession() {
+            if (timingSession != null) return;
+            lock (sessionLock) {
+                EnsureModelPaths();
+                timingSession ??= LoadSession(timingModelPath, OnnxRunnerChoice.Default);
+            }
+        }
+
+        void EnsureModelPaths() {
+            if (!string.IsNullOrEmpty(timingModelPath)
+                && !string.IsNullOrEmpty(pitchModelPath)
+                && !string.IsNullOrEmpty(melspecModelPath)
+                && !string.IsNullOrEmpty(vocoderModelPath)) {
+                return;
+            }
+            var modelDir = ResolveModelDir();
+            timingModelPath = Path.Combine(modelDir, "t.bin");
+            pitchModelPath = Path.Combine(modelDir, "p.bin");
+            melspecModelPath = Path.Combine(modelDir, "s.bin");
+            vocoderModelPath = Path.Combine(modelDir, "v.bin");
         }
 
         string ResolveModelDir() {
@@ -164,9 +196,57 @@ namespace OpenUtau.Core.Neutrino {
             return nested;
         }
 
-        static InferenceSession LoadSession(string path) {
+        static InferenceSession LoadSession(string path, OnnxRunnerChoice runnerChoice) {
             var bytes = File.ReadAllBytes(path);
-            return Onnx.getInferenceSession(bytes, OnnxRunnerChoice.Default);
+            return Onnx.getInferenceSession(bytes, runnerChoice);
+        }
+
+        public float[] RunTiming(IReadOnlyCollection<NamedOnnxValue> inputs) {
+            EnsureTimingSession();
+            return RunWithCpuFallback(ref timingSession, timingModelPath, inputs, "timing");
+        }
+
+        public float[] RunPitch(IReadOnlyCollection<NamedOnnxValue> inputs) {
+            EnsureSessions();
+            return RunWithCpuFallback(ref pitchSession, pitchModelPath, inputs, "pitch");
+        }
+
+        public float[] RunMelspec(IReadOnlyCollection<NamedOnnxValue> inputs) {
+            EnsureSessions();
+            return RunWithCpuFallback(ref melspecSession, melspecModelPath, inputs, "melspec");
+        }
+
+        public float[] RunVocoder(IReadOnlyCollection<NamedOnnxValue> inputs) {
+            EnsureSessions();
+            return RunWithCpuFallback(ref vocoderSession, vocoderModelPath, inputs, "vocoder");
+        }
+
+        float[] RunWithCpuFallback(
+            ref InferenceSession session,
+            string path,
+            IReadOnlyCollection<NamedOnnxValue> inputs,
+            string modelName) {
+
+            try {
+                return RunFirstOutput(session, inputs);
+            } catch (OnnxRuntimeException e) when (Preferences.Default.OnnxRunner == "DirectML") {
+                Log.Warning(e, $"NEUTRINO {modelName} model failed on DirectML, retrying on CPU");
+                lock (sessionLock) {
+                    session?.Dispose();
+                    session = LoadSession(path, OnnxRunnerChoice.CPU);
+                }
+                return RunFirstOutput(session, inputs);
+            }
+        }
+
+        static float[] RunFirstOutput(
+            InferenceSession session,
+            IReadOnlyCollection<NamedOnnxValue> inputs) {
+
+            lock (session) {
+                using var outputs = session.Run(inputs);
+                return outputs.First().AsTensor<float>().ToArray();
+            }
         }
 
         /// <summary>
