@@ -11,7 +11,7 @@ on:
       create_release:
         description: "Create or update a GitHub Release"
         required: true
-        default: false
+        default: true
         type: boolean
       prerelease:
         description: "Mark the GitHub Release as a prerelease"
@@ -21,7 +21,7 @@ on:
       draft:
         description: "Create the GitHub Release as a draft"
         required: true
-        default: true
+        default: false
         type: boolean
 
 permissions:
