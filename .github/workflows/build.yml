@@ -22,6 +22,9 @@ on:
 env:
   release-name: ${{ inputs.version }}${{ inputs.beta && ' Beta' || '' }}
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ${{ matrix.arch.runs-on }}
