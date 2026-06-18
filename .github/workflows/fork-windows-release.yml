@@ -16,7 +16,7 @@ on:
       prerelease:
         description: "Mark the GitHub Release as a prerelease"
         required: true
-        default: true
+        default: false
         type: boolean
       draft:
         description: "Create the GitHub Release as a draft"
@@ -104,6 +104,8 @@ jobs:
           name: OpenUtau NEUTRINO ${{ inputs.version }}
           prerelease: ${{ inputs.prerelease }}
           draft: ${{ inputs.draft }}
+          fail_on_unmatched_files: true
+          make_latest: true
           files: |
             OpenUtau-win-x64.zip
             OpenUtau-win-x64.exe
