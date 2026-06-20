@@ -166,6 +166,7 @@ namespace OpenUtau.Core.Render {
                     writer.Write(direct);
                     writer.Write(hifiSustainMode);
                     writer.Write(leadingMs);
+                    writer.Write(OtoCacheHash(oto));
                     foreach (var point in envelope) {
                         writer.Write(point.X);
                         writer.Write(point.Y);
@@ -173,6 +174,28 @@ namespace OpenUtau.Core.Render {
                     return XXH64.DigestOf(stream.ToArray());
                 }
             }
+        }
+
+        // Cache output depends on both the source slice and OTO timing. Keep this in the
+        // phone hash so editing oto.ini invalidates phrase and resampler caches automatically.
+        internal static ulong OtoCacheHash(UOto? oto) {
+            using var stream = new MemoryStream();
+            using var writer = new BinaryWriter(stream);
+            if (oto == null) {
+                writer.Write(false);
+            } else {
+                writer.Write(true);
+                writer.Write(oto.File ?? string.Empty);
+                writer.Write(oto.Alias ?? string.Empty);
+                writer.Write(oto.Phonetic ?? string.Empty);
+                writer.Write(oto.Set ?? string.Empty);
+                writer.Write(oto.Offset);
+                writer.Write(oto.Consonant);
+                writer.Write(oto.Cutoff);
+                writer.Write(oto.Preutter);
+                writer.Write(oto.Overlap);
+            }
+            return XXH64.DigestOf(stream.ToArray());
         }
     }
 

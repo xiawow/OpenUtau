@@ -20,6 +20,38 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
+        public void OtoCacheHashChangesForTimingEdits() {
+            var oto = new UOto {
+                Offset = 10,
+                Consonant = 50,
+                Cutoff = -80,
+                Preutter = 70,
+                Overlap = 25,
+            };
+
+            ulong baseline = RenderPhone.OtoCacheHash(oto);
+
+            oto.Offset = 11;
+            Assert.NotEqual(baseline, RenderPhone.OtoCacheHash(oto));
+
+            oto.Offset = 10;
+            oto.Consonant = 51;
+            Assert.NotEqual(baseline, RenderPhone.OtoCacheHash(oto));
+
+            oto.Consonant = 50;
+            oto.Cutoff = -81;
+            Assert.NotEqual(baseline, RenderPhone.OtoCacheHash(oto));
+
+            oto.Cutoff = -80;
+            oto.Preutter = 71;
+            Assert.NotEqual(baseline, RenderPhone.OtoCacheHash(oto));
+
+            oto.Preutter = 70;
+            oto.Overlap = 26;
+            Assert.NotEqual(baseline, RenderPhone.OtoCacheHash(oto));
+        }
+
+        [Fact]
         public void LegacyHifiRendererNameMapsToNewRenderer() {
             string original = Preferences.Default.DefaultRenderer;
             try {
