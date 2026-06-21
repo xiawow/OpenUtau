@@ -9,6 +9,7 @@ using OpenUtau.Audio;
 using OpenUtau.Classic;
 using OpenUtau.Core;
 using OpenUtau.Core.Util;
+using OpenUtau.Core.HifiNeural;
 using ReactiveUI;
 using ReactiveUI.Fody.Helpers;
 using OpenUtau.Core.Render;
@@ -89,6 +90,11 @@ namespace OpenUtau.App.ViewModels {
         [Reactive] public bool ClearCacheOnQuit { get; set; }
         public List<string> OnnxRunnerOptions { get; set; }
         [Reactive] public string OnnxRunner { get; set; }
+        public List<string> HifiNeuralMelEnhanceModeOptions { get; set; }
+        [Reactive] public string HifiNeuralMelEnhanceMode { get; set; }
+        public List<string> HifiNeuralHnsepRunnerOptions { get; set; }
+        [Reactive] public string HifiNeuralHnsepRunner { get; set; }
+        [Reactive] public bool HifiNeuralDebugExportEnabled { get; set; }
         public List<GpuInfo> OnnxGpuOptions { get; set; }
         [Reactive] public GpuInfo OnnxGpu { get; set; }
         [Reactive] public bool ShowOnnxGpu { get; set; }
@@ -166,9 +172,17 @@ namespace OpenUtau.App.ViewModels {
             OnnxRunnerOptions = Onnx.getRunnerOptions();
             OnnxRunner = String.IsNullOrEmpty(Preferences.Default.OnnxRunner) ?
                OnnxRunnerOptions[0] : Preferences.Default.OnnxRunner;
+            HifiNeuralMelEnhanceModeOptions = new List<string> {
+                HifiRenderConfig.MelEnhanceNone,
+                HifiRenderConfig.MelEnhanceLight,
+            };
+            HifiNeuralMelEnhanceMode = HifiRenderConfig.NormalizeMelEnhanceMode(Preferences.Default.HifiNeuralMelEnhanceMode);
+            HifiNeuralHnsepRunnerOptions = HifiHnsepOnnx.RunnerOptions();
+            HifiNeuralHnsepRunner = HifiHnsepOnnx.NormalizeRunner(Preferences.Default.HifiNeuralHnsepRunner);
+            HifiNeuralDebugExportEnabled = Preferences.Default.HifiNeuralDebugExportEnabled;
             OnnxGpuOptions = Onnx.getGpuInfo();
             OnnxGpu = OnnxGpuOptions.FirstOrDefault(x => x.deviceId == Preferences.Default.OnnxGpu, OnnxGpuOptions[0]);
-            ShowOnnxGpu = OnnxRunner == "DirectML";
+            ShowOnnxGpu = UsesDirectML(OnnxRunner) || UsesDirectML(HifiNeuralHnsepRunner);
             DiffSingerDepth = Preferences.Default.DiffSingerDepth * 100;
             DiffSingerSteps = Preferences.Default.DiffSingerSteps;
             DiffSingerStepsVariance = Preferences.Default.DiffSingerStepsVariance;
@@ -341,7 +355,23 @@ namespace OpenUtau.App.ViewModels {
                 .Subscribe(index => {
                     Preferences.Default.OnnxRunner = index;
                     Preferences.Save();
-                    ToggleOnnxGpuDisplay(index == "DirectML");
+                    UpdateOnnxGpuDisplay();
+                });
+            this.WhenAnyValue(vm => vm.HifiNeuralMelEnhanceMode)
+                .Subscribe(mode => {
+                    Preferences.Default.HifiNeuralMelEnhanceMode = HifiRenderConfig.NormalizeMelEnhanceMode(mode);
+                    Preferences.Save();
+                });
+            this.WhenAnyValue(vm => vm.HifiNeuralHnsepRunner)
+                .Subscribe(runner => {
+                    Preferences.Default.HifiNeuralHnsepRunner = HifiHnsepOnnx.NormalizeRunner(runner);
+                    Preferences.Save();
+                    UpdateOnnxGpuDisplay();
+                });
+            this.WhenAnyValue(vm => vm.HifiNeuralDebugExportEnabled)
+                .Subscribe(enabled => {
+                    Preferences.Default.HifiNeuralDebugExportEnabled = enabled;
+                    Preferences.Save();
                 });
             this.WhenAnyValue(vm => vm.OnnxGpu)
                 .Subscribe(index => {
@@ -455,6 +485,14 @@ namespace OpenUtau.App.ViewModels {
 
         public void ToggleOnnxGpuDisplay(bool show) {
             ShowOnnxGpu = show;
+        }
+
+        void UpdateOnnxGpuDisplay() {
+            ShowOnnxGpu = UsesDirectML(OnnxRunner) || UsesDirectML(HifiNeuralHnsepRunner);
+        }
+
+        static bool UsesDirectML(string runner) {
+            return string.Equals(runner, "DirectML", StringComparison.OrdinalIgnoreCase);
         }
     }
 }

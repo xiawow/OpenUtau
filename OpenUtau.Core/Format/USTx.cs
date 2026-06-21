@@ -34,8 +34,11 @@ namespace OpenUtau.Core.Format {
         public const string SHFC = "shfc";
         public const string TENC = "tenc";
         public const string VOIC = "voic";
+        public const string GROC = "groc";
+        public const string HE = "he";
 
         public static readonly string[] required = { DYN, PITD, CLR, ENG, VEL, VOL, ATK, DEC };
+        static readonly string[] HifiSustainModeOptions = { "loop", "texture", "timewarp", "auto" };
 
         public static void AddDefaultExpressions(UProject project) {
             project.RegisterExpression(new UExpressionDescriptor("dynamics (curve)", DYN, -240, 120, 0) { type = UExpressionType.Curve });
@@ -60,6 +63,9 @@ namespace OpenUtau.Core.Format {
             project.RegisterExpression(new UExpressionDescriptor("tone shift (curve)", SHFC, -1200, 1200, 0) { type = UExpressionType.Curve });
             project.RegisterExpression(new UExpressionDescriptor("tension (curve)", TENC, -100, 100, 0) { type = UExpressionType.Curve });
             project.RegisterExpression(new UExpressionDescriptor("voicing (curve)", VOIC, 0, 100, 100) { type = UExpressionType.Curve });
+            project.RegisterExpression(new UExpressionDescriptor("growl/roughness (curve)", GROC, 0, 100, 0) { type = UExpressionType.Curve });
+            project.RegisterExpression(new UExpressionDescriptor("Hifi sustain mode", HE, false, HifiSustainModeOptions.ToArray()) { defaultValue = 3 });
+            EnsureHifiSustainExpression(project);
 
             string message = string.Empty;
             if (ValidateExpression(project, "g", GEN)) {
@@ -79,6 +85,43 @@ namespace OpenUtau.Core.Format {
                 DocManager.Inst.ExecuteCmd(new ErrorMessageNotification(e));
             }
         }
+
+        private static void EnsureHifiSustainExpression(UProject project) {
+            if (project.expressions.TryGetValue(HE, out var descriptor)) {
+                EnsureHifiSustainDescriptor(descriptor);
+            }
+            foreach (var track in project.tracks ?? Enumerable.Empty<UTrack>()) {
+                var trackDescriptor = track.TrackExpressions.FirstOrDefault(exp => exp.abbr == HE);
+                if (trackDescriptor != null) {
+                    EnsureHifiSustainDescriptor(trackDescriptor);
+                }
+            }
+        }
+
+        private static void EnsureHifiSustainDescriptor(UExpressionDescriptor descriptor) {
+            if (descriptor.type != UExpressionType.Options) {
+                return;
+            }
+            if (descriptor.options != null
+                    && descriptor.options.SequenceEqual(HifiSustainModeOptions)
+                    && Math.Abs(descriptor.defaultValue - 3) < 1e-4) {
+                return;
+            }
+
+            float previousDefault = descriptor.CustomDefaultValue;
+            descriptor.options = HifiSustainModeOptions.ToArray();
+            descriptor.min = 0;
+            descriptor.max = HifiSustainModeOptions.Length - 1;
+            descriptor.isFlag = false;
+            descriptor.flag = string.Empty;
+            descriptor.defaultValue = HifiSustainModeOptions.Length - 1;
+            if (previousDefault > 0 && previousDefault < descriptor.defaultValue) {
+                descriptor.CustomDefaultValue = previousDefault;
+            } else {
+                descriptor.CustomDefaultValue = descriptor.defaultValue;
+            }
+        }
+
         private static bool ValidateExpression(UProject project, string flag, string abbr) {
             if (project.expressions.Any(e => e.Value.flag == flag && e.Value.abbr != abbr)) {
                 var oldExp = project.expressions.First(e => e.Value.flag == flag && e.Value.abbr != abbr);

@@ -206,6 +206,14 @@
           </Grid>
           <TextBlock Text="{DynamicResource prefs.rendering.onnxrunner}" Margin="0,10,0,0"/>
           <ComboBox ItemsSource="{Binding OnnxRunnerOptions}" SelectedItem="{Binding OnnxRunner}"/>
+          <TextBlock Text="HifiNeural mel enhance mode" Margin="0,10,0,0"/>
+          <ComboBox ItemsSource="{Binding HifiNeuralMelEnhanceModeOptions}" SelectedItem="{Binding HifiNeuralMelEnhanceMode}"/>
+          <TextBlock Text="HifiNeural HNSEP runner" Margin="0,10,0,0"/>
+          <ComboBox ItemsSource="{Binding HifiNeuralHnsepRunnerOptions}" SelectedItem="{Binding HifiNeuralHnsepRunner}"/>
+          <Grid Margin="0,5,0,0">
+            <TextBlock Text="HifiNeural debug export" HorizontalAlignment="Left"/>
+            <ToggleSwitch IsChecked="{Binding HifiNeuralDebugExportEnabled}"/>
+          </Grid>
           <StackPanel IsVisible="{Binding ShowOnnxGpu}">
             <TextBlock Text="{DynamicResource prefs.rendering.onnxgpu}" Margin="0,10,0,0"/>
             <ComboBox ItemsSource="{Binding OnnxGpuOptions}" SelectedItem="{Binding OnnxGpu}"/>

@@ -18,6 +18,7 @@ namespace OpenUtau.Core.Ustx {
         public string Suffix { get => Subbanks.First().Suffix; }
         public string File { get; private set; }
         public string DisplayFile { get; private set; }
+        public string OtoIniFile { get; private set; } = string.Empty;
         public double Offset {
             get => offset;
             set {
@@ -79,6 +80,7 @@ namespace OpenUtau.Core.Ustx {
                 File = string.Empty;
             }
             DisplayFile = oto?.Wav;
+            OtoIniFile = oto.FileTrace?.file ?? set.File ?? string.Empty;
             Offset = oto.Offset;
             Consonant = oto.Consonant;
             Cutoff = oto.Cutoff;
@@ -115,6 +117,7 @@ namespace OpenUtau.Core.Ustx {
 
     public class UOtoSet {
         public string Name => otoSet.Name;
+        public string File => otoSet.File;
         public readonly string Location;
 
         private readonly OtoSet otoSet;

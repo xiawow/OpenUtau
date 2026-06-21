@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 using Newtonsoft.Json;
+using OpenUtau.Core.HifiNeural;
 using OpenUtau.Core.Render;
 using Serilog;
 
@@ -113,6 +114,8 @@ namespace OpenUtau.Core.Util {
                     if (!ValidString(new Action(() => CultureInfo.GetCultureInfo(Default.SortingOrder)))) Default.SortingOrder = string.Empty;
                     if (!Renderers.getRendererOptions().Contains(Default.DefaultRenderer)) Default.DefaultRenderer = string.Empty;
                     if (!Onnx.getRunnerOptions().Contains(Default.OnnxRunner)) Default.OnnxRunner = string.Empty;
+                    Default.HifiNeuralMelEnhanceMode = HifiRenderConfig.NormalizeMelEnhanceMode(Default.HifiNeuralMelEnhanceMode);
+                    Default.HifiNeuralHnsepRunner = HifiHnsepOnnx.NormalizeRunner(Default.HifiNeuralHnsepRunner);
                     if (Default.Theme != null) {
                         Default.ThemeName = Default.Theme switch {
                             1 => "Dark",
@@ -166,6 +169,9 @@ namespace OpenUtau.Core.Util {
             public int DiffSingerStepsPitch = 10;
             public bool DiffSingerTensorCache = true;
             public bool DiffSingerLangCodeHide = false;
+            public string HifiNeuralMelEnhanceMode = HifiRenderConfig.MelEnhanceNone;
+            public string HifiNeuralHnsepRunner = HifiHnsepOnnx.RunnerCpu;
+            public bool HifiNeuralDebugExportEnabled = false;
             public bool SkipRenderingMutedTracks = false;
             public string Language = string.Empty;
             public string? SortingOrder = null;

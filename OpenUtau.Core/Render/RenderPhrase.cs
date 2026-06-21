@@ -74,6 +74,7 @@ namespace OpenUtau.Core.Render {
 
         // voicevox & enunu args
         public readonly int toneShift;
+        public readonly int hifiSustainMode;
 
         public readonly UOto oto;
         public readonly ulong hash;
@@ -127,6 +128,18 @@ namespace OpenUtau.Core.Render {
             envelope = phoneme.envelope.data.ToArray();
             direct = phoneme.GetExpression(project, track, Format.Ustx.DIR).Item1 == 1;
             toneShift = (int)phoneme.GetExpression(project, track, Format.Ustx.SHFT).Item1;
+            if (track.TryGetExpDescriptor(project, Format.Ustx.HE, out var hifiSustainDescriptor)) {
+                var (value, overridden) = phoneme.GetExpression(project, track, Format.Ustx.HE);
+                bool legacyDescriptor = hifiSustainDescriptor.options == null
+                    || !hifiSustainDescriptor.options.Contains("auto");
+                hifiSustainMode = legacyDescriptor
+                        && !overridden
+                        && (int)Math.Round(value) == OpenUtau.Core.HifiNeural.HifiSustainModes.Loop
+                    ? OpenUtau.Core.HifiNeural.HifiSustainModes.Auto
+                    : (int)value;
+            } else {
+                hifiSustainMode = OpenUtau.Core.HifiNeural.HifiSustainModes.Auto;
+            }
 
             oto = phoneme.oto;
             hash = Hash();
@@ -151,13 +164,58 @@ namespace OpenUtau.Core.Render {
                     writer.Write(velocity);
                     writer.Write(modulation);
                     writer.Write(direct);
+                    writer.Write(hifiSustainMode);
                     writer.Write(leadingMs);
+                    writer.Write(OtoCacheHash(oto));
                     foreach (var point in envelope) {
                         writer.Write(point.X);
                         writer.Write(point.Y);
                     }
                     return XXH64.DigestOf(stream.ToArray());
                 }
+            }
+        }
+
+        // Cache output depends on both the source slice and OTO timing. Keep this in the
+        // phone hash so editing oto.ini invalidates phrase and resampler caches automatically.
+        internal static ulong OtoCacheHash(UOto? oto) {
+            using var stream = new MemoryStream();
+            using var writer = new BinaryWriter(stream);
+            if (oto == null) {
+                writer.Write(false);
+            } else {
+                writer.Write(true);
+                writer.Write(oto.File ?? string.Empty);
+                writer.Write(oto.Alias ?? string.Empty);
+                writer.Write(oto.Phonetic ?? string.Empty);
+                writer.Write(oto.Set ?? string.Empty);
+                writer.Write(oto.OtoIniFile ?? string.Empty);
+                WriteFileVersion(writer, oto.OtoIniFile);
+                writer.Write(oto.Offset);
+                writer.Write(oto.Consonant);
+                writer.Write(oto.Cutoff);
+                writer.Write(oto.Preutter);
+                writer.Write(oto.Overlap);
+            }
+            return XXH64.DigestOf(stream.ToArray());
+        }
+
+        static void WriteFileVersion(BinaryWriter writer, string? path) {
+            if (string.IsNullOrWhiteSpace(path)) {
+                writer.Write(false);
+                return;
+            }
+            try {
+                var info = new FileInfo(path);
+                if (!info.Exists) {
+                    writer.Write(false);
+                    return;
+                }
+                writer.Write(true);
+                writer.Write(info.Length);
+                writer.Write(info.LastWriteTimeUtc.Ticks);
+            } catch {
+                writer.Write(false);
             }
         }
     }
