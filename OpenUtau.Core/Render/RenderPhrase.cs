@@ -189,6 +189,8 @@ namespace OpenUtau.Core.Render {
                 writer.Write(oto.Alias ?? string.Empty);
                 writer.Write(oto.Phonetic ?? string.Empty);
                 writer.Write(oto.Set ?? string.Empty);
+                writer.Write(oto.OtoIniFile ?? string.Empty);
+                WriteFileVersion(writer, oto.OtoIniFile);
                 writer.Write(oto.Offset);
                 writer.Write(oto.Consonant);
                 writer.Write(oto.Cutoff);
@@ -196,6 +198,25 @@ namespace OpenUtau.Core.Render {
                 writer.Write(oto.Overlap);
             }
             return XXH64.DigestOf(stream.ToArray());
+        }
+
+        static void WriteFileVersion(BinaryWriter writer, string? path) {
+            if (string.IsNullOrWhiteSpace(path)) {
+                writer.Write(false);
+                return;
+            }
+            try {
+                var info = new FileInfo(path);
+                if (!info.Exists) {
+                    writer.Write(false);
+                    return;
+                }
+                writer.Write(true);
+                writer.Write(info.Length);
+                writer.Write(info.LastWriteTimeUtc.Ticks);
+            } catch {
+                writer.Write(false);
+            }
         }
     }
 

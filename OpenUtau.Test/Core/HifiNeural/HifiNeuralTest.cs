@@ -4,6 +4,7 @@ using System.Linq;
 using System.Numerics;
 using System.Reflection;
 using System.Runtime.Serialization;
+using OpenUtau.Classic;
 using OpenUtau.Core.HifiNeural;
 using OpenUtau.Core.Render;
 using OpenUtau.Core.Util;
@@ -49,6 +50,42 @@ namespace OpenUtau.Core.Test.HifiNeural {
             oto.Preutter = 70;
             oto.Overlap = 26;
             Assert.NotEqual(baseline, RenderPhone.OtoCacheHash(oto));
+        }
+
+        [Fact]
+        public void OtoCacheHashChangesForExternalOtoIniEdit() {
+            string dir = Path.Combine(Path.GetTempPath(), $"hifi-oto-cache-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(dir);
+            string otoIni = Path.Combine(dir, "oto.ini");
+            try {
+                File.WriteAllText(otoIni, "a.wav=a,0,50,100,70,20\n");
+                File.SetLastWriteTimeUtc(otoIni, DateTime.UtcNow.AddMinutes(-2));
+                var set = new UOtoSet(new OtoSet {
+                    File = otoIni,
+                    Name = "main",
+                }, dir);
+                var oto = new UOto(new Oto {
+                    Alias = "a",
+                    Phonetic = "a",
+                    Wav = "a.wav",
+                    Offset = 0,
+                    Consonant = 50,
+                    Cutoff = 100,
+                    Preutter = 70,
+                    Overlap = 20,
+                    IsValid = true,
+                    FileTrace = new FileTrace { file = otoIni },
+                }, set, new[] { new USubbank(new Subbank()) });
+
+                ulong baseline = RenderPhone.OtoCacheHash(oto);
+
+                File.WriteAllText(otoIni, "a.wav=a,0,55,100,70,20\n");
+                File.SetLastWriteTimeUtc(otoIni, DateTime.UtcNow.AddMinutes(2));
+
+                Assert.NotEqual(baseline, RenderPhone.OtoCacheHash(oto));
+            } finally {
+                Directory.Delete(dir, recursive: true);
+            }
         }
 
         [Fact]
