@@ -109,6 +109,8 @@ namespace OpenUtau.Core {
                     options.InterOpNumThreads = 1;
                     break;
                 case "DirectML":
+                    options.EnableMemoryPattern = false;
+                    options.ExecutionMode = ExecutionMode.ORT_SEQUENTIAL;
                     var d = devices[Preferences.Default.OnnxGpu];
                     options.AppendExecutionProvider(
                         OrtEnv.Instance(),

@@ -1,0 +1,117 @@
+name: Fork Windows Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version and release tag, for example 0.0.1-neutrino.1"
+        required: true
+        default: "0.0.1-neutrino.1"
+        type: string
+      create_release:
+        description: "Create or update a GitHub Release"
+        required: true
+        default: true
+        type: boolean
+      prerelease:
+        description: "Mark the GitHub Release as a prerelease"
+        required: true
+        default: false
+        type: boolean
+      draft:
+        description: "Create the GitHub Release as a draft"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  windows-x64:
+    name: Build Windows x64
+    runs-on: windows-latest
+    env:
+      RID: win-x64
+      ARCH: x64
+      PUBLISH_DIR: bin/win-x64
+      ARTIFACT_BASENAME: OpenUtau-win-x64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install NSIS
+        run: choco install nsis --version=3.11 --no-progress -y
+
+      - name: Restore
+        run: dotnet restore OpenUtau/OpenUtau.csproj -r $env:RID
+
+      - name: Publish
+        run: >
+          dotnet publish OpenUtau/OpenUtau.csproj
+          -c Release
+          -r $env:RID
+          --self-contained true
+          -o $env:PUBLISH_DIR
+          /p:Version=${{ inputs.version }}
+
+      - name: Add default fork preferences
+        run: |
+          @{ Beta = $true } | ConvertTo-Json | Set-Content -Path "$env:PUBLISH_DIR/prefs-default.json" -Encoding UTF8
+
+      - name: Add DirectML runtime
+        run: |
+          Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.15.4" -OutFile "Microsoft.AI.DirectML.nupkg"
+          New-Item -ItemType Directory -Path "Microsoft.AI.DirectML" | Out-Null
+          tar -xf "Microsoft.AI.DirectML.nupkg" -C "Microsoft.AI.DirectML"
+          Copy-Item "Microsoft.AI.DirectML/bin/x64-win/DirectML.dll" "$env:PUBLISH_DIR/DirectML.dll" -Force
+
+      - name: Create zip package
+        run: |
+          if (Test-Path "$env:ARTIFACT_BASENAME.zip") {
+            Remove-Item "$env:ARTIFACT_BASENAME.zip"
+          }
+          Compress-Archive -Path "$env:PUBLISH_DIR/*" -DestinationPath "$env:ARTIFACT_BASENAME.zip" -Force
+
+      - name: Download VC Redist
+        run: Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "vc_redist.x64.exe"
+
+      - name: Create installer
+        uses: joncloud/makensis-action@v4.1
+        with:
+          script-file: OpenUtau.nsi
+          arguments: "-DPRODUCT_VERSION=${{ inputs.version }} -DARCH=${{ env.ARCH }}"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenUtau-win-x64
+          path: |
+            OpenUtau-win-x64.zip
+            OpenUtau-win-x64.exe
+
+      - name: Create GitHub Release
+        if: ${{ inputs.create_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: OpenUtau NEUTRINO ${{ inputs.version }}
+          prerelease: ${{ inputs.prerelease }}
+          draft: ${{ inputs.draft }}
+          fail_on_unmatched_files: true
+          make_latest: true
+          files: |
+            OpenUtau-win-x64.zip
+            OpenUtau-win-x64.exe
+          body: |
+            Fork build for the NEUTRINO renderer work.
+
+            Artifacts:
+            - OpenUtau-win-x64.zip
+            - OpenUtau-win-x64.exe
