@@ -89,19 +89,24 @@ namespace OpenUtau.Classic {
                     Log.Error(e, $"Failed to load yaml {yamlFile}");
                 }
             }
+            bool isNeutrinoModel = IsNeutrinoModelDirectory(dir);
             string singerType = bankConfig?.SingerType ?? string.Empty;
             if (SingerTypeUtils.SingerTypeFromName.ContainsKey(singerType)) {
                 voicebank.SingerType = SingerTypeUtils.SingerTypeFromName[singerType];
+                // Older installers wrote a generic UTAU config for model archives. The model
+                // signature is authoritative here and keeps those already-installed singers usable.
+                if (voicebank.SingerType == USingerType.Classic && isNeutrinoModel) {
+                    voicebank.SingerType = USingerType.Neutrino;
+                }
             } else {
                 // Legacy detection code. Do not add more here.
                 var enuconfigFile = Path.Combine(dir, kEnuconfigYaml);
                 var dsconfigFile = Path.Combine(dir, kDsconfigYaml);
-                var neutrinoModel = Path.Combine(dir, "model", "info.toml");
                 if (File.Exists(enuconfigFile)) {
                     voicebank.SingerType = USingerType.Enunu;
                 } else if (File.Exists(dsconfigFile)) {
                     voicebank.SingerType = USingerType.DiffSinger;
-                } else if (File.Exists(neutrinoModel)) {
+                } else if (isNeutrinoModel) {
                     voicebank.SingerType = USingerType.Neutrino;
                 } else if (voicebank.SingerType != USingerType.Enunu) {
                     voicebank.SingerType = USingerType.Classic;
@@ -117,6 +122,20 @@ namespace OpenUtau.Classic {
             if (bankConfig != null) {
                 ApplyConfig(voicebank, bankConfig);
             }
+        }
+
+        static bool IsNeutrinoModelDirectory(string directory) {
+            string modelDirectory = Path.Combine(directory, "model");
+            return File.Exists(Path.Combine(modelDirectory, "info.toml"))
+                || HasNeutrinoModelFiles(modelDirectory)
+                || HasNeutrinoModelFiles(directory);
+        }
+
+        static bool HasNeutrinoModelFiles(string directory) {
+            return File.Exists(Path.Combine(directory, "t.bin"))
+                && File.Exists(Path.Combine(directory, "p.bin"))
+                && File.Exists(Path.Combine(directory, "s.bin"))
+                && File.Exists(Path.Combine(directory, "v.bin"));
         }
 
         public static void ParseCharacterTxt(Voicebank voicebank, Stream stream, string filePath, string basePath, Encoding encoding) {

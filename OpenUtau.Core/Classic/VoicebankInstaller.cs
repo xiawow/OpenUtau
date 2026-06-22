@@ -39,6 +39,7 @@ namespace OpenUtau.Classic {
                 Overwrite = true,
             };
             using (var archive = ArchiveFactory.OpenArchive(path, readerOptions)) {
+                singerType = ResolveSingerType(archive, singerType);
                 var touches = new List<string>();
                 AdjustBasePath(archive, path, touches);
                 int total = archive.Entries.Count();
@@ -82,12 +83,45 @@ namespace OpenUtau.Classic {
                     File.WriteAllText(touch, "\n");
                     var config = new VoicebankConfig() {
                         TextFileEncoding = textEncoding.WebName,
+                        SingerType = singerType,
                     };
                     using (var stream = File.Open(touch.Replace(".txt", ".yaml"), FileMode.Create)) {
                         config.Save(stream);
                     }
                 }
             }
+        }
+
+        static string ResolveSingerType(IArchive archive, string requestedSingerType) {
+            if (!string.Equals(requestedSingerType, "utau", StringComparison.OrdinalIgnoreCase)) {
+                return requestedSingerType;
+            }
+
+            var files = archive.Entries
+                .Where(entry => !entry.IsDirectory && !string.IsNullOrEmpty(entry.Key))
+                .Select(entry => entry.Key!.Replace("\\", "/").TrimStart('/'))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            bool hasInfo = files.Any(file => file.Equals("model/info.toml", StringComparison.OrdinalIgnoreCase)
+                || file.EndsWith("/model/info.toml", StringComparison.OrdinalIgnoreCase));
+            if (hasInfo || HasNeutrinoModelFiles(files)) {
+                return "neutrino";
+            }
+            return requestedSingerType;
+        }
+
+        static bool HasNeutrinoModelFiles(HashSet<string> files) {
+            foreach (var timing in files.Where(file => file.Equals("t.bin", StringComparison.OrdinalIgnoreCase)
+                || file.EndsWith("/t.bin", StringComparison.OrdinalIgnoreCase))) {
+                int separator = timing.LastIndexOf('/');
+                string directory = separator >= 0 ? timing.Substring(0, separator) : string.Empty;
+                string Prefix(string name) => string.IsNullOrEmpty(directory) ? name : $"{directory}/{name}";
+                if (files.Contains(Prefix("p.bin"))
+                    && files.Contains(Prefix("s.bin"))
+                    && files.Contains(Prefix("v.bin"))) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private void AdjustBasePath(IArchive archive, string archivePath, List<string> touches) {

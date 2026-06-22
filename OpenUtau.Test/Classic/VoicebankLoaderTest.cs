@@ -1,5 +1,6 @@
 ﻿using System.IO;
 using System.Text;
+using OpenUtau.Core.Ustx;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -46,6 +47,29 @@ aoieu.wav=u R,5,,33,44,
                     string actual = Encoding.ASCII.GetString(stream2.ToArray());
                     Assert.Equal(expected, actual);
                 }
+            }
+        }
+
+        [Fact]
+        public void DetectsNeutrinoModelDespiteGenericUstxConfig() {
+            string dir = Path.Combine(Path.GetTempPath(), $"neutrino-detect-{System.Guid.NewGuid():N}");
+            try {
+                Directory.CreateDirectory(Path.Combine(dir, "model"));
+                string characterPath = Path.Combine(dir, "character.txt");
+                File.WriteAllText(characterPath, "name=Test NEUTRINO\n", Encoding.UTF8);
+                using (var stream = File.Create(Path.Combine(dir, "character.yaml"))) {
+                    new VoicebankConfig { SingerType = "utau" }.Save(stream);
+                }
+                foreach (string model in new[] { "t.bin", "p.bin", "s.bin", "v.bin" }) {
+                    File.WriteAllBytes(Path.Combine(dir, "model", model), new byte[] { 0 });
+                }
+
+                var voicebank = new Voicebank();
+                VoicebankLoader.LoadInfo(voicebank, characterPath, Path.GetDirectoryName(dir)!);
+
+                Assert.Equal(USingerType.Neutrino, voicebank.SingerType);
+            } finally {
+                Directory.Delete(dir, recursive: true);
             }
         }
     }
