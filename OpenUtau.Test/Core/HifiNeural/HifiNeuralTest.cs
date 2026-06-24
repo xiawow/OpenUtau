@@ -183,16 +183,17 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
-        public void AlignMelFramesProducesExpectedLength() {
+        public void WriteMappedRegionProducesExpectedLength() {
             var method = typeof(HifiPhraseFeatureBuilder)
-                .GetMethod("AlignMelFrames", BindingFlags.NonPublic | BindingFlags.Static);
+                .GetMethod("WriteMappedRegion", BindingFlags.NonPublic | BindingFlags.Static);
             Assert.NotNull(method);
 
             var source = new float[2, 4] {
                 { 0f, 1f, 2f, 3f },
                 { 10f, 11f, 12f, 13f },
             };
-            var aligned = (float[,])method!.Invoke(null, new object[] { source, 7 })!;
+            var aligned = new float[2, 7];
+            method!.Invoke(null, new object[] { source, 0, 4, aligned, 0, 7 });
 
             Assert.Equal(2, aligned.GetLength(0));
             Assert.Equal(7, aligned.GetLength(1));
@@ -235,7 +236,9 @@ namespace OpenUtau.Core.Test.HifiNeural {
             }
             var output = new float[HifiMelExtractor.NMels, 2];
 
-            bool applied = (bool)method!.Invoke(null, new object[] { source, 0, 3, output, 0, 2, false, null, null, 0, 0, 0d })!;
+            bool applied = (bool)method!.Invoke(null, new object[] {
+                source, 0, 3, output, 0, 2, false, null, null, 0, 0, 0d, HifiSustainModes.Auto,
+            })!;
 
             Assert.True(applied);
             foreach (float value in output) {
@@ -260,7 +263,9 @@ namespace OpenUtau.Core.Test.HifiNeural {
             }
             var output = new float[HifiMelExtractor.NMels, 40];
 
-            bool applied = (bool)method!.Invoke(null, new object[] { source, 0, 10, output, 0, 40, false, null, null, 0, 0, 0d })!;
+            bool applied = (bool)method!.Invoke(null, new object[] {
+                source, 0, 10, output, 0, 40, false, null, null, 0, 0, 0d, HifiSustainModes.Auto,
+            })!;
 
             Assert.True(applied);
             Assert.Equal(source[0, 0], output[0, 0], 5);
@@ -386,6 +391,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 map.Length,
                 5,
                 20,
+                HifiSustainModes.Auto,
             });
 
             for (int t = 0; t < map.Length; t++) {
@@ -575,7 +581,8 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_MEL_ENHANCE_MODE", "none");
                 Environment.SetEnvironmentVariable("HIFI_NEURAL_DEBUG_EXPORT", "false");
                 string key = HifiRenderConfig.CacheKey();
-                Assert.Contains("v62-soft-consonant-boost-phoneplan-softleadskip-vel-support-finaledge-audibletargetfixed-sourceotopreutter-sustaintexturebody-conditionaledge-restgapend-finaltail-vowelbudget-anchorlead-targetfixed-envelopeend-directparammap-meldomainconcat-waveformsustain-naturalrate-f0fallback-postleveler-loud17-grocv1-genc-hnsepslice-rms-sourceparams-tencremixfix-nonlinearparammap-", key);
+                Assert.Contains("-he-timewarpname-autohe-stretchtiers-", key);
+                Assert.Contains("-nonlinearparammap-", key);
                 Assert.Contains("enhnone", key);
                 Assert.Contains("dbgFalse", key);
             } finally {
@@ -805,8 +812,8 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 source[i] = harmonic[i] + (float)(0.015 * Math.Sin(2.0 * Math.PI * 6200.0 * t));
             }
 
-            var processedHarmonic = (float[])prepare!.Invoke(null, new object[] { harmonic, -50.0 })!;
-            var neutralTrack = HifiFrameParameterTrack.Constant(new HifiFrameParameterAverages(0, 0, -50, 100));
+            var processedHarmonic = (float[])prepare!.Invoke(null, new object[] { harmonic, 50.0 })!;
+            var neutralTrack = HifiFrameParameterTrack.Constant(new HifiFrameParameterAverages(0, 0, 50, 100));
             var remixed = (float[])remix!.Invoke(null, new object[] { source, harmonic, processedHarmonic, neutralTrack })!;
 
             Assert.Equal(source.Length, remixed.Length);
@@ -1302,19 +1309,19 @@ namespace OpenUtau.Core.Test.HifiNeural {
         [Fact]
         public void TargetFixedLeadUsesSourceOtoOverlap() {
             var smallOverlap = CreateRenderPhoneForTiming(
-                preutterMs: 180,
-                overlapMs: 80,
-                durationMs: 140,
-                consonantMs: 230,
-                sourcePreutterMs: 180,
+                preutterMs: 80,
+                overlapMs: 20,
+                durationMs: 500,
+                consonantMs: 80,
+                sourcePreutterMs: 80,
                 sourceOverlapMs: 10);
             var largeOverlap = CreateRenderPhoneForTiming(
-                preutterMs: 180,
-                overlapMs: 80,
-                durationMs: 140,
-                consonantMs: 230,
-                sourcePreutterMs: 180,
-                sourceOverlapMs: 120);
+                preutterMs: 80,
+                overlapMs: 20,
+                durationMs: 500,
+                consonantMs: 80,
+                sourcePreutterMs: 80,
+                sourceOverlapMs: 80);
 
             double smallOverlapFixedMs = HifiPhraseFeatureBuilder.ResolveTargetFixedMs(smallOverlap);
             double largeOverlapFixedMs = HifiPhraseFeatureBuilder.ResolveTargetFixedMs(largeOverlap);
@@ -1378,7 +1385,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
 
             Assert.True(rawOtoPreutterSourceFrames > targetPreutterSourceFrames);
             Assert.Equal(0, map[0], 6);
-            Assert.True(map[1] < SourceFramesForMs(25), $"lead should not hard-skip at onset, got frame {map[1]:F3}");
+            Assert.True(map[1] <= linearStep + 0.001, $"lead should not add a skip boost at onset, got frame {map[1]:F3}");
             Assert.True(map[midLead] > linearMid + 2.0, $"lead should smoothly catch up inside preutter, got {map[midLead]:F3} vs linear {linearMid:F3}");
             Assert.True(maxStep <= linearStep * 1.30, $"lead catch-up step is too abrupt, max={maxStep:F3} linear={linearStep:F3}");
             Assert.Equal(rawOtoPreutterSourceFrames, map[targetLeadFrames], 1.0);

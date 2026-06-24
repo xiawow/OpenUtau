@@ -168,8 +168,14 @@ namespace OpenUtau.Core.HifiNeural {
         static IEnumerable<string> CandidateRoots(string start) {
             string? current = Path.GetFullPath(start);
             while (!string.IsNullOrWhiteSpace(current)) {
+                // Model discovery must not climb into a volume root and enumerate unrelated
+                // system directories. Packaged models are resolved from the application tree.
+                string? parent = Directory.GetParent(current)?.FullName;
+                if (string.IsNullOrWhiteSpace(parent)) {
+                    yield break;
+                }
                 yield return current;
-                current = Directory.GetParent(current)?.FullName;
+                current = parent;
             }
         }
 
@@ -185,17 +191,12 @@ namespace OpenUtau.Core.HifiNeural {
                     return;
                 }
                 candidates.Add(Path.Combine(dir, "model.onnx"));
-                candidates.AddRange(Directory.EnumerateFiles(dir, "*.onnx"));
-                foreach (var sub in Directory.EnumerateDirectories(dir, "pc_nsf_hifigan*")) {
-                    candidates.Add(Path.Combine(sub, "model.onnx"));
-                    candidates.AddRange(Directory.EnumerateFiles(sub, "*.onnx"));
-                    var config = Path.Combine(sub, "config.json");
-                    if (File.Exists(config)) {
-                        var json = JObject.Parse(File.ReadAllText(config));
-                        var configured = (string?)json["model"] ?? (string?)json["onnx_model"];
-                        if (!string.IsNullOrWhiteSpace(configured)) {
-                            candidates.Add(Path.Combine(sub, configured));
-                        }
+                var config = Path.Combine(dir, "config.json");
+                if (File.Exists(config)) {
+                    var json = JObject.Parse(File.ReadAllText(config));
+                    var configured = (string?)json["model"] ?? (string?)json["onnx_model"];
+                    if (!string.IsNullOrWhiteSpace(configured)) {
+                        candidates.Add(Path.Combine(dir, configured));
                     }
                 }
             } catch (Exception e) {

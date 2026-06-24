@@ -10,6 +10,7 @@ namespace OpenUtau.Classic {
 
         public VoicebankLoaderTest(ITestOutputHelper output) {
             this.output = output;
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
         }
 
         [Fact]
