@@ -8,6 +8,7 @@ using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using NAudio.Wave;
 using OpenUtau.Core.Format;
+using OpenUtau.Core.HifiNeural;
 using OpenUtau.Core.Render;
 using OpenUtau.Core.SignalChain;
 using OpenUtau.Core.Ustx;
@@ -19,9 +20,10 @@ namespace OpenUtau.Core.Neutrino {
         public const int tailTicks = 480;
 
         const int sampleRate = 48000;
+        const int outputSampleRate = 44100;
         const int hopSize = 480;
         const int numMelBins = 100;
-        const int cacheVersion = 6;
+        const int cacheVersion = 8;
         const int edgeSilenceSamples = 240;
         const int fadeInSamples = 240;
         const int fadeOutSamples = 240;
@@ -35,6 +37,9 @@ namespace OpenUtau.Core.Neutrino {
         static readonly HashSet<string> supportedExp = new HashSet<string>() {
             Format.Ustx.DYN,
             Format.Ustx.PITD,
+            Format.Ustx.BREC,
+            Format.Ustx.TENC,
+            Format.Ustx.VOIC,
         };
 
         static readonly object lockObj = new object();
@@ -70,29 +75,46 @@ namespace OpenUtau.Core.Neutrino {
                     progress.Complete(0, progressInfo);
 
                     var result = Layout(phrase);
-                    ulong hash = phrase.hash;
+                    ulong rawHash = phrase.GetHashExcludingPostEffects(
+                        Format.Ustx.DYN,
+                        Format.Ustx.BREC,
+                        Format.Ustx.TENC,
+                        Format.Ustx.VOIC);
+                    ulong processedHash = phrase.GetHashExcludingPostEffects(Format.Ustx.DYN);
+                    bool hasHnsepControls = HasHnsepParameterControls(phrase);
+                    string hnsepKey = hasHnsepControls
+                        ? HifiHnsepOnnx.CacheKeyOrDisabled()
+                        : "neutral";
+                    string separationCacheKey =
+                        $"neutrino-v{cacheVersion}-raw-{rawHash:x16}-hnsep-{hnsepKey}";
                     var wavPath = Path.Join(PathManager.Inst.CachePath,
-                        $"neutrino-v{cacheVersion}-{hash:x16}.wav");
+                        $"neutrino-v{cacheVersion}-{processedHash:x16}-hnsep{hnsepKey}.wav");
+                    var rawWavPath = Path.Join(PathManager.Inst.CachePath,
+                        $"neutrino-v{cacheVersion}-raw-{rawHash:x16}.wav");
                     phrase.AddCacheFile(wavPath);
+                    // Keep raw and separated-waveform caches across post-effect edits. Their
+                    // hashes contain the acoustic input and HNSEP model identity, so stale
+                    // entries cannot be reused for changed notes, timing, or models.
 
-                    if (File.Exists(wavPath)) {
-                        try {
-                            using (var waveStream = Wave.OpenFile(wavPath)) {
-                                result.samples = Wave.GetSamples(
-                                    waveStream.ToSampleProvider().ToMono(1, 0));
-                            }
-                        } catch (Exception e) {
-                            Log.Error(e, "Failed to read NEUTRINO cache, re-rendering");
-                        }
+                    if (TryLoadWaveCache(wavPath, "processed", out var cachedSamples)) {
+                        result.samples = cachedSamples;
                     }
 
                     if (result.samples == null) {
-                        result.samples = InvokeNeutrino(phrase, cancellation);
-                        if (result.samples != null) {
-                            var source = new WaveSource(0, 0, 0, 1);
-                            source.SetSamples(result.samples);
-                            WaveFileWriter.CreateWaveFile16(wavPath,
-                                new ExportAdapter(source).ToMono(1, 0));
+                        if (!TryLoadWaveCache(rawWavPath, "acoustic", out var rawSamples)) {
+                            rawSamples = InvokeNeutrino(phrase, cancellation);
+                            if (rawSamples != null) {
+                                SaveRawWaveCache(rawWavPath, rawSamples);
+                            }
+                        }
+                        if (rawSamples != null) {
+                            result.samples = ApplyHnsepParameters(
+                                phrase,
+                                result,
+                                rawSamples,
+                                separationCacheKey);
+                            Wave.CorrectSampleScale(result.samples);
+                            SaveProcessedWaveCache(wavPath, result.samples);
                         }
                     }
 
@@ -217,14 +239,98 @@ namespace OpenUtau.Core.Neutrino {
             var result = new float[totalSamples];
             Array.Copy(waveform, 0, result, headSamples, waveform.Length);
 
-            if (sampleRate != 44100) {
+            if (sampleRate != outputSampleRate) {
                 var signal = new NWaves.Signals.DiscreteSignal(sampleRate, result);
-                signal = NWaves.Operations.Operation.Resample(signal, 44100);
+                signal = NWaves.Operations.Operation.Resample(signal, outputSampleRate);
                 result = signal.Samples;
             }
 
-            Wave.CorrectSampleScale(result);
             return result;
+        }
+
+        static bool HasHnsepParameterControls(RenderPhrase phrase) {
+            return HasNonDefaultValue(phrase.breathiness, 0)
+                || HasNonDefaultValue(phrase.tension, 0)
+                || HasNonDefaultValue(phrase.voicing, 100);
+        }
+
+        static bool HasNonDefaultValue(float[] values, float defaultValue) {
+            if (values == null) {
+                return false;
+            }
+            foreach (float value in values) {
+                if (Math.Abs(value - defaultValue) > 0.5f) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        float[] ApplyHnsepParameters(
+            RenderPhrase phrase,
+            RenderResult layout,
+            float[] waveform,
+            string separationCacheKey) {
+            if (waveform.Length == 0) {
+                return waveform;
+            }
+
+            int frameCount = Math.Max(1,
+                (int)Math.Ceiling(waveform.Length / (double)HifiOnnxVocoder.HopSize));
+            double phraseStartMs = layout.positionMs - layout.leadingMs;
+            var parameterTrack = HifiParameterCurves.TrackForFrames(
+                phrase,
+                phraseStartMs,
+                startFrame: 0,
+                frameCount);
+            if (!parameterTrack.NeedsHnsep) {
+                return waveform;
+            }
+
+            var processed = HifiHnsepSourceProcessor.ApplyGeneratedWaveform(
+                waveform,
+                parameterTrack,
+                separationCacheKey,
+                out var report);
+            if (report.Applied) {
+                return processed;
+            } else {
+                Log.Warning(
+                    "NEUTRINO HNSEP parameters skipped brec={Brec:F2} voic={Voic:F2} tenc={Tenc:F2} reason={Reason}",
+                    parameterTrack.Average.Breathiness,
+                    parameterTrack.Average.Voicing,
+                    parameterTrack.Average.Tension,
+                    report.Reason);
+                return waveform;
+            }
+        }
+
+        static bool TryLoadWaveCache(string path, string cacheKind, out float[] samples) {
+            samples = null;
+            if (!File.Exists(path)) {
+                return false;
+            }
+            try {
+                using var waveStream = Wave.OpenFile(path);
+                samples = Wave.GetSamples(waveStream.ToSampleProvider().ToMono(1, 0));
+                return true;
+            } catch (Exception e) {
+                Log.Error(e, "Failed to read NEUTRINO {CacheKind} cache, re-rendering", cacheKind);
+                return false;
+            }
+        }
+
+        static void SaveRawWaveCache(string path, float[] samples) {
+            using var writer = new WaveFileWriter(
+                path,
+                WaveFormat.CreateIeeeFloatWaveFormat(outputSampleRate, 1));
+            writer.WriteSamples(samples, 0, samples.Length);
+        }
+
+        static void SaveProcessedWaveCache(string path, float[] samples) {
+            var source = new WaveSource(0, 0, 0, 1);
+            source.SetSamples(samples);
+            WaveFileWriter.CreateWaveFile16(path, new ExportAdapter(source).ToMono(1, 0));
         }
 
         (long[] phonemeIds, float[] scorePitchesHz, float[] scoreDurations, long[] phonePositions, double?[] manualBoundaries)

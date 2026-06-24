@@ -219,6 +219,62 @@ namespace OpenUtau.Core.HifiNeural {
         const int TensionNfft = HifiMelExtractor.Nfft;
         const int TensionHop = HifiOnnxVocoder.HopSize;
 
+        /// <summary>
+        /// Applies HNSEP-based harmonic/noise controls to a synthesized waveform.
+        /// This is shared by HIFI-NEURA source processing and neural renderers that
+        /// produce a waveform directly instead of sampling a source oto.
+        /// </summary>
+        public static float[] ApplyGeneratedWaveform(
+            float[] waveform,
+            HifiFrameParameterTrack parameterTrack,
+            string? separationCacheKey,
+            out HifiHnsepProcessingReport report) {
+            if (!parameterTrack.NeedsHnsep || waveform.Length == 0) {
+                report = new HifiHnsepProcessingReport(false, false, "neutral_parameters_or_empty_waveform");
+                return waveform;
+            }
+
+            try {
+                HifiHnsepResult? separated = null;
+                string? diskPath = null;
+                if (!string.IsNullOrWhiteSpace(separationCacheKey)) {
+                    diskPath = HifiHnsepDiskCache.GetPath(separationCacheKey);
+                    HifiHnsepDiskCache.TryLoad(diskPath, waveform.Length, out separated);
+                }
+                if (separated == null) {
+                    if (!HifiHnsepOnnx.TryCreate(out var model, out var diagnostic) || model == null) {
+                        report = new HifiHnsepProcessingReport(true, false, "no_model_or_separation_failed");
+                        Log.Debug(
+                            "HNSEP waveform parameters skipped brec={Brec:F2} voic={Voic:F2} tenc={Tenc:F2} reason={Reason}",
+                            parameterTrack.Average.Breathiness,
+                            parameterTrack.Average.Voicing,
+                            parameterTrack.Average.Tension,
+                            diagnostic);
+                        return waveform;
+                    }
+                    separated = model.Separate(waveform);
+                    if (diskPath != null) {
+                        HifiHnsepDiskCache.TrySave(diskPath, separated);
+                    }
+                }
+                if (separated.Harmonic.Length != waveform.Length) {
+                    report = new HifiHnsepProcessingReport(true, false, "waveform_length_mismatch");
+                    Log.Warning(
+                        "HNSEP waveform length mismatch source={SourceLength} harmonic={HarmonicLength}",
+                        waveform.Length,
+                        separated.Harmonic.Length);
+                    return waveform;
+                }
+
+                report = new HifiHnsepProcessingReport(true, true, "applied");
+                return RemixSeparatedWaveform(waveform, separated.Harmonic, parameterTrack);
+            } catch (Exception e) {
+                report = new HifiHnsepProcessingReport(true, false, "separation_failed");
+                Log.Warning(e, "HNSEP waveform separation failed");
+                return waveform;
+            }
+        }
+
         public static float[] Apply(
             RenderPhone phone,
             string sourcePath,
@@ -275,8 +331,7 @@ namespace OpenUtau.Core.HifiNeural {
                 return sourceSlice;
             }
 
-            float[] harmonic = PrepareHarmonicForRemix(separated.Harmonic, parameterTrack);
-            var output = RemixHarmonicNoiseWithSourceEnergy(sourceSlice, separated.Harmonic, harmonic, parameterTrack);
+            var output = RemixSeparatedWaveform(sourceSlice, separated.Harmonic, parameterTrack);
             Log.Debug(
                 "Hifi HNSEP applied phoneme={Phoneme} mode=source_frame_aware frames={Frames} brec_avg={Brec:F2} noise_gain_avg={NoiseGain:F3} voic_avg={Voic:F2} harmonic_gain_avg={HarmonicGain:F3} tenc_avg={Tenc:F2}",
                 phone.phoneme,
@@ -288,6 +343,18 @@ namespace OpenUtau.Core.HifiNeural {
                 parameters.Tension);
             report = new HifiHnsepProcessingReport(true, true, "applied");
             return output;
+        }
+
+        static float[] RemixSeparatedWaveform(
+            float[] waveform,
+            float[] originalHarmonic,
+            HifiFrameParameterTrack parameterTrack) {
+            float[] processedHarmonic = PrepareHarmonicForRemix(originalHarmonic, parameterTrack);
+            return RemixHarmonicNoiseWithSourceEnergy(
+                waveform,
+                originalHarmonic,
+                processedHarmonic,
+                parameterTrack);
         }
 
         internal static float[] PrepareHarmonicForRemix(float[] cachedHarmonic, double tension) {
