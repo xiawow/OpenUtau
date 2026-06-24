@@ -218,6 +218,87 @@ namespace OpenUtau.Core.HifiNeural {
     public static class HifiHnsepSourceProcessor {
         const int TensionNfft = HifiMelExtractor.Nfft;
         const int TensionHop = HifiOnnxVocoder.HopSize;
+        const int FormantCepstralLifter = 32;
+        const double GeneratedGenderSemitonesPerUnit = 0.06;
+        const double MaxFormantEnvelopeDelta = 1.5;
+        const double PitchGuidedFormantMinHz = 150.0;
+        const double PitchGuidedFormantMaxHz = 9000.0;
+        const double PitchGuidedEnvelopeSmoothingHz = 350.0;
+
+        /// <summary>
+        /// Applies HNSEP-based harmonic/noise controls to a synthesized waveform.
+        /// This is shared by HIFI-NEURA source processing and neural renderers that
+        /// produce a waveform directly instead of sampling a source oto.
+        /// </summary>
+        public static float[] ApplyGeneratedWaveform(
+            float[] waveform,
+            HifiFrameParameterTrack parameterTrack,
+            string? separationCacheKey,
+            out HifiHnsepProcessingReport report) {
+            return ApplyGeneratedWaveform(
+                waveform,
+                parameterTrack,
+                separationCacheKey,
+                pitchAtSourceSample: null,
+                out report);
+        }
+
+        public static float[] ApplyGeneratedWaveform(
+            float[] waveform,
+            HifiFrameParameterTrack parameterTrack,
+            string? separationCacheKey,
+            Func<double, int, double>? pitchAtSourceSample,
+            out HifiHnsepProcessingReport report) {
+            if ((!parameterTrack.NeedsHnsep && !parameterTrack.HasGender) || waveform.Length == 0) {
+                report = new HifiHnsepProcessingReport(false, false, "neutral_parameters_or_empty_waveform");
+                return waveform;
+            }
+
+            try {
+                HifiHnsepResult? separated = null;
+                string? diskPath = null;
+                if (!string.IsNullOrWhiteSpace(separationCacheKey)) {
+                    diskPath = HifiHnsepDiskCache.GetPath(separationCacheKey);
+                    HifiHnsepDiskCache.TryLoad(diskPath, waveform.Length, out separated);
+                }
+                if (separated == null) {
+                    if (!HifiHnsepOnnx.TryCreate(out var model, out var diagnostic) || model == null) {
+                        report = new HifiHnsepProcessingReport(true, false, "no_model_or_separation_failed");
+                        Log.Debug(
+                            "HNSEP waveform parameters skipped brec={Brec:F2} voic={Voic:F2} tenc={Tenc:F2} reason={Reason}",
+                            parameterTrack.Average.Breathiness,
+                            parameterTrack.Average.Voicing,
+                            parameterTrack.Average.Tension,
+                            diagnostic);
+                        return waveform;
+                    }
+                    separated = model.Separate(waveform);
+                    if (diskPath != null) {
+                        HifiHnsepDiskCache.TrySave(diskPath, separated);
+                    }
+                }
+                if (separated.Harmonic.Length != waveform.Length) {
+                    report = new HifiHnsepProcessingReport(true, false, "waveform_length_mismatch");
+                    Log.Warning(
+                        "HNSEP waveform length mismatch source={SourceLength} harmonic={HarmonicLength}",
+                        waveform.Length,
+                        separated.Harmonic.Length);
+                    return waveform;
+                }
+
+                report = new HifiHnsepProcessingReport(true, true, "applied");
+                return RemixSeparatedWaveform(
+                    waveform,
+                    separated.Harmonic,
+                    parameterTrack,
+                    applyGeneratedFormantShift: true,
+                    pitchAtSourceSample: pitchAtSourceSample);
+            } catch (Exception e) {
+                report = new HifiHnsepProcessingReport(true, false, "separation_failed");
+                Log.Warning(e, "HNSEP waveform separation failed");
+                return waveform;
+            }
+        }
 
         public static float[] Apply(
             RenderPhone phone,
@@ -275,8 +356,7 @@ namespace OpenUtau.Core.HifiNeural {
                 return sourceSlice;
             }
 
-            float[] harmonic = PrepareHarmonicForRemix(separated.Harmonic, parameterTrack);
-            var output = RemixHarmonicNoiseWithSourceEnergy(sourceSlice, separated.Harmonic, harmonic, parameterTrack);
+            var output = RemixSeparatedWaveform(sourceSlice, separated.Harmonic, parameterTrack);
             Log.Debug(
                 "Hifi HNSEP applied phoneme={Phoneme} mode=source_frame_aware frames={Frames} brec_avg={Brec:F2} noise_gain_avg={NoiseGain:F3} voic_avg={Voic:F2} harmonic_gain_avg={HarmonicGain:F3} tenc_avg={Tenc:F2}",
                 phone.phoneme,
@@ -290,6 +370,22 @@ namespace OpenUtau.Core.HifiNeural {
             return output;
         }
 
+        static float[] RemixSeparatedWaveform(
+            float[] waveform,
+            float[] originalHarmonic,
+            HifiFrameParameterTrack parameterTrack,
+            bool applyGeneratedFormantShift = false,
+            Func<double, int, double>? pitchAtSourceSample = null) {
+            float[] processedHarmonic = applyGeneratedFormantShift
+                ? PrepareGeneratedHarmonicForRemix(originalHarmonic, parameterTrack, pitchAtSourceSample)
+                : PrepareHarmonicForRemix(originalHarmonic, parameterTrack);
+            return RemixHarmonicNoiseWithSourceEnergy(
+                waveform,
+                originalHarmonic,
+                processedHarmonic,
+                parameterTrack);
+        }
+
         internal static float[] PrepareHarmonicForRemix(float[] cachedHarmonic, double tension) {
             return PrepareHarmonicForRemix(cachedHarmonic, HifiFrameParameterTrack.Constant(new HifiFrameParameterAverages(0, 0, tension, 100)));
         }
@@ -297,6 +393,30 @@ namespace OpenUtau.Core.HifiNeural {
         internal static float[] PrepareHarmonicForRemix(float[] cachedHarmonic, HifiFrameParameterTrack parameterTrack) {
             var harmonic = new float[cachedHarmonic.Length];
             Array.Copy(cachedHarmonic, harmonic, cachedHarmonic.Length);
+            if (parameterTrack.HasTension) {
+                ApplyTensionInPlace(harmonic, parameterTrack);
+            }
+            return harmonic;
+        }
+
+        // HIFI-NEURA changes GENC before vocoding. For a renderer with an already
+        // synthesized waveform, change only the HNSEP harmonic spectral envelope.
+        // Harmonic positions, F0, phase, and the separated noise component stay intact.
+        internal static float[] PrepareGeneratedHarmonicForRemix(
+            float[] cachedHarmonic,
+            HifiFrameParameterTrack parameterTrack) {
+            return PrepareGeneratedHarmonicForRemix(cachedHarmonic, parameterTrack, pitchAtSourceSample: null);
+        }
+
+        internal static float[] PrepareGeneratedHarmonicForRemix(
+            float[] cachedHarmonic,
+            HifiFrameParameterTrack parameterTrack,
+            Func<double, int, double>? pitchAtSourceSample) {
+            var harmonic = new float[cachedHarmonic.Length];
+            Array.Copy(cachedHarmonic, harmonic, cachedHarmonic.Length);
+            if (parameterTrack.HasGender) {
+                harmonic = ApplyGeneratedFormantShift(harmonic, parameterTrack, pitchAtSourceSample);
+            }
             if (parameterTrack.HasTension) {
                 ApplyTensionInPlace(harmonic, parameterTrack);
             }
@@ -427,6 +547,364 @@ namespace OpenUtau.Core.HifiNeural {
                 }
             }
             return result;
+        }
+
+        static float[] ApplyGeneratedFormantShift(
+            float[] wave,
+            HifiFrameParameterTrack parameterTrack,
+            Func<double, int, double>? pitchAtSourceSample) {
+            return pitchAtSourceSample == null
+                ? ApplyGeneratedCepstralFormantShift(wave, parameterTrack)
+                : ApplyGeneratedPitchGuidedFormantShift(wave, parameterTrack, pitchAtSourceSample);
+        }
+
+        static float[] ApplyGeneratedPitchGuidedFormantShift(
+            float[] wave,
+            HifiFrameParameterTrack parameterTrack,
+            Func<double, int, double> pitchAtSourceSample) {
+            if (!parameterTrack.HasGender || wave.Length <= 1) {
+                var copy = new float[wave.Length];
+                Array.Copy(wave, copy, wave.Length);
+                return copy;
+            }
+
+            int originalLength = wave.Length;
+            int centerPad = TensionNfft / 2;
+            int paddedLength = centerPad * 2 + Math.Max(1, originalLength);
+            int frames = Math.Max(1, 1 + Math.Max(0, paddedLength - TensionNfft) / TensionHop);
+            int requiredLength = (frames - 1) * TensionHop + TensionNfft;
+            var padded = new float[requiredLength];
+            Array.Copy(wave, 0, padded, centerPad, wave.Length);
+
+            var output = new double[requiredLength];
+            var windowSum = new double[requiredLength];
+            var fft = new Complex[TensionNfft];
+            int bins = TensionNfft / 2 + 1;
+            var envelope = new double[bins];
+            var smoothedEnvelope = new double[bins];
+            var partialBins = new double[bins];
+            var partialLogMagnitudes = new double[bins];
+            var window = TensionWindow.Value;
+
+            for (int frame = 0; frame < frames; frame++) {
+                Array.Clear(fft, 0, fft.Length);
+                int start = frame * TensionHop;
+                for (int i = 0; i < TensionNfft; i++) {
+                    fft[i] = new Complex(padded[start + i] * window[i], 0);
+                }
+                ForwardFft(fft, inverse: false);
+
+                double frameCenterSample = Math.Clamp(
+                    start + TensionNfft * 0.5 - centerPad,
+                    0,
+                    Math.Max(0, originalLength - 1));
+                double gender = parameterTrack.GenderAtSourceSample(frameCenterSample, originalLength);
+                double f0 = pitchAtSourceSample(frameCenterSample, originalLength);
+                if (Math.Abs(gender) > 0.5 && f0 >= 55.0 && f0 <= 1000.0) {
+                    double semitones = Math.Clamp(gender, -100.0, 100.0) * GeneratedGenderSemitonesPerUnit;
+                    double factor = Math.Pow(2.0, semitones / 12.0);
+                    ApplyPitchGuidedFormantEnvelopeShiftInPlace(
+                        fft,
+                        bins,
+                        f0,
+                        factor,
+                        envelope,
+                        smoothedEnvelope,
+                        partialBins,
+                        partialLogMagnitudes);
+                }
+
+                ForwardFft(fft, inverse: true);
+                for (int i = 0; i < TensionNfft; i++) {
+                    double w = window[i];
+                    output[start + i] += fft[i].Real * w;
+                    windowSum[start + i] += w * w;
+                }
+            }
+
+            var result = new float[originalLength];
+            for (int i = 0; i < result.Length; i++) {
+                int src = i + centerPad;
+                double value = output[src];
+                if (windowSum[src] > 1e-9) {
+                    value /= windowSum[src];
+                }
+                result[i] = (float)value;
+            }
+            return result;
+        }
+
+        static void ApplyPitchGuidedFormantEnvelopeShiftInPlace(
+            Complex[] spectrum,
+            int bins,
+            double f0,
+            double factor,
+            double[] envelope,
+            double[] smoothedEnvelope,
+            double[] partialBins,
+            double[] partialLogMagnitudes) {
+            double binHz = HifiMelExtractor.SampleRate / (double)TensionNfft;
+            double fundamentalBin = f0 / binHz;
+            if (fundamentalBin < 1.0) {
+                return;
+            }
+
+            int searchRadius = Math.Clamp((int)Math.Round(fundamentalBin * 0.18), 1, 5);
+            int partialCount = 0;
+            int maxBin = Math.Min(bins - 1, (int)Math.Floor(PitchGuidedFormantMaxHz / binHz));
+            for (int harmonic = 1; ; harmonic++) {
+                double expectedBin = harmonic * fundamentalBin;
+                if (expectedBin >= maxBin) {
+                    break;
+                }
+                int center = (int)Math.Round(expectedBin);
+                int first = Math.Max(1, center - searchRadius);
+                int last = Math.Min(maxBin, center + searchRadius);
+                double peakMagnitude = 0;
+                for (int bin = first; bin <= last; bin++) {
+                    double magnitude = spectrum[bin].Magnitude;
+                    if (magnitude > peakMagnitude) {
+                        peakMagnitude = magnitude;
+                    }
+                }
+                if (peakMagnitude > 1e-9) {
+                    // Keep positions on the actual F0 grid. Search only supplies a
+                    // robust amplitude estimate and must not make adjacent partials
+                    // collapse onto the same FFT-bin position at low F0.
+                    partialBins[partialCount] = expectedBin;
+                    partialLogMagnitudes[partialCount] = Math.Log(peakMagnitude);
+                    partialCount++;
+                }
+            }
+            if (partialCount < 3) {
+                return;
+            }
+
+            for (int bin = 0; bin < bins; bin++) {
+                envelope[bin] = InterpolatePartialEnvelope(
+                    partialBins,
+                    partialLogMagnitudes,
+                    partialCount,
+                    bin);
+            }
+            int smoothingRadius = Math.Max(1, (int)Math.Round(PitchGuidedEnvelopeSmoothingHz / binHz * 0.5));
+            SmoothLogEnvelope(envelope, smoothedEnvelope, smoothingRadius);
+
+            int minBin = Math.Max(1, (int)Math.Ceiling(PitchGuidedFormantMinHz / binHz));
+            double originalPower = 0;
+            double shiftedPower = 0;
+            for (int bin = 0; bin < bins; bin++) {
+                double originalMagnitude = Math.Max(spectrum[bin].Magnitude, 1e-9);
+                double magnitude = originalMagnitude;
+                if (bin >= minBin && bin <= maxBin) {
+                    double shiftedEnvelope = InterpolateEnvelope(envelope, bin / factor);
+                    double delta = Math.Clamp(
+                        shiftedEnvelope - envelope[bin],
+                        -MaxFormantEnvelopeDelta,
+                        MaxFormantEnvelopeDelta);
+                    double harmonicMask = HarmonicMask(bin, fundamentalBin);
+                    magnitude = Math.Exp(Math.Log(originalMagnitude) + delta * harmonicMask);
+                }
+
+                double weight = bin == 0 || bin == bins - 1 ? 1.0 : 2.0;
+                originalPower += originalMagnitude * originalMagnitude * weight;
+                shiftedPower += magnitude * magnitude * weight;
+                if (bin == 0 || bin == bins - 1) {
+                    spectrum[bin] = new Complex(spectrum[bin].Real < 0 ? -magnitude : magnitude, 0);
+                } else {
+                    spectrum[bin] = Complex.FromPolarCoordinates(
+                        magnitude,
+                        Math.Atan2(spectrum[bin].Imaginary, spectrum[bin].Real));
+                }
+            }
+
+            if (originalPower > 1e-12 && shiftedPower > 1e-12) {
+                double compensation = Math.Clamp(Math.Sqrt(originalPower / shiftedPower), 0.5, 2.0);
+                for (int bin = 0; bin < bins; bin++) {
+                    spectrum[bin] *= compensation;
+                }
+            }
+            for (int bin = 1; bin < bins - 1; bin++) {
+                spectrum[spectrum.Length - bin] = Complex.Conjugate(spectrum[bin]);
+            }
+        }
+
+        static double InterpolatePartialEnvelope(
+            double[] partialBins,
+            double[] partialLogMagnitudes,
+            int count,
+            double bin) {
+            if (bin <= partialBins[0]) {
+                return partialLogMagnitudes[0];
+            }
+            for (int i = 1; i < count; i++) {
+                if (bin <= partialBins[i]) {
+                    double width = Math.Max(1e-9, partialBins[i] - partialBins[i - 1]);
+                    double alpha = (bin - partialBins[i - 1]) / width;
+                    return partialLogMagnitudes[i - 1]
+                        + (partialLogMagnitudes[i] - partialLogMagnitudes[i - 1]) * alpha;
+                }
+            }
+            return partialLogMagnitudes[count - 1];
+        }
+
+        static void SmoothLogEnvelope(double[] values, double[] scratch, int radius) {
+            for (int i = 0; i < values.Length; i++) {
+                int first = Math.Max(0, i - radius);
+                int last = Math.Min(values.Length - 1, i + radius);
+                double sum = 0;
+                for (int j = first; j <= last; j++) {
+                    sum += values[j];
+                }
+                scratch[i] = sum / (last - first + 1);
+            }
+            Array.Copy(scratch, values, values.Length);
+        }
+
+        static double HarmonicMask(int bin, double fundamentalBin) {
+            double nearestHarmonic = Math.Round(bin / fundamentalBin) * fundamentalBin;
+            double sigma = Math.Clamp(fundamentalBin * 0.22, 1.5, 5.0);
+            double normalizedDistance = (bin - nearestHarmonic) / sigma;
+            return Math.Exp(-0.5 * normalizedDistance * normalizedDistance);
+        }
+
+        static float[] ApplyGeneratedCepstralFormantShift(float[] wave, HifiFrameParameterTrack parameterTrack) {
+            if (!parameterTrack.HasGender || wave.Length <= 1) {
+                var copy = new float[wave.Length];
+                Array.Copy(wave, copy, wave.Length);
+                return copy;
+            }
+
+            int originalLength = wave.Length;
+            int centerPad = TensionNfft / 2;
+            int paddedLength = centerPad * 2 + Math.Max(1, originalLength);
+            int frames = Math.Max(1, 1 + Math.Max(0, paddedLength - TensionNfft) / TensionHop);
+            int requiredLength = (frames - 1) * TensionHop + TensionNfft;
+            var padded = new float[requiredLength];
+            Array.Copy(wave, 0, padded, centerPad, wave.Length);
+
+            var output = new double[requiredLength];
+            var windowSum = new double[requiredLength];
+            var fft = new Complex[TensionNfft];
+            var cepstrum = new Complex[TensionNfft];
+            var logMagnitudes = new double[TensionNfft / 2 + 1];
+            var envelope = new double[TensionNfft / 2 + 1];
+            var window = TensionWindow.Value;
+            int bins = TensionNfft / 2 + 1;
+
+            for (int frame = 0; frame < frames; frame++) {
+                Array.Clear(fft, 0, fft.Length);
+                int start = frame * TensionHop;
+                for (int i = 0; i < TensionNfft; i++) {
+                    fft[i] = new Complex(padded[start + i] * window[i], 0);
+                }
+                ForwardFft(fft, inverse: false);
+
+                double frameCenterSample = Math.Clamp(
+                    start + TensionNfft * 0.5 - centerPad,
+                    0,
+                    Math.Max(0, originalLength - 1));
+                double gender = parameterTrack.GenderAtSourceSample(frameCenterSample, originalLength);
+                if (Math.Abs(gender) > 0.5) {
+                    double semitones = Math.Clamp(gender, -100.0, 100.0) * GeneratedGenderSemitonesPerUnit;
+                    double factor = Math.Pow(2.0, semitones / 12.0);
+                    ApplyFormantEnvelopeShiftInPlace(
+                        fft,
+                        bins,
+                        factor,
+                        cepstrum,
+                        logMagnitudes,
+                        envelope);
+                }
+
+                ForwardFft(fft, inverse: true);
+                for (int i = 0; i < TensionNfft; i++) {
+                    double w = window[i];
+                    output[start + i] += fft[i].Real * w;
+                    windowSum[start + i] += w * w;
+                }
+            }
+
+            var result = new float[originalLength];
+            for (int i = 0; i < result.Length; i++) {
+                int src = i + centerPad;
+                double value = output[src];
+                if (windowSum[src] > 1e-9) {
+                    value /= windowSum[src];
+                }
+                result[i] = (float)value;
+            }
+            return result;
+        }
+
+        static void ApplyFormantEnvelopeShiftInPlace(
+            Complex[] spectrum,
+            int bins,
+            double factor,
+            Complex[] cepstrum,
+            double[] logMagnitudes,
+            double[] envelope) {
+            Array.Clear(cepstrum, 0, cepstrum.Length);
+            double originalPower = 0;
+            for (int k = 0; k < bins; k++) {
+                double magnitude = Math.Max(spectrum[k].Magnitude, 1e-9);
+                logMagnitudes[k] = Math.Log(magnitude);
+                cepstrum[k] = new Complex(logMagnitudes[k], 0);
+                if (k > 0 && k < bins - 1) {
+                    cepstrum[cepstrum.Length - k] = cepstrum[k];
+                }
+                originalPower += magnitude * magnitude * (k == 0 || k == bins - 1 ? 1.0 : 2.0);
+            }
+
+            // Low-quefrency liftering produces a spectral envelope while discarding
+            // individual harmonics. Shifting this envelope changes formants only.
+            ForwardFft(cepstrum, inverse: true);
+            for (int k = FormantCepstralLifter + 1; k < cepstrum.Length - FormantCepstralLifter; k++) {
+                cepstrum[k] = Complex.Zero;
+            }
+            ForwardFft(cepstrum, inverse: false);
+            for (int k = 0; k < bins; k++) {
+                envelope[k] = cepstrum[k].Real;
+            }
+
+            double shiftedPower = 0;
+            for (int k = 0; k < bins; k++) {
+                double shiftedEnvelope = InterpolateEnvelope(envelope, k / factor);
+                double delta = Math.Clamp(shiftedEnvelope - envelope[k], -MaxFormantEnvelopeDelta, MaxFormantEnvelopeDelta);
+                double magnitude = Math.Exp(logMagnitudes[k] + delta);
+                shiftedPower += magnitude * magnitude * (k == 0 || k == bins - 1 ? 1.0 : 2.0);
+
+                if (k == 0 || k == bins - 1) {
+                    spectrum[k] = new Complex(spectrum[k].Real < 0 ? -magnitude : magnitude, 0);
+                } else {
+                    spectrum[k] = Complex.FromPolarCoordinates(magnitude, Math.Atan2(spectrum[k].Imaginary, spectrum[k].Real));
+                }
+            }
+
+            // Keep frame energy stable before overlap-add. This prevents GENC from
+            // acting like a gain effect when a resonance moves across the spectrum.
+            if (originalPower > 1e-12 && shiftedPower > 1e-12) {
+                double compensation = Math.Clamp(Math.Sqrt(originalPower / shiftedPower), 0.5, 2.0);
+                for (int k = 0; k < bins; k++) {
+                    spectrum[k] *= compensation;
+                }
+            }
+            for (int k = 1; k < bins - 1; k++) {
+                spectrum[spectrum.Length - k] = Complex.Conjugate(spectrum[k]);
+            }
+        }
+
+        static double InterpolateEnvelope(double[] values, double index) {
+            if (index <= 0 || values.Length == 1) {
+                return values[0];
+            }
+            if (index >= values.Length - 1) {
+                return values[^1];
+            }
+            int left = (int)Math.Floor(index);
+            int right = left + 1;
+            double alpha = index - left;
+            return values[left] + (values[right] - values[left]) * alpha;
         }
 
         static readonly Lazy<float[]> TensionWindow = new(() => {

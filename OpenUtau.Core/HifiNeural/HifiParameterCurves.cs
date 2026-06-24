@@ -27,6 +27,7 @@ namespace OpenUtau.Core.HifiNeural {
         public int FrameCount => Gender.Length;
         public HifiFrameParameterAverages Average { get; }
         public bool NeedsHnsep { get; }
+        public bool HasGender { get; }
         public bool HasTension { get; }
         public string CacheKey { get; }
 
@@ -51,6 +52,7 @@ namespace OpenUtau.Core.HifiNeural {
             double tensionSum = 0;
             double voicingSum = 0;
             bool needsHnsep = false;
+            bool hasGender = false;
             bool hasTension = false;
             for (int i = 0; i < count; i++) {
                 genderSum += Gender[i];
@@ -60,6 +62,7 @@ namespace OpenUtau.Core.HifiNeural {
                 needsHnsep |= Math.Abs(Breathiness[i]) > 0.5
                     || Math.Abs(Tension[i]) > 0.5
                     || Math.Abs(Voicing[i] - 100.0) > 0.5;
+                hasGender |= Math.Abs(Gender[i]) > 0.5;
                 hasTension |= Math.Abs(Tension[i]) > 0.5;
             }
             double scale = 1.0 / count;
@@ -69,6 +72,7 @@ namespace OpenUtau.Core.HifiNeural {
                 tensionSum * scale,
                 voicingSum * scale);
             NeedsHnsep = needsHnsep;
+            HasGender = hasGender;
             HasTension = hasTension;
             CacheKey = BuildCacheKey();
         }
@@ -95,6 +99,10 @@ namespace OpenUtau.Core.HifiNeural {
 
         public double TensionAtSourceSample(double sourceSample, int sourceSamples) {
             return Sample(Tension, SourceSampleToTargetFrameIndex(sourceSample, sourceSamples));
+        }
+
+        public double GenderAtSourceSample(double sourceSample, int sourceSamples) {
+            return Sample(Gender, SourceSampleToTargetFrameIndex(sourceSample, sourceSamples));
         }
 
         public double BreathNoiseGainAtSourceSample(double sourceSample, int sourceSamples) {

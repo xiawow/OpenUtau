@@ -258,6 +258,7 @@ namespace OpenUtau.Core.Render {
         public readonly string wavtool;
 
         private List<string> cacheFiles = new List<string>();
+        private static readonly ISet<string> noExcludedPostEffects = new HashSet<string>();
 
         internal RenderPhrase(UProject project, UTrack track, UVoicePart part, IEnumerable<UPhoneme> phonemes) {
             var uNotes = new List<UNote> { phonemes.First().Parent };
@@ -554,7 +555,19 @@ namespace OpenUtau.Core.Render {
             return SampleCurve(curve, start, length, convert);
         }
 
+        // Lets renderers reuse expensive synthesis while applying selected curves afterwards.
+        public ulong GetHashExcludingPostEffects(params string[] abbreviations) {
+            var excluded = new HashSet<string>(
+                abbreviations.Where(abbr => !string.IsNullOrWhiteSpace(abbr)),
+                StringComparer.OrdinalIgnoreCase);
+            return Hash(postEffect: true, excluded);
+        }
+
         private ulong Hash(bool postEffect) {
+            return Hash(postEffect, noExcludedPostEffects);
+        }
+
+        private ulong Hash(bool postEffect, ISet<string> excludedPostEffects) {
             using (var stream = new MemoryStream()) {
                 using (var writer = new BinaryWriter(stream)) {
                     writer.Write(singer.Id);
@@ -565,7 +578,7 @@ namespace OpenUtau.Core.Render {
                         writer.Write(phone.hash);
                     }
                     if (postEffect) {
-                        foreach (var array in new float[][] { pitches, dynamics, gender, breathiness, toneShift, tension, voicing }) {
+                        void WriteArray(float[] array) {
                             if (array == null) {
                                 writer.Write("null");
                             } else {
@@ -574,10 +587,26 @@ namespace OpenUtau.Core.Render {
                                 }
                             }
                         }
+
+                        WriteArray(pitches);
+                        foreach (var (abbr, array) in new[] {
+                            (Format.Ustx.DYN, dynamics),
+                            (Format.Ustx.GENC, gender),
+                            (Format.Ustx.BREC, breathiness),
+                            (Format.Ustx.SHFC, toneShift),
+                            (Format.Ustx.TENC, tension),
+                            (Format.Ustx.VOIC, voicing),
+                        }) {
+                            if (!excludedPostEffects.Contains(abbr)) {
+                                WriteArray(array);
+                            }
+                        }
                         foreach(var curve in curves) {
-                            writer.Write(curve.Item1);
-                            foreach(var v in curve.Item2) {
-                                writer.Write(v);
+                            if (!excludedPostEffects.Contains(curve.Item1)) {
+                                writer.Write(curve.Item1);
+                                foreach(var v in curve.Item2) {
+                                    writer.Write(v);
+                                }
                             }
                         }
                     }
