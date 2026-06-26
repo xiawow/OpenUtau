@@ -1,0 +1,188 @@
+name: HIFI-NEURA Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag and app version, for example 0.0.0-hifineura.1"
+        required: true
+        default: "0.0.0-hifineura.1"
+        type: string
+      create_release:
+        description: "Create or update a GitHub Release"
+        required: true
+        default: true
+        type: boolean
+      prerelease:
+        description: "Mark the GitHub Release as a prerelease"
+        required: true
+        default: false
+        type: boolean
+      draft:
+        description: "Create the GitHub Release as a draft"
+        required: true
+        default: false
+        type: boolean
+      model_release_tag:
+        description: "Release tag that provides hifineura-models.zip"
+        required: true
+        default: "hifi-neura-models-v1"
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  RID: win-x64
+  ARCH: x64
+  PUBLISH_DIR: bin/win-x64
+  PACKAGE_ROOT: HIFI-NEURA-win-x64-${{ inputs.version }}
+  ARTIFACT_ZIP: HIFI-NEURA-win-x64-${{ inputs.version }}.zip
+
+jobs:
+  windows-x64:
+    name: Build HIFI-NEURA Windows x64
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install NSIS
+        run: choco install nsis --version=3.11 --no-progress -y
+
+      - name: Restore
+        run: dotnet restore OpenUtau/OpenUtau.csproj -r $env:RID
+
+      - name: Remove stale ReadyToRun intermediate output
+        shell: pwsh
+        run: |
+          $r2r = "OpenUtau/obj/Release/net8.0-windows/$env:RID/R2R"
+          if (Test-Path $r2r) {
+            Remove-Item $r2r -Recurse -Force
+          }
+
+      - name: Publish
+        run: >
+          dotnet publish OpenUtau/OpenUtau.csproj
+          -c Release
+          -r $env:RID
+          --self-contained false
+          -p:UseSharedCompilation=false
+          -p:Version=${{ inputs.version }}
+          -o $env:PUBLISH_DIR
+          -clp:ErrorsOnly
+
+      - name: Add DirectML runtime
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.15.4" -OutFile "Microsoft.AI.DirectML.nupkg"
+          New-Item -ItemType Directory -Path "Microsoft.AI.DirectML" | Out-Null
+          tar -xf "Microsoft.AI.DirectML.nupkg" -C "Microsoft.AI.DirectML"
+          Copy-Item "Microsoft.AI.DirectML/bin/x64-win/DirectML.dll" "$env:PUBLISH_DIR/DirectML.dll" -Force
+
+      - name: Download HIFI-NEURA models
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release download "${{ inputs.model_release_tag }}" `
+            --repo "${{ github.repository }}" `
+            --pattern "hifineura-models.zip" `
+            --dir ".model-assets" `
+            --clobber
+          Expand-Archive -LiteralPath ".model-assets/hifineura-models.zip" -DestinationPath "$env:PUBLISH_DIR" -Force
+
+      - name: Validate package dependencies
+        shell: pwsh
+        run: |
+          $sharp = [Reflection.AssemblyName]::GetAssemblyName((Resolve-Path "$env:PUBLISH_DIR/SharpCompress.dll")).FullName
+          if ($sharp -notlike "SharpCompress, Version=0.48.1.0,*") {
+            throw "Unexpected SharpCompress assembly: $sharp"
+          }
+          $required = @(
+            "$env:PUBLISH_DIR/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02/model.onnx",
+            "$env:PUBLISH_DIR/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02/config.json",
+            "$env:PUBLISH_DIR/hnsep/vr/model.onnx",
+            "$env:PUBLISH_DIR/hnsep/vr/model_dml.onnx",
+            "$env:PUBLISH_DIR/hnsep/vr/config.yaml"
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path $path)) {
+              throw "Missing package dependency: $path"
+            }
+          }
+
+      - name: Add default fork preferences
+        shell: pwsh
+        run: |
+          @{
+            Beta = $false
+            HifiNeuralHnsepRunner = "dml"
+          } | ConvertTo-Json | Set-Content -Path "$env:PUBLISH_DIR/prefs-default.json" -Encoding UTF8
+
+      - name: Create zip package
+        shell: pwsh
+        run: |
+          if (Test-Path "$env:PACKAGE_ROOT") {
+            Remove-Item "$env:PACKAGE_ROOT" -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path "$env:PACKAGE_ROOT" | Out-Null
+          Copy-Item "$env:PUBLISH_DIR/*" "$env:PACKAGE_ROOT" -Recurse -Force
+          if (Test-Path "$env:ARTIFACT_ZIP") {
+            Remove-Item "$env:ARTIFACT_ZIP" -Force
+          }
+          Compress-Archive -LiteralPath "$env:PACKAGE_ROOT" -DestinationPath "$env:ARTIFACT_ZIP" -Force
+
+      - name: Download VC Redist
+        run: Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "vc_redist.x64.exe"
+
+      - name: Create installer
+        uses: joncloud/makensis-action@v4.1
+        with:
+          script-file: OpenUtau.nsi
+          arguments: "-DPRODUCT_VERSION=${{ inputs.version }} -DARCH=${{ env.ARCH }}"
+
+      - name: Rename installer
+        shell: pwsh
+        run: |
+          if (Test-Path "OpenUtau-win-x64.exe") {
+            Move-Item "OpenUtau-win-x64.exe" "HIFI-NEURA-win-x64-${{ inputs.version }}.exe" -Force
+          }
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: HIFI-NEURA-win-x64
+          path: |
+            HIFI-NEURA-win-x64-${{ inputs.version }}.zip
+            HIFI-NEURA-win-x64-${{ inputs.version }}.exe
+
+      - name: Create GitHub Release
+        if: ${{ inputs.create_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: HIFI-NEURA ${{ inputs.version }}
+          prerelease: ${{ inputs.prerelease }}
+          draft: ${{ inputs.draft }}
+          fail_on_unmatched_files: true
+          make_latest: true
+          files: |
+            HIFI-NEURA-win-x64-${{ inputs.version }}.zip
+            HIFI-NEURA-win-x64-${{ inputs.version }}.exe
+          body: |
+            HIFI-NEURA Windows x64 build from `master`.
+
+            Included:
+            - HIFI-NEURA renderer
+            - NEUTRINO renderer
+            - PC-NSF-HiFiGAN model
+            - HNSEP CPU and DirectML models
