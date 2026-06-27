@@ -98,23 +98,30 @@ namespace OpenUtau.Core.Render {
 
         public static void ApplyDynamics(RenderPhrase phrase, RenderResult result) {
             const int interval = 5;
-            if (phrase.dynamics == null) {
+            if (phrase.dynamics == null || phrase.dynamics.Length == 0 || result.samples == null || result.samples.Length == 0) {
                 return;
             }
             int startTick = phrase.position - phrase.leading;
             double startMs = result.positionMs - result.leadingMs;
             int startSample = 0;
+            float lastGain = phrase.dynamics[0];
             for (int i = 0; i < phrase.dynamics.Length; ++i) {
                 int endTick = startTick + interval;
                 double endMs = phrase.timeAxis.TickPosToMsPos(endTick);
-                int endSample = Math.Min((int)((endMs - startMs) / 1000 * 44100), result.samples.Length);
+                int endSample = Math.Clamp((int)((endMs - startMs) / 1000 * 44100), startSample, result.samples.Length);
                 float a = phrase.dynamics[i];
                 float b = (i + 1) == phrase.dynamics.Length ? phrase.dynamics[i] : phrase.dynamics[i + 1];
+                int span = endSample - startSample;
                 for (int j = startSample; j < endSample; ++j) {
-                    result.samples[j] *= a + (b - a) * (j - startSample) / (endSample - startSample);
+                    float t = span <= 1 ? 1f : (j - startSample) / (float)(span - 1);
+                    result.samples[j] *= a + (b - a) * t;
                 }
+                lastGain = b;
                 startTick = endTick;
                 startSample = endSample;
+            }
+            for (int j = startSample; j < result.samples.Length; ++j) {
+                result.samples[j] *= lastGain;
             }
         }
 
