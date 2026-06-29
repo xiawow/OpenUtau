@@ -171,6 +171,30 @@ namespace OpenUtau.Core.Neutrino {
             }
         }
 
+        public void EnsurePitchSession() {
+            if (pitchSession != null) return;
+            lock (sessionLock) {
+                EnsureModelPaths();
+                pitchSession ??= LoadSession(pitchModelPath, OnnxRunnerChoice.Default);
+            }
+        }
+
+        public void EnsureMelspecSession() {
+            if (melspecSession != null) return;
+            lock (sessionLock) {
+                EnsureModelPaths();
+                melspecSession ??= LoadSession(melspecModelPath, OnnxRunnerChoice.Default);
+            }
+        }
+
+        public void EnsureVocoderSession() {
+            if (vocoderSession != null) return;
+            lock (sessionLock) {
+                EnsureModelPaths();
+                vocoderSession ??= LoadSession(vocoderModelPath, OnnxRunnerChoice.Default);
+            }
+        }
+
         void EnsureModelPaths() {
             if (!string.IsNullOrEmpty(timingModelPath)
                 && !string.IsNullOrEmpty(pitchModelPath)
@@ -207,17 +231,17 @@ namespace OpenUtau.Core.Neutrino {
         }
 
         public float[] RunPitch(IReadOnlyCollection<NamedOnnxValue> inputs) {
-            EnsureSessions();
+            EnsurePitchSession();
             return RunWithCpuFallback(ref pitchSession, pitchModelPath, inputs, "pitch");
         }
 
         public float[] RunMelspec(IReadOnlyCollection<NamedOnnxValue> inputs) {
-            EnsureSessions();
+            EnsureMelspecSession();
             return RunWithCpuFallback(ref melspecSession, melspecModelPath, inputs, "melspec");
         }
 
         public float[] RunVocoder(IReadOnlyCollection<NamedOnnxValue> inputs) {
-            EnsureSessions();
+            EnsureVocoderSession();
             return RunWithCpuFallback(ref vocoderSession, vocoderModelPath, inputs, "vocoder");
         }
 
