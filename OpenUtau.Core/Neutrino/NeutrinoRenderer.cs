@@ -25,6 +25,7 @@ namespace OpenUtau.Core.Neutrino {
         const int pitchInterval = 5;
         const int numMelBins = 100;
         const int cacheVersion = 12;
+        const int postEffectCacheVersion = 2;
         const int pitchCacheMagic = 0x4E465032; // NFP2
         const int edgeSilenceSamples = 240;
         const int fadeInSamples = 240;
@@ -41,6 +42,7 @@ namespace OpenUtau.Core.Neutrino {
             Format.Ustx.PITD,
             Format.Ustx.GENC,
             Format.Ustx.BREC,
+            Format.Ustx.SHFC,
             Format.Ustx.TENC,
             Format.Ustx.VOIC,
         };
@@ -153,9 +155,10 @@ namespace OpenUtau.Core.Neutrino {
                         Format.Ustx.DYN,
                         Format.Ustx.GENC,
                         Format.Ustx.BREC,
+                        Format.Ustx.SHFC,
                         Format.Ustx.TENC,
                         Format.Ustx.VOIC);
-                    ulong processedHash = phrase.GetHashExcludingPostEffects(Format.Ustx.DYN);
+                    ulong processedHash = phrase.GetHashExcludingPostEffects(Format.Ustx.DYN, Format.Ustx.SHFC);
                     bool hasHnsepControls = HasHnsepParameterControls(phrase);
                     string hnsepKey = hasHnsepControls
                         ? HifiHnsepOnnx.CacheKeyOrDisabled()
@@ -163,7 +166,7 @@ namespace OpenUtau.Core.Neutrino {
                     string separationCacheKey =
                         $"neutrino-v{cacheVersion}-raw-{rawHash:x16}-hnsep-{hnsepKey}";
                     var wavPath = Path.Join(PathManager.Inst.CachePath,
-                        $"neutrino-v{cacheVersion}-{processedHash:x16}-hnsep{hnsepKey}.wav");
+                        $"neutrino-v{cacheVersion}-post{postEffectCacheVersion}-{processedHash:x16}-hnsep{hnsepKey}.wav");
                     var rawWavPath = Path.Join(PathManager.Inst.CachePath,
                         $"neutrino-v{cacheVersion}-raw-{rawHash:x16}.wav");
                     var rawPitchPath = Path.ChangeExtension(rawWavPath, ".f0");
@@ -410,13 +413,17 @@ namespace OpenUtau.Core.Neutrino {
             }
 
             int numPhones = timing.PhonemeIds.Length;
+            var styleShiftCentsByFrame = BuildStyleShiftCentsByFrame(phrase, timing);
+            var scorePitchesHz = ApplyStyleShiftToScorePitches(
+                timing.ScorePitchesHz,
+                BuildPhoneStyleShiftCents(timing, styleShiftCentsByFrame));
             var pitchInputs = new List<NamedOnnxValue> {
                 NamedOnnxValue.CreateFromTensor("electron",
                     new DenseTensor<long>(timing.PhonemeIds, new[] { 1, numPhones })),
                 NamedOnnxValue.CreateFromTensor("muon",
                     new DenseTensor<float>(timing.TimingDurations, new[] { 1, numPhones })),
                 NamedOnnxValue.CreateFromTensor("tau",
-                    new DenseTensor<float>(timing.ScorePitchesHz, new[] { 1, numPhones })),
+                    new DenseTensor<float>(scorePitchesHz, new[] { 1, numPhones })),
                 NamedOnnxValue.CreateFromTensor("selectron",
                     new DenseTensor<float>(timing.ScoreDurations, new[] { 1, numPhones })),
                 NamedOnnxValue.CreateFromTensor("smuon",
@@ -427,8 +434,70 @@ namespace OpenUtau.Core.Neutrino {
 
             var singer = phrase.singer as NeutrinoSinger;
             var f0 = FitLength(singer.RunPitch(pitchInputs), timing.TotalFrames);
+            ApplyInverseStyleShiftToF0(f0, styleShiftCentsByFrame);
             ClampF0(f0);
             return f0;
+        }
+
+        float[] BuildStyleShiftCentsByFrame(RenderPhrase phrase, NeutrinoTimingContext timing) {
+            if (!HasNonDefaultValue(phrase.toneShift, 0)) {
+                return Array.Empty<float>();
+            }
+            var result = new float[timing.TotalFrames];
+            for (int frame = 0; frame < result.Length; frame++) {
+                result[frame] = GetFrameToneShiftCents(phrase, frame);
+            }
+            return result;
+        }
+
+        float[] BuildPhoneStyleShiftCents(NeutrinoTimingContext timing, float[] styleShiftCentsByFrame) {
+            if (styleShiftCentsByFrame.Length == 0) {
+                return Array.Empty<float>();
+            }
+            int numPhones = timing.PhonemeIds.Length;
+            var sums = new double[numPhones];
+            var counts = new int[numPhones];
+            int frameCount = Math.Min(styleShiftCentsByFrame.Length, timing.FramePhonemeMap.Length);
+            for (int frame = 0; frame < frameCount; frame++) {
+                int phone = Math.Clamp((int)timing.FramePhonemeMap[frame] - 1, 0, numPhones - 1);
+                sums[phone] += styleShiftCentsByFrame[frame];
+                counts[phone]++;
+            }
+            var result = new float[numPhones];
+            for (int phone = 0; phone < result.Length; phone++) {
+                if (counts[phone] > 0) {
+                    result[phone] = (float)(sums[phone] / counts[phone]);
+                }
+            }
+            return result;
+        }
+
+        float[] ApplyStyleShiftToScorePitches(float[] scorePitchesHz, float[] phoneStyleShiftCents) {
+            if (phoneStyleShiftCents.Length == 0) {
+                return scorePitchesHz;
+            }
+            var result = (float[])scorePitchesHz.Clone();
+            for (int i = 0; i < result.Length && i < phoneStyleShiftCents.Length; i++) {
+                if (result[i] > 0 && Math.Abs(phoneStyleShiftCents[i]) > 0.5f) {
+                    result[i] *= StyleShiftFactor(phoneStyleShiftCents[i]);
+                }
+            }
+            return result;
+        }
+
+        void ApplyInverseStyleShiftToF0(float[] f0, float[] styleShiftCentsByFrame) {
+            if (styleShiftCentsByFrame.Length == 0) {
+                return;
+            }
+            for (int frame = 0; frame < f0.Length && frame < styleShiftCentsByFrame.Length; frame++) {
+                if (f0[frame] > 0 && Math.Abs(styleShiftCentsByFrame[frame]) > 0.5f) {
+                    f0[frame] /= StyleShiftFactor(styleShiftCentsByFrame[frame]);
+                }
+            }
+        }
+
+        static float StyleShiftFactor(float cents) {
+            return (float)Math.Pow(2.0, cents / 1200.0);
         }
 
         float[] BuildEditorF0(RenderPhrase phrase, NeutrinoTimingContext timing) {
@@ -463,6 +532,15 @@ namespace OpenUtau.Core.Neutrino {
         int GetFramePitchIndex(RenderPhrase phrase, int frame) {
             int ticks = GetFramePitchTick(phrase, frame);
             return Math.Clamp((int)(ticks / (double)pitchInterval), 0, phrase.pitches.Length - 1);
+        }
+
+        float GetFrameToneShiftCents(RenderPhrase phrase, int frame) {
+            if (phrase.toneShift == null || phrase.toneShift.Length == 0) {
+                return 0;
+            }
+            int ticks = GetFramePitchTick(phrase, frame);
+            int index = Math.Clamp((int)(ticks / (double)pitchInterval), 0, phrase.toneShift.Length - 1);
+            return phrase.toneShift[index];
         }
 
         int GetFramePitchTick(RenderPhrase phrase, int frame) {
