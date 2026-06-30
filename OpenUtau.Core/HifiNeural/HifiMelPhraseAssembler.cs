@@ -22,6 +22,8 @@ namespace OpenUtau.Core.HifiNeural {
         const int SampleRate = HifiMelExtractor.SampleRate;
         const double RestGapToleranceMs = 8.0;
         const double RestReleaseGuardMs = 18.0;
+        const double IsolatedLeadCatchupMaxMs = 80.0;
+        const double IsolatedLeadCatchupPreutterRatio = 0.55;
 
         readonly HifiMelExtractor melExtractor = HifiMelExtractor.Shared;
 
@@ -160,7 +162,8 @@ namespace OpenUtau.Core.HifiNeural {
             float[] localTargetF0 = SliceTargetF0(targetF0, startFrame, frameCount);
             float[] fullSourceSamples = LoadSourceFile(phone.oto.File, sourceCache);
             float[] sourceSamples = SliceWithOto(fullSourceSamples, phone);
-            var sourceParameterTrack = BuildHnsepSourceParameterTrack(parameterTrack, sourceSamples.Length, frameCount, phone);
+            double autoLeadCatchupMs = ResolveIsolatedLeadCatchupMs(phrase, phone, phoneIndex);
+            var sourceParameterTrack = BuildHnsepSourceParameterTrack(parameterTrack, sourceSamples.Length, frameCount, phone, autoLeadCatchupMs);
             sourceSamples = HifiHnsepSourceProcessor.Apply(phone, phone.oto.File, fullSourceSamples, sourceSamples, sourceParameterTrack, hnsepCache, out var hnsepReport);
             float[,] sourceMel = LoadSliceMel(phone, sourceSamples, sliceMelCache, parameterTrack, sourceParameterTrack);
             int sourceFrames = sourceMel.GetLength(1);
@@ -181,7 +184,8 @@ namespace OpenUtau.Core.HifiNeural {
                 localTargetF0,
                 sourceSamples,
                 parameters.GenderKeyShiftSemitones,
-                phone.hifiSustainMode);
+                phone.hifiSustainMode,
+                autoLeadCatchupMs);
             var diagnostic = HifiClickDiagnostic.BuildPhoneFeatureDiagnostic(
                 phoneIndex,
                 phone.phoneme,
@@ -215,7 +219,8 @@ namespace OpenUtau.Core.HifiNeural {
             HifiFrameParameterTrack targetTrack,
             int sourceSampleCount,
             int targetFrameCount,
-            RenderPhone phone) {
+            RenderPhone phone,
+            double autoLeadCatchupMs) {
             if (!targetTrack.NeedsHnsep || sourceSampleCount <= 0 || targetFrameCount <= 1) {
                 return targetTrack;
             }
@@ -226,7 +231,8 @@ namespace OpenUtau.Core.HifiNeural {
             var targetToSourceFrameMap = HifiPhraseFeatureBuilder.BuildPhoneTargetToSourceFrameMap(
                 sourceFrameCount,
                 targetFrameCount,
-                phone);
+                phone,
+                autoLeadCatchupMs);
             if (targetToSourceFrameMap.Length != targetTrack.FrameCount) {
                 return targetTrack;
             }
@@ -238,6 +244,47 @@ namespace OpenUtau.Core.HifiNeural {
                 sourceFrameCount,
                 sourceSampleCount);
             return sourceTrack;
+        }
+
+        static double ResolveIsolatedLeadCatchupMs(RenderPhrase phrase, RenderPhone phone, int phoneIndex) {
+            if (phone.oto == null || phone.oto.Preutter <= 0) {
+                return 0;
+            }
+            double sourcePreutterMs = Math.Max(0, phone.oto.Preutter);
+            double sourceOverlapMs = Math.Max(0, phone.oto.Overlap);
+            if (sourcePreutterMs <= HifiF0Builder.FrameMs || sourceOverlapMs <= HifiF0Builder.FrameMs * 0.25) {
+                return 0;
+            }
+            if (HasPreviousAcousticOverlap(phrase, phone, phoneIndex)) {
+                return 0;
+            }
+
+            double catchupMs = Math.Min(sourceOverlapMs, sourcePreutterMs * IsolatedLeadCatchupPreutterRatio);
+            catchupMs = Math.Min(catchupMs, IsolatedLeadCatchupMaxMs);
+            if (catchupMs <= HifiF0Builder.FrameMs * 0.5) {
+                return 0;
+            }
+            Log.Debug(
+                "HifiMelPhraseAssembler isolated_lead_catchup phone_index={Index} phoneme={Phoneme} source_preutter_ms={PreutterMs:F2} source_overlap_ms={OverlapMs:F2} catchup_ms={CatchupMs:F2}",
+                phoneIndex,
+                phone.phoneme,
+                sourcePreutterMs,
+                sourceOverlapMs,
+                catchupMs);
+            return catchupMs;
+        }
+
+        static bool HasPreviousAcousticOverlap(RenderPhrase phrase, RenderPhone phone, int phoneIndex) {
+            if (phoneIndex <= 0 || phoneIndex >= phrase.phones.Length) {
+                return false;
+            }
+            var previous = phrase.phones[phoneIndex - 1];
+            double noteGapMs = phone.positionMs - previous.endMs;
+            if (noteGapMs > RestGapToleranceMs) {
+                return false;
+            }
+            double targetOverlapMs = Math.Max(0, phone.overlapMs);
+            return targetOverlapMs > HifiF0Builder.FrameMs * 0.5;
         }
 
         internal static int ResolveSegmentEndFrame(
