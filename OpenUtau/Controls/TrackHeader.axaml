@@ -96,6 +96,7 @@
           <Setter Property="ToolTip.Tip" Value="{Binding Location}"/>
           <Setter Property="Height" Value="{Binding Height}"/>
           <Setter Property="IsEnabled" Value="{Binding IsEnabled}"/>
+          <Setter Property="StaysOpenOnClick" Value="{Binding StaysOpenOnClick}"/>
         </Style>
       </ContextMenu.Styles>
     </ContextMenu>
