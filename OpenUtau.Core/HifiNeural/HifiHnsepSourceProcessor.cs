@@ -219,7 +219,7 @@ namespace OpenUtau.Core.HifiNeural {
         const int TensionNfft = HifiMelExtractor.Nfft;
         const int TensionHop = HifiOnnxVocoder.HopSize;
         const int FormantCepstralLifter = 32;
-        const double GeneratedGenderSemitonesPerUnit = 0.06;
+        const double GeneratedGenderSemitonesPerUnit = 0.12;
         const double MaxFormantEnvelopeDelta = 1.5;
         const double PitchGuidedFormantMinHz = 150.0;
         const double PitchGuidedFormantMaxHz = 9000.0;
