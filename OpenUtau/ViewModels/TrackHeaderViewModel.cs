@@ -1,10 +1,12 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Reactive;
 using System.Reactive.Linq;
 using Avalonia;
+using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
@@ -25,7 +27,7 @@ namespace OpenUtau.App.ViewModels {
         public Phonemizer Phonemizer => track.Phonemizer;
         public string PhonemizerTag => track.Phonemizer.Tag;
         public Core.Render.IRenderer Renderer => track.RendererSettings.Renderer;
-        public IReadOnlyList<MenuItemViewModel>? SingerMenuItems { get; set; }
+        public ObservableCollection<MenuItemViewModel> SingerMenuItems { get; } = new ObservableCollection<MenuItemViewModel>();
         public ReactiveCommand<USinger, Unit> SelectSingerCommand { get; }
         public IReadOnlyList<MenuItemViewModel>? PhonemizerMenuItems { get; set; }
         public ReactiveCommand<PhonemizerFactory, Unit> SelectPhonemizerCommand { get; }
@@ -46,10 +48,18 @@ namespace OpenUtau.App.ViewModels {
         [Reactive] public bool IsRendererVisible { get; set; }
         [Reactive] public bool MixFxEnabled { get; set; }
         [Reactive] public IBrush HeaderBorderBrush { get; set; } = ThemeManager.NeutralAccentBrushSemi;
+        [Reactive] public string SingerSearchText { get; set; } = string.Empty;
 
         public ViewModelActivator Activator { get; }
 
         private readonly UTrack track;
+        private readonly MenuItemViewModel singerSearchSeparator = new MenuItemViewModel() {
+            Header = "-",
+            Height = 1
+        };
+        private MenuItemViewModel? singerSearchMenuItem;
+        private TextBox? singerSearchBox;
+        private bool updatingSingerSearchBox;
 
         // Parameterless constructor for Avalonia preview only.
         public TrackHeaderViewModel() {
@@ -60,6 +70,8 @@ namespace OpenUtau.App.ViewModels {
             track = new UTrack(DocManager.Inst.Project);
             this.WhenAnyValue(x => x.IsSelected)
                 .Subscribe(_ => RefreshSelectionStyle());
+            this.WhenAnyValue(x => x.SingerSearchText)
+                .Subscribe(_ => RebuildSingerMenuItems());
             RefreshSelectionStyle();
         }
 
@@ -158,6 +170,8 @@ namespace OpenUtau.App.ViewModels {
                 });
             this.WhenAnyValue(x => x.IsSelected)
                 .Subscribe(_ => RefreshSelectionStyle());
+            this.WhenAnyValue(x => x.SingerSearchText)
+                .Subscribe(_ => RebuildSingerMenuItems());
 
             RefreshAvatar();
             RefreshSelectionStyle();
@@ -273,6 +287,46 @@ namespace OpenUtau.App.ViewModels {
             };
         }
 
+        private MenuItemViewModel GetSingerSearchMenuItem() {
+            if (singerSearchMenuItem == null) {
+                singerSearchBox = new TextBox() {
+                    Watermark = "Search singer...",
+                    MinWidth = 260,
+                    Margin = new Thickness(4, 2),
+                    Focusable = true,
+                };
+                singerSearchBox.TextChanged += (_, _) => {
+                    if (!updatingSingerSearchBox) {
+                        SingerSearchText = singerSearchBox.Text ?? string.Empty;
+                    }
+                };
+                singerSearchMenuItem = new MenuItemViewModel() {
+                    Header = singerSearchBox,
+                    Height = 36,
+                    StaysOpenOnClick = true,
+                };
+            }
+            if (singerSearchBox != null && singerSearchBox.Text != SingerSearchText) {
+                updatingSingerSearchBox = true;
+                singerSearchBox.Text = SingerSearchText;
+                updatingSingerSearchBox = false;
+            }
+            return singerSearchMenuItem;
+        }
+
+        private bool MatchesSingerSearch(USinger singer, string searchText) {
+            return ContainsSearchText(singer.LocalizedName, searchText)
+                || ContainsSearchText(singer.Name, searchText)
+                || ContainsSearchText(singer.Id, searchText)
+                || ContainsSearchText(singer.Author, searchText)
+                || ContainsSearchText(singer.Location, searchText);
+        }
+
+        private static bool ContainsSearchText(string? value, string searchText) {
+            return !string.IsNullOrEmpty(value)
+                && value.IndexOf(searchText, StringComparison.CurrentCultureIgnoreCase) >= 0;
+        }
+
         private bool TryChangePhonemizer(UTrack targetTrack, string phonemizerName) {
             try {
                 var factory = PhonemizerFactory.Get(phonemizerName);
@@ -288,27 +342,55 @@ namespace OpenUtau.App.ViewModels {
         }
 
         public void RefreshSingers() {
-            var items = new List<MenuItemViewModel>();
+            if (!string.IsNullOrEmpty(SingerSearchText)) {
+                SingerSearchText = string.Empty;
+            } else {
+                RebuildSingerMenuItems();
+            }
+        }
+
+        private void RebuildSingerMenuItems() {
+            var items = new List<MenuItemViewModel>() {
+                GetSingerSearchMenuItem(),
+                singerSearchSeparator,
+            };
             if (SingerManager.Inst.Singers.Count > 0) {
-                items.AddRange(Preferences.Default.RecentSingers
-                .Select(id => SingerManager.Inst.Singers.Values.FirstOrDefault(singer => singer.Id == id))
-                .OfType<USinger>()
-                .Select(CreateSingerMenuItem));
-                items.Add(new MenuItemViewModel() {
-                    Header = ThemeManager.GetString("tracks.favorite") + " ...",
-                    Items = Preferences.Default.FavoriteSingers
-                        .Select(id => SingerManager.Inst.Singers.Values.FirstOrDefault(singer => singer.Id == id))
-                        .OfType<USinger>()
+                if (!string.IsNullOrWhiteSpace(SingerSearchText)) {
+                    var matches = SingerManager.Inst.Singers.Values
+                        .Where(singer => MatchesSingerSearch(singer, SingerSearchText))
                         .LocalizedOrderBy(singer => singer.LocalizedName)
-                        .Select(CreateSingerMenuItem).ToArray(),
-                });
-                var keys = SingerManager.Inst.SingerGroups.Keys.OrderBy(k => k);
-                foreach (var key in keys) {
+                        .Take(80)
+                        .Select(CreateSingerMenuItem)
+                        .ToList();
+                    if (matches.Count == 0) {
+                        items.Add(new MenuItemViewModel() {
+                            Header = ThemeManager.GetString("tracks.nosinger"),
+                            IsEnabled = false
+                        });
+                    } else {
+                        items.AddRange(matches);
+                    }
+                } else {
+                    items.AddRange(Preferences.Default.RecentSingers
+                    .Select(id => SingerManager.Inst.Singers.Values.FirstOrDefault(singer => singer.Id == id))
+                    .OfType<USinger>()
+                    .Select(CreateSingerMenuItem));
                     items.Add(new MenuItemViewModel() {
-                        Header = $"{key} ...",
-                        Items = SingerManager.Inst.SingerGroups[key]
+                        Header = ThemeManager.GetString("tracks.favorite") + " ...",
+                        Items = Preferences.Default.FavoriteSingers
+                            .Select(id => SingerManager.Inst.Singers.Values.FirstOrDefault(singer => singer.Id == id))
+                            .OfType<USinger>()
+                            .LocalizedOrderBy(singer => singer.LocalizedName)
                             .Select(CreateSingerMenuItem).ToArray(),
                     });
+                    var keys = SingerManager.Inst.SingerGroups.Keys.OrderBy(k => k);
+                    foreach (var key in keys) {
+                        items.Add(new MenuItemViewModel() {
+                            Header = $"{key} ...",
+                            Items = SingerManager.Inst.SingerGroups[key]
+                                .Select(CreateSingerMenuItem).ToArray(),
+                        });
+                    }
                 }
             } else {
                 items.Add(new MenuItemViewModel() {
@@ -391,8 +473,25 @@ namespace OpenUtau.App.ViewModels {
                 })
             });
 
-            SingerMenuItems = items;
-            this.RaisePropertyChanged(nameof(SingerMenuItems));
+            ApplySingerMenuItems(items);
+        }
+
+        private void ApplySingerMenuItems(List<MenuItemViewModel> items) {
+            if (SingerMenuItems.Count >= 2
+                && ReferenceEquals(SingerMenuItems[0], singerSearchMenuItem)
+                && ReferenceEquals(SingerMenuItems[1], singerSearchSeparator)) {
+                while (SingerMenuItems.Count > 2) {
+                    SingerMenuItems.RemoveAt(2);
+                }
+                foreach (var item in items.Skip(2)) {
+                    SingerMenuItems.Add(item);
+                }
+            } else {
+                SingerMenuItems.Clear();
+                foreach (var item in items) {
+                    SingerMenuItems.Add(item);
+                }
+            }
         }
 
         public string GetPhonemizerGroupHeader(string key) {

@@ -8,7 +8,7 @@ using OpenUtau.Core.Ustx;
 
 namespace OpenUtau.App.ViewModels {
     public class MenuItemViewModel {
-        public string? Header { get; set; }
+        public object? Header { get; set; }
         public ICommand? Command { get; set; }
         public object? CommandParameter { get; set; }
         public IList<MenuItemViewModel>? Items { get; set; }
@@ -16,6 +16,7 @@ namespace OpenUtau.App.ViewModels {
         public bool IsChecked { get; set; } = false;
         public KeyGesture? InputGesture { get; set; }
         public bool IsEnabled { get; set; } = true;
+        public bool StaysOpenOnClick { get; set; } = false;
         public object? Icon { get; set; }
 
         public MenuItemViewModel() { }
