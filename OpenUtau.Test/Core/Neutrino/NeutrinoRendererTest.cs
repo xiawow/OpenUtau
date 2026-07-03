@@ -21,6 +21,13 @@ namespace OpenUtau.Core.Test.Neutrino {
         }
 
         [Fact]
+        public void RenderPhoneKeepsPanelConsonantN() {
+            Assert.Equal(new[] { "N" }, NeutrinoPhoneme.KanaToPhonemes("n"));
+            Assert.Equal(new[] { "n" }, NeutrinoPhoneme.RenderPhoneToPhonemes("n"));
+            Assert.Equal(new[] { "n", "o" }, NeutrinoPhoneme.RenderPhoneToPhonemes("no"));
+        }
+
+        [Fact]
         public void NeutralHnsepParametersLeaveWaveformUntouched() {
             var waveform = new[] { 0.1f, -0.2f, 0.3f };
             var parameters = HifiFrameParameterTrack.Constant(

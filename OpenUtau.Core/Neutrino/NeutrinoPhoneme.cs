@@ -300,6 +300,17 @@ namespace OpenUtau.Core.Neutrino {
             return KanaToPhonemes(kana).Select(p => GetPhonemeId(p)).ToArray();
         }
 
+        public static string[] RenderPhoneToPhonemes(string phone) {
+            phone = phone?.Trim();
+            if (string.IsNullOrEmpty(phone)) {
+                return new[] { "pau" };
+            }
+            if (IsKnownPhoneme(phone)) {
+                return new[] { NormalizePhoneme(phone) };
+            }
+            return KanaToPhonemes(phone);
+        }
+
         public static bool IsVowelPhoneme(string phoneme) {
             phoneme = NormalizePhoneme(phoneme?.Trim() ?? string.Empty);
             return phoneme == "a"

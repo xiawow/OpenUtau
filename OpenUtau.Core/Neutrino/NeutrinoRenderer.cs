@@ -652,7 +652,7 @@ namespace OpenUtau.Core.Neutrino {
             int positionInNote = 0;
 
             foreach (var phone in phrase.phones) {
-                var phoneStrs = NeutrinoPhoneme.KanaToPhonemes(phone.phoneme);
+                var phoneStrs = NeutrinoPhoneme.RenderPhoneToPhonemes(phone.phoneme);
                 int noteIndex = Math.Clamp(phone.noteIndex, 0, phrase.notes.Length - 1);
                 if (noteIndex != lastNoteIndex) {
                     positionInNote = 0;
