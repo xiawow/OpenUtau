@@ -54,16 +54,17 @@ namespace OpenUtau.Core.Neutrino {
             var lyric = string.IsNullOrWhiteSpace(notes[0].phoneticHint)
                 ? notes[0].lyric ?? "R"
                 : notes[0].phoneticHint;
-            var phonemes = NeutrinoPhoneme.KanaToPhonemes(lyric);
+            var phonemes = LyricToPhonemes(lyric);
             var positions = DistributePhonemes(phonemes, notes);
+            var resultPhonemes = phonemes
+                .Select((phoneme, index) => new Phoneme {
+                    index = index,
+                    phoneme = phoneme,
+                    position = positions[index],
+                })
+                .ToArray();
             return new Result {
-                phonemes = phonemes
-                    .Select((phoneme, index) => new Phoneme {
-                        index = index,
-                        phoneme = phoneme,
-                        position = positions[index],
-                    })
-                    .ToArray(),
+                phonemes = PostProcessPhonemePositions(resultPhonemes, notes),
             };
         }
 
@@ -90,13 +91,14 @@ namespace OpenUtau.Core.Neutrino {
             var scoreDurations = new List<float>();
             var phonePositions = new List<long>();
             var phoneRefs = new List<TimedPhoneRef>();
-            var groupedPhonemes = noteGroups.ToDictionary(group => group[0].position, _ => new List<Phoneme>());
+            var groupsByPosition = noteGroups.ToDictionary(group => group[0].position);
+            var groupedPhonemes = groupsByPosition.ToDictionary(pair => pair.Key, _ => new List<Phoneme>());
 
             foreach (var group in noteGroups) {
                 var lyric = string.IsNullOrWhiteSpace(group[0].phoneticHint)
                     ? group[0].lyric ?? "R"
                     : group[0].phoneticHint;
-                var phonemes = NeutrinoPhoneme.KanaToPhonemes(lyric);
+                var phonemes = LyricToPhonemes(lyric);
                 float notePitchHz = phonemes.All(p => NeutrinoPhoneme.GetPhonemeId(p) == NeutrinoPhoneme.PAU)
                     ? 0
                     : (float)NeutrinoConfig.MidiToFreq(group[0].tone);
@@ -149,9 +151,19 @@ namespace OpenUtau.Core.Neutrino {
 
             foreach (var pair in groupedPhonemes) {
                 if (pair.Value.Count > 0) {
-                    timedPhonemes[pair.Key] = pair.Value.ToArray();
+                    timedPhonemes[pair.Key] = PostProcessPhonemePositions(
+                        pair.Value.ToArray(),
+                        groupsByPosition[pair.Key]);
                 }
             }
+        }
+
+        protected virtual string[] LyricToPhonemes(string lyric) {
+            return NeutrinoPhoneme.KanaToPhonemes(lyric);
+        }
+
+        protected virtual Phoneme[] PostProcessPhonemePositions(Phoneme[] phonemes, Note[] notes) {
+            return phonemes;
         }
 
         double GetGroupDurationMs(Note[] notes) {
