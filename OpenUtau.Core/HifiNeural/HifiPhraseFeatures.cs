@@ -40,6 +40,8 @@ namespace OpenUtau.Core.HifiNeural {
         public int ConsonantFrameCount { get; init; }
         public double SourceSkipOverMs { get; init; }
         public int SourceStartOffsetFrames { get; init; }
+        /// <summary>Estimated recording pitch of the oto slice (Hz), 0 when unvoiced/unknown.</summary>
+        public double SourceF0Hz { get; init; }
         public HifiPhoneParameterMetadata Parameters { get; init; } = new HifiPhoneParameterMetadata();
     }
 

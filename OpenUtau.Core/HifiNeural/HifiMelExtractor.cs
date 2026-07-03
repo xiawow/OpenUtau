@@ -123,7 +123,12 @@ namespace OpenUtau.Core.HifiNeural {
                 return new float[NMels, 0];
             }
 
-            var padded = ReflectPad(samples, (WinSize - OriginHopSize) / 2, (WinSize - OriginHopSize + 1) / 2);
+            int leftPad = (WinSize - OriginHopSize) / 2;
+            // Inputs shorter than one hop would otherwise leave padded shorter than one FFT
+            // window while EstimateFrameCount still reports a frame, so the first frame read
+            // runs past the buffer. Extend the right pad so at least one full window exists.
+            int rightPad = Math.Max((WinSize - OriginHopSize + 1) / 2, WinSize - leftPad - samples.Length);
+            var padded = ReflectPad(samples, leftPad, rightPad);
             int frames = EstimateFrameCount(samples.Length);
             var mel = new float[NMels, frames];
 
@@ -409,6 +414,14 @@ namespace OpenUtau.Core.HifiNeural {
                 mel = minLogMel + Math.Log(hz / minLogHz) / logStep;
             }
             return mel;
+        }
+
+        /// <summary>Center frequency (Hz) of a mel filterbank bin, matching BuildMelFilterbank.</summary>
+        public static double MelBinCenterHz(int bin) {
+            double minMel = HzToMel(FMin);
+            double maxMel = HzToMel(FMax);
+            double mel = minMel + (maxMel - minMel) * (bin + 1) / (NMels + 1);
+            return MelToHz(mel);
         }
 
         static double MelToHz(double mel) {

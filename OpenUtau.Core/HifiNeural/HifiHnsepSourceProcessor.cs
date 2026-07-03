@@ -10,7 +10,13 @@ using Serilog;
 
 namespace OpenUtau.Core.HifiNeural {
     public sealed class HifiHnsepSourceCache {
-        readonly Dictionary<string, HifiHnsepResult?> cache = new(StringComparer.OrdinalIgnoreCase);
+        // Files up to this length are separated whole and cached once; every oto slice of the file
+        // then crops from the same result. This removes the repeated slice+context inference for
+        // VCV banks (many entries per wav) and the inconsistency between per-slice separations.
+        const int MaxWholeFileSamples = HifiMelExtractor.SampleRate * 60;
+
+        readonly Dictionary<string, HifiHnsepResult?> fileCache = new(StringComparer.OrdinalIgnoreCase);
+        readonly Dictionary<string, HifiHnsepResult?> sliceCache = new(StringComparer.OrdinalIgnoreCase);
         HifiHnsepOnnx? model;
         bool modelResolved;
         bool missingLogged;
@@ -48,6 +54,51 @@ namespace OpenUtau.Core.HifiNeural {
                 return false;
             }
 
+            return fullSamples.Length <= MaxWholeFileSamples
+                ? TryGetSliceFromWholeFile(sourcePath, fullSamples, sliceStart, sliceLength, out result)
+                : TryGetSliceWithContext(sourcePath, fullSamples, sliceStart, sliceLength, out result);
+        }
+
+        bool TryGetSliceFromWholeFile(string sourcePath, float[] fullSamples, int sliceStart, int sliceLength, out HifiHnsepResult result) {
+            result = null!;
+            string key = FileCacheKey(sourcePath, fullSamples.Length);
+            if (!fileCache.TryGetValue(key, out var cached)) {
+                string diskPath = HifiHnsepDiskCache.GetPath(key);
+                if (!HifiHnsepDiskCache.TryLoad(diskPath, fullSamples.Length, out cached)) {
+                    try {
+                        cached = model!.Separate(fullSamples);
+                        HifiHnsepDiskCache.TrySave(diskPath, cached);
+                        Log.Debug(
+                            "Hifi HNSEP file separated source={Source} source_samples={SourceSamples}",
+                            sourcePath,
+                            fullSamples.Length);
+                    } catch (Exception e) {
+                        Log.Warning(e, "Hifi HNSEP separation failed source={Source}", sourcePath);
+                        lastFailureReason = "separation_failed:" + e.GetType().Name + ":" + e.Message;
+                        cached = null;
+                    }
+                }
+                fileCache[key] = cached;
+            }
+            if (cached == null || cached.Harmonic.Length != fullSamples.Length) {
+                if (cached != null) {
+                    lastFailureReason = $"separation_length_mismatch:file={fullSamples.Length}:harmonic={cached.Harmonic.Length}";
+                } else if (string.IsNullOrWhiteSpace(lastFailureReason)) {
+                    lastFailureReason = "separation_failed";
+                }
+                return false;
+            }
+            var harmonic = new float[sliceLength];
+            Array.Copy(cached.Harmonic, sliceStart, harmonic, 0, sliceLength);
+            lastFailureReason = string.Empty;
+            result = new HifiHnsepResult { Harmonic = harmonic };
+            return true;
+        }
+
+        // Oversized files (well beyond normal voicebank samples) keep the slice+context path so a
+        // single phone never triggers a minutes-long separation.
+        bool TryGetSliceWithContext(string sourcePath, float[] fullSamples, int sliceStart, int sliceLength, out HifiHnsepResult result) {
+            result = null!;
             int contextSamples = HifiMelExtractor.SampleRate / 4;
             int contextStart = Math.Max(0, sliceStart - contextSamples);
             int contextEnd = Math.Min(fullSamples.Length, sliceStart + sliceLength + contextSamples);
@@ -58,13 +109,13 @@ namespace OpenUtau.Core.HifiNeural {
             }
 
             string key = SliceCacheKey(sourcePath, fullSamples.Length, sliceStart, sliceLength, contextStart, contextLength);
-            if (!cache.TryGetValue(key, out var cached)) {
+            if (!sliceCache.TryGetValue(key, out var cached)) {
                 string diskPath = HifiHnsepDiskCache.GetPath(key);
                 if (!HifiHnsepDiskCache.TryLoad(diskPath, sliceLength, out cached)) {
                     try {
                         var context = new float[contextLength];
                         Array.Copy(fullSamples, contextStart, context, 0, contextLength);
-                        var separatedContext = model.Separate(context);
+                        var separatedContext = model!.Separate(context);
                         int cropStart = sliceStart - contextStart;
                         if (separatedContext.Harmonic.Length < cropStart + sliceLength) {
                             throw new InvalidDataException(
@@ -86,7 +137,7 @@ namespace OpenUtau.Core.HifiNeural {
                         cached = null;
                     }
                 }
-                cache[key] = cached;
+                sliceCache[key] = cached;
             }
             if (cached == null || cached.Harmonic.Length != sliceLength) {
                 if (cached != null) {
@@ -99,6 +150,25 @@ namespace OpenUtau.Core.HifiNeural {
             lastFailureReason = string.Empty;
             result = cached;
             return true;
+        }
+
+        static string FileCacheKey(string sourcePath, int sourceLength) {
+            try {
+                var info = new FileInfo(sourcePath);
+                return string.Concat(
+                    info.FullName,
+                    "|", info.Length,
+                    "|", info.LastWriteTimeUtc.Ticks,
+                    "|source_samples=", sourceLength,
+                    "|whole_file",
+                    "|", HifiHnsepOnnx.CacheKeyOrDisabled());
+            } catch {
+                return string.Concat(
+                    sourcePath,
+                    "|source_samples=", sourceLength,
+                    "|whole_file",
+                    "|", HifiHnsepOnnx.CacheKeyOrDisabled());
+            }
         }
 
         static string SliceCacheKey(string sourcePath, int sourceLength, int sliceStart, int sliceLength, int contextStart, int contextLength) {

@@ -141,6 +141,69 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
+        public void MelExtractorHandlesTinySlices() {
+            // Slices shorter than one hop used to run the first FFT frame past the padded buffer.
+            foreach (int length in new[] { 1, 64, 127, 128, 129 }) {
+                var samples = new float[length];
+                for (int i = 0; i < samples.Length; i++) {
+                    samples[i] = (float)(0.1 * Math.Sin(2.0 * Math.PI * 220.0 * i / HifiMelExtractor.SampleRate));
+                }
+                var mel = new HifiMelExtractor().Extract(samples);
+                Assert.Equal(HifiMelExtractor.NMels, mel.GetLength(0));
+                Assert.True(mel.GetLength(1) >= 1);
+                foreach (var value in mel) {
+                    Assert.False(float.IsNaN(value));
+                    Assert.False(float.IsInfinity(value));
+                }
+            }
+        }
+
+        [Fact]
+        public void SourceAnalysisEstimatesSineF0() {
+            var samples = new float[HifiMelExtractor.SampleRate / 2];
+            for (int i = 0; i < samples.Length; i++) {
+                double t = i / (double)HifiMelExtractor.SampleRate;
+                samples[i] = (float)(0.2 * Math.Sin(2.0 * Math.PI * 220.0 * t)
+                    + 0.05 * Math.Sin(2.0 * Math.PI * 440.0 * t));
+            }
+
+            double f0 = HifiSourceAnalysis.EstimateF0Hz(samples);
+
+            Assert.True(Math.Abs(f0 - 220.0) < 6.0, $"expected ~220Hz, got {f0:F2}Hz");
+        }
+
+        [Fact]
+        public void SourceAnalysisReturnsZeroForNoise() {
+            var samples = new float[HifiMelExtractor.SampleRate / 2];
+            uint state = 12345;
+            for (int i = 0; i < samples.Length; i++) {
+                state = state * 1664525u + 1013904223u;
+                samples[i] = (state / (float)uint.MaxValue - 0.5f) * 0.3f;
+            }
+
+            double f0 = HifiSourceAnalysis.EstimateF0Hz(samples);
+
+            Assert.Equal(0, f0, 6);
+        }
+
+        [Fact]
+        public void SourceAnalysisActiveFramesDetectsSilentTail() {
+            int active = HifiMelExtractor.SampleRate / 5;
+            var samples = new float[HifiMelExtractor.SampleRate * 2 / 5];
+            for (int i = 0; i < active; i++) {
+                samples[i] = (float)(0.2 * Math.Sin(2.0 * Math.PI * 220.0 * i / HifiMelExtractor.SampleRate));
+            }
+
+            int activeFrames = HifiSourceAnalysis.EstimateActiveFrameCount(samples);
+            int expected = active / HifiMelExtractor.OriginHopSize;
+            int totalFrames = HifiMelExtractor.EstimateFrameCount(samples.Length);
+
+            Assert.True(activeFrames >= expected - 2 && activeFrames <= expected + 2,
+                $"expected ~{expected} active frames, got {activeFrames}");
+            Assert.True(activeFrames < totalFrames, "silent tail should reduce the active frame count");
+        }
+
+        [Fact]
         public void NormalizeMelEnhanceModeIsStrict() {
             Assert.Equal(HifiRenderConfig.MelEnhanceNone, HifiRenderConfig.NormalizeMelEnhanceMode(null));
             Assert.Equal(HifiRenderConfig.MelEnhanceNone, HifiRenderConfig.NormalizeMelEnhanceMode("unknown"));
@@ -1360,7 +1423,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
-        public void SourceMapSoftlyCatchesUpWhenTargetPreutterIsCapped() {
+        public void SourceMapAppliesClassicSkipOverWhenTargetPreutterIsCapped() {
             var phone = CreateRenderPhoneForTiming(
                 preutterMs: 80,
                 overlapMs: 40,
@@ -1375,20 +1438,21 @@ namespace OpenUtau.Core.Test.HifiNeural {
             int targetLeadFrames = ResolveTargetLeadFrames(phone, outputFrames: 80);
             int targetPreutterSourceFrames = SourceFramesForMs(80);
             int rawOtoPreutterSourceFrames = SourceFramesForMs(180);
-            int midLead = Math.Max(2, targetLeadFrames / 2);
-            double linearMid = midLead * (rawOtoPreutterSourceFrames - 1.0) / Math.Max(1, targetLeadFrames - 1);
-            double linearStep = (rawOtoPreutterSourceFrames - 1.0) / Math.Max(1, targetLeadFrames - 1);
-            double maxStep = 0;
-            for (int i = 1; i < targetLeadFrames; i++) {
-                maxStep = Math.Max(maxStep, map[i] - map[i - 1]);
-            }
+            // ClassicRenderer skipOver semantics: the raw oto preutter exceeds the capped target
+            // lead by 100ms, so the map starts that far into the source instead of stretching the
+            // whole 180ms lead into an 80ms window.
+            int skipSourceFrames = SourceFramesForMs(180 - 80);
 
             Assert.True(rawOtoPreutterSourceFrames > targetPreutterSourceFrames);
-            Assert.Equal(0, map[0], 6);
-            Assert.True(map[1] <= linearStep + 0.001, $"lead should not add a skip boost at onset, got frame {map[1]:F3}");
-            Assert.True(map[midLead] > linearMid + 2.0, $"lead should smoothly catch up inside preutter, got {map[midLead]:F3} vs linear {linearMid:F3}");
-            Assert.True(maxStep <= linearStep * 1.30, $"lead catch-up step is too abrupt, max={maxStep:F3} linear={linearStep:F3}");
+            Assert.Equal(skipSourceFrames, map[0], 1.0);
             Assert.Equal(rawOtoPreutterSourceFrames, map[targetLeadFrames], 1.0);
+            double linearLeadStep = (rawOtoPreutterSourceFrames - skipSourceFrames)
+                / (double)Math.Max(1, targetLeadFrames);
+            for (int i = 1; i <= targetLeadFrames; i++) {
+                double step = map[i] - map[i - 1];
+                Assert.True(step >= 0, $"lead map must be monotonic, got step {step:F3} at index {i}");
+                Assert.True(step <= linearLeadStep * 1.5 + 0.001, $"lead catch-up step is too abrupt, step={step:F3} linear={linearLeadStep:F3}");
+            }
         }
 
         [Fact]

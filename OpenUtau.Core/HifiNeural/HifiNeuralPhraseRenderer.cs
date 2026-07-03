@@ -19,9 +19,10 @@ namespace OpenUtau.Core.HifiNeural {
         public const string RendererId = "HIFI-NEURA";
 
         // Limit concurrent renders to avoid saturating CPU/memory while still allowing
-        // multi-phrase parallelism. The previous global lock serialized all renders.
+        // multi-phrase parallelism. Each render already fans out internally (mel STFT
+        // Parallel.For + ONNX intra-op threads), so a small gate avoids oversubscription.
         static readonly SemaphoreSlim renderGate = new SemaphoreSlim(
-            Math.Max(1, Environment.ProcessorCount - 1));
+            Math.Clamp(Environment.ProcessorCount / 2, 1, 4));
 
         public USingerType SingerType => USingerType.Classic;
         public bool SupportsRenderPitch => false;

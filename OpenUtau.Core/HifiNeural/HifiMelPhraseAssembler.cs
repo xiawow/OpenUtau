@@ -19,13 +19,34 @@ namespace OpenUtau.Core.HifiNeural {
     /// </summary>
     public sealed class HifiMelPhraseAssembler {
         const float LogFloor = -11.512925f; // log(1e-5), matches HifiMelExtractor floor.
+        const float LinearFloor = 1e-5f;
         const int SampleRate = HifiMelExtractor.SampleRate;
         const double RestGapToleranceMs = 8.0;
         const double RestReleaseGuardMs = 18.0;
         const double IsolatedLeadCatchupMaxMs = 80.0;
         const double IsolatedLeadCatchupPreutterRatio = 0.55;
+        // The phrase is assembled on a fine grid (one fine frame per source hop, 4x the vocoder
+        // hop) so phone anchors land within ~1.5ms of their true position instead of being
+        // quantized to the 11.6ms vocoder grid, and boundary cross-fades get sub-frame resolution.
+        // The fine buffer is mean-pooled 4:1 back to the vocoder grid at the end.
+        const int FineRatio = HifiF0Builder.HopSize / HifiMelExtractor.OriginHopSize;
+        const double FineFrameMs = HifiF0Builder.FrameMs / FineRatio;
+        // Voiced-to-voiced joints get at least this many vocoder frames of cross-fade even when
+        // the oto overlap is shorter; a 1-2 frame overlap otherwise degenerates to a butt splice.
+        const int MinCrossfadeFrames = 3;
+        // Boundary spectral bias matching: measure the average log-mel step between the two sides
+        // of a joint over this window, band-smooth it, and remove half of it from each side over
+        // a longer ramp so timbre/level differences between source recordings become glides.
+        const int BoundaryBiasMeasureFineFrames = 16;
+        const int BoundaryBiasRampFineFrames = 32;
+        const double BoundaryBiasMaxLog = 0.6; // per side, natural log (~5.2dB)
+        const int BoundaryBiasBandRadius = 6;
+        const double BoundaryBiasActiveFloor = LogFloor + 2.0;
 
         readonly HifiMelExtractor melExtractor = HifiMelExtractor.Shared;
+        // Estimated recording pitch per oto slice; keyed by file identity + slice bounds so it
+        // survives across phrases and only re-runs when the sample or oto timing changes.
+        static readonly System.Collections.Concurrent.ConcurrentDictionary<string, double> sliceF0Cache = new();
 
         sealed class PhoneMelSegment {
             public int PhoneIndex;
@@ -34,11 +55,15 @@ namespace OpenUtau.Core.HifiNeural {
             public float[,] Mel = new float[HifiMelExtractor.NMels, 0];
             public int StartFrame;
             public int FrameCount;
+            // Sub-frame placement anchor on the fine (source-hop) grid; StartFrame stays the
+            // coarse anchor used by timing plans, reports, and the leveler.
+            public int StartFineFrame;
             public int OverlapFramesWithPrev;
             public int FixedFrames;
             public int F0MaskFrames;
             public double SourceSkipOverMs;
             public int SourceStartOffsetFrames;
+            public double SourceF0Hz;
             public string Strategy = string.Empty;
             public HifiPhoneFeatureDiagnostic? Diagnostic;
             public HifiFrameParameterAverages Parameters;
@@ -130,19 +155,25 @@ namespace OpenUtau.Core.HifiNeural {
             int nextAnchorFrame = MsToFrame(nextAnchorMs - phraseStartMs);
             nextAnchorFrame = Math.Clamp(nextAnchorFrame, startFrame + 1, targetFrames);
 
+            bool hasRestGap = hasNextPhone && nextAnchorMs - phone.endMs > RestGapToleranceMs;
+
             // Overlap with the next segment: the next phone's overlap window (overlapMs) is the
             // region where both phones sound. We extend this segment past the next anchor by that
-            // overlap so the cross-fade has frames to work with.
+            // overlap so the cross-fade has frames to work with. Connected joints get a minimum
+            // cross-fade width even when the oto overlap is tiny; without it a <=2 frame overlap
+            // degenerates to a butt splice on the vocoder grid.
             int overlapTailFrames = 0;
             if (hasNextPhone) {
-                double nextOverlapMs = Math.Max(0, phrase.phones[phoneIndex + 1].overlapMs);
-                overlapTailFrames = Math.Clamp(
-                    (int)Math.Round(nextOverlapMs / HifiF0Builder.FrameMs),
-                    0,
-                    Math.Max(0, targetFrames - nextAnchorFrame));
+                var next = phrase.phones[phoneIndex + 1];
+                double nextOverlapMs = Math.Max(0, next.overlapMs);
+                overlapTailFrames = (int)Math.Round(nextOverlapMs / HifiF0Builder.FrameMs);
+                if (!hasRestGap) {
+                    int nextDurationFrames = Math.Max(1, MsToFrame(next.durationMs));
+                    int minOverlapFrames = Math.Min(MinCrossfadeFrames, Math.Max(1, nextDurationFrames / 2));
+                    overlapTailFrames = Math.Max(overlapTailFrames, minOverlapFrames);
+                }
+                overlapTailFrames = Math.Clamp(overlapTailFrames, 0, Math.Max(0, targetFrames - nextAnchorFrame));
             }
-
-            bool hasRestGap = hasNextPhone && nextAnchorMs - phone.endMs > RestGapToleranceMs;
             int segmentEndFrame = ResolveSegmentEndFrame(
                 startFrame,
                 nextAnchorFrame,
@@ -163,7 +194,12 @@ namespace OpenUtau.Core.HifiNeural {
             float[] fullSourceSamples = LoadSourceFile(phone.oto.File, sourceCache);
             float[] sourceSamples = SliceWithOto(fullSourceSamples, phone);
             double autoLeadCatchupMs = ResolveIsolatedLeadCatchupMs(phrase, phone, phoneIndex);
-            var sourceParameterTrack = BuildHnsepSourceParameterTrack(parameterTrack, sourceSamples.Length, frameCount, phone, autoLeadCatchupMs);
+            // Waveform-domain slice analysis on the pre-HNSEP slice: the recording pitch feeds the
+            // pitch-mismatch compensation, and the shared active-frame count keeps the HNSEP
+            // parameter projection and the mel mapping trimming the same dead tail.
+            double sourceF0Hz = EstimateSliceF0(phone, sourceSamples);
+            int activeSourceFrames = HifiSourceAnalysis.EstimateActiveFrameCount(sourceSamples);
+            var sourceParameterTrack = BuildHnsepSourceParameterTrack(parameterTrack, sourceSamples.Length, frameCount, phone, autoLeadCatchupMs, activeSourceFrames);
             sourceSamples = HifiHnsepSourceProcessor.Apply(phone, phone.oto.File, fullSourceSamples, sourceSamples, sourceParameterTrack, hnsepCache, out var hnsepReport);
             float[,] sourceMel = LoadSliceMel(phone, sourceSamples, sliceMelCache, parameterTrack, sourceParameterTrack);
             int sourceFrames = sourceMel.GetLength(1);
@@ -172,6 +208,9 @@ namespace OpenUtau.Core.HifiNeural {
             }
 
             var phoneMel = new float[HifiMelExtractor.NMels, frameCount];
+            int sourceToneOverride = sourceF0Hz > 0
+                ? Math.Max(1, (int)Math.Round(MusicMath.FreqToTone(sourceF0Hz)))
+                : 0;
             // Local target F0 slice so the (F0-aware) stretch logic sees the right pitch motion.
             var report = HifiPhraseFeatureBuilder.WritePhoneMappedSegment(
                 sourceMel,
@@ -185,7 +224,9 @@ namespace OpenUtau.Core.HifiNeural {
                 sourceSamples,
                 parameters.GenderKeyShiftSemitones,
                 phone.hifiSustainMode,
-                autoLeadCatchupMs);
+                autoLeadCatchupMs,
+                activeSourceFrames,
+                sourceToneOverride);
             var diagnostic = HifiClickDiagnostic.BuildPhoneFeatureDiagnostic(
                 phoneIndex,
                 phone.phoneme,
@@ -204,10 +245,12 @@ namespace OpenUtau.Core.HifiNeural {
                 Mel = phoneMel,
                 StartFrame = startFrame,
                 FrameCount = frameCount,
+                StartFineFrame = ResolveStartFineFrame(phone, phraseStartMs, startFrame, targetFrames),
                 FixedFrames = report.FixedTargetFrames,
                 F0MaskFrames = report.F0MaskFrames,
                 SourceSkipOverMs = report.SourceSkipOverMs,
                 SourceStartOffsetFrames = report.SourceStartOffsetFrames,
+                SourceF0Hz = sourceF0Hz,
                 Strategy = report.Strategy,
                 Diagnostic = diagnostic,
                 Parameters = parameters,
@@ -215,12 +258,45 @@ namespace OpenUtau.Core.HifiNeural {
             };
         }
 
+        static int ResolveStartFineFrame(RenderPhone phone, double phraseStartMs, int startFrame, int targetFrames) {
+            int fineFrames = targetFrames * FineRatio;
+            double anchorMs = phone.positionMs - phone.preutterMs - phraseStartMs;
+            int fine = (int)Math.Round(anchorMs / FineFrameMs);
+            // Stay within one coarse frame of the coarse anchor so the segment content and the
+            // coarse timing plan (FrameCount) cannot drift apart.
+            fine = Math.Clamp(fine, (startFrame - 1) * FineRatio, (startFrame + 1) * FineRatio);
+            return Math.Clamp(fine, 0, Math.Max(0, fineFrames - 1));
+        }
+
+        static double EstimateSliceF0(RenderPhone phone, float[] sourceSamples) {
+            if (phone.oto == null || string.IsNullOrWhiteSpace(phone.oto.File) || sourceSamples.Length == 0) {
+                return 0;
+            }
+            string key;
+            try {
+                var info = new System.IO.FileInfo(phone.oto.File);
+                key = string.Concat(
+                    info.FullName,
+                    "|", info.Length,
+                    "|", info.LastWriteTimeUtc.Ticks,
+                    "|", phone.oto.Offset.ToString("R"),
+                    "|", phone.oto.Cutoff.ToString("R"));
+            } catch {
+                key = string.Concat(
+                    phone.oto.File,
+                    "|", phone.oto.Offset.ToString("R"),
+                    "|", phone.oto.Cutoff.ToString("R"));
+            }
+            return sliceF0Cache.GetOrAdd(key, _ => HifiSourceAnalysis.EstimateF0Hz(sourceSamples));
+        }
+
         static HifiFrameParameterTrack BuildHnsepSourceParameterTrack(
             HifiFrameParameterTrack targetTrack,
             int sourceSampleCount,
             int targetFrameCount,
             RenderPhone phone,
-            double autoLeadCatchupMs) {
+            double autoLeadCatchupMs,
+            int activeSourceFrames) {
             if (!targetTrack.NeedsHnsep || sourceSampleCount <= 0 || targetFrameCount <= 1) {
                 return targetTrack;
             }
@@ -232,7 +308,8 @@ namespace OpenUtau.Core.HifiNeural {
                 sourceFrameCount,
                 targetFrameCount,
                 phone,
-                autoLeadCatchupMs);
+                autoLeadCatchupMs,
+                activeSourceFrames);
             if (targetToSourceFrameMap.Length != targetTrack.FrameCount) {
                 return targetTrack;
             }
@@ -337,48 +414,175 @@ namespace OpenUtau.Core.HifiNeural {
 
         static void AssembleWithOverlapCrossfade(float[,] output, List<PhoneMelSegment> segments, int targetFrames) {
             int bins = output.GetLength(0);
-            // accumulated[t] tracks how many segments have already contributed to frame t, so we
-            // know when we are inside an overlap region and must cross-fade instead of overwrite.
-            var occupiedUntil = new int[1]; // boundary of the previously placed segment (exclusive).
-            occupiedUntil[0] = 0;
+            int fineFrames = targetFrames * FineRatio;
+            if (fineFrames <= 0 || segments.Count == 0) {
+                return;
+            }
+
+            // Fine buffer holds linear magnitudes: blending and pooling stay physical, and the
+            // final log happens once per pooled frame.
+            var fine = new float[bins, fineFrames];
+            FillConstant(fine, LinearFloor);
+
+            int prevFineEnd = 0;
+            int prevFineStart = 0;
+            var newColumn = new float[bins];
+            var biasHalf = new double[bins];
 
             for (int s = 0; s < segments.Count; s++) {
                 var seg = segments[s];
-                int segStart = seg.StartFrame;
-                int segEnd = Math.Min(targetFrames, seg.StartFrame + seg.FrameCount);
-                int prevEnd = occupiedUntil[0];
+                int segFineLen = seg.FrameCount * FineRatio;
+                int fineStart = Math.Clamp(seg.StartFineFrame, 0, fineFrames);
+                bool connected = s > 0
+                    && seg.StartFrame <= segments[s - 1].StartFrame + segments[s - 1].FrameCount;
+                if (connected && fineStart > prevFineEnd) {
+                    // Sub-frame rounding opened a hole at a connected joint; pull the segment back
+                    // so the fade never crosses a silent sliver.
+                    fineStart = prevFineEnd;
+                }
+                int fineEnd = Math.Min(fineFrames, fineStart + segFineLen);
+                if (fineEnd <= fineStart) {
+                    seg.OverlapFramesWithPrev = 0;
+                    continue;
+                }
 
-                int overlapStart = Math.Max(segStart, 0);
-                int overlapEnd = Math.Min(segEnd, prevEnd); // frames shared with the previous segment.
-                int overlapFrames = Math.Max(0, overlapEnd - overlapStart);
-                seg.OverlapFramesWithPrev = s == 0 ? 0 : overlapFrames;
+                int overlapEnd = s == 0 ? fineStart : Math.Min(fineEnd, prevFineEnd);
+                int overlapLen = Math.Max(0, overlapEnd - fineStart);
+                // A segment fully inside the previous one blends in and back out (bump) instead of
+                // ending on 100% new content one frame before the old content resumes.
+                bool contained = s > 0 && overlapLen > 0 && fineEnd <= prevFineEnd;
+                seg.OverlapFramesWithPrev = (int)Math.Round(overlapLen / (double)FineRatio);
 
-                for (int t = segStart; t < segEnd; t++) {
-                    int local = t - segStart;
-                    bool inOverlap = s > 0 && t < prevEnd && overlapFrames > 0;
-                    if (inOverlap) {
-                        // Equal-power cross-fade in linear (power) domain. The previous segment is
-                        // already written into output[t]; blend it with this segment.
-                        // Weights depend only on progress u, so compute once for all bins.
-                        double u = Math.Clamp(CrossfadeProgress(t - overlapStart, overlapFrames), 0.0, 1.0);
-                        double wNew = Math.Sin(0.5 * Math.PI * u);
-                        double wOld = Math.Cos(0.5 * Math.PI * u);
-                        double wOld2 = wOld * wOld;
-                        double wNew2 = wNew * wNew;
+                bool hasBias = connected && overlapLen >= 2
+                    && TryMeasureBoundaryBias(fine, seg, fineStart, overlapLen, biasHalf);
+                if (hasBias) {
+                    int oldRampFrames = Math.Clamp(fineStart - prevFineStart, 0, BoundaryBiasRampFineFrames);
+                    for (int t = Math.Max(0, fineStart - oldRampFrames); t < overlapEnd; t++) {
+                        double w = t >= fineStart
+                            ? 1.0
+                            : (t - (fineStart - oldRampFrames) + 1) / (double)(oldRampFrames + 1);
                         for (int m = 0; m < bins; m++) {
-                            double pOld = Math.Exp(output[m, t]);
-                            double pNew = Math.Exp(seg.Mel[m, local]);
-                            double mixed = pOld * wOld2 + pNew * wNew2;
-                            output[m, t] = (float)Math.Log(Math.Max(mixed, 1e-5));
-                        }
-                    } else {
-                        for (int m = 0; m < bins; m++) {
-                            output[m, t] = seg.Mel[m, local];
+                            fine[m, t] = (float)Math.Max(LinearFloor, fine[m, t] * Math.Exp(-biasHalf[m] * w));
                         }
                     }
                 }
-                occupiedUntil[0] = Math.Max(prevEnd, segEnd);
+                int newRampFrames = hasBias
+                    ? Math.Min(BoundaryBiasRampFineFrames, (fineEnd - fineStart) / 2)
+                    : 0;
+
+                int lastLocalIdx = -1;
+                for (int t = fineStart; t < fineEnd; t++) {
+                    // Nearest-neighbour along time: aligned segments pool back to their exact
+                    // coarse frames, misaligned ones become a clean sub-frame shift after pooling.
+                    int localIdx = Math.Min(seg.FrameCount - 1, (t - fineStart) / FineRatio);
+                    if (localIdx != lastLocalIdx) {
+                        for (int m = 0; m < bins; m++) {
+                            newColumn[m] = (float)Math.Exp(seg.Mel[m, localIdx]);
+                        }
+                        lastLocalIdx = localIdx;
+                    }
+                    double newBiasW = newRampFrames > 0 && t - fineStart < newRampFrames
+                        ? 1.0 - (t - fineStart) / (double)newRampFrames
+                        : 0;
+                    bool inOverlap = s > 0 && t < overlapEnd && overlapLen > 0;
+                    double wOld = 0;
+                    double wNew = 1;
+                    if (inOverlap) {
+                        // (offset+1)/(len+1) keeps every overlap frame an actual mix; the frames
+                        // just outside the overlap supply the pure endpoints, so even a 1-2 frame
+                        // overlap fades instead of butt-splicing.
+                        double u = (t - fineStart + 1) / (double)(overlapLen + 1);
+                        if (contained) {
+                            u = Math.Sin(Math.PI * u);
+                        }
+                        wNew = Math.Sin(0.5 * Math.PI * u);
+                        wOld = Math.Cos(0.5 * Math.PI * u);
+                    }
+                    for (int m = 0; m < bins; m++) {
+                        double value = newColumn[m];
+                        if (newBiasW > 0) {
+                            value *= Math.Exp(biasHalf[m] * newBiasW);
+                        }
+                        if (inOverlap) {
+                            double old = fine[m, t];
+                            // Equal-power blend of magnitudes: two uncorrelated equal-level vowels
+                            // keep constant energy through the fade instead of dipping mid-way.
+                            value = Math.Sqrt(wOld * wOld * old * old + wNew * wNew * value * value);
+                        }
+                        fine[m, t] = (float)Math.Max(LinearFloor, value);
+                    }
+                }
+                prevFineStart = fineStart;
+                prevFineEnd = Math.Max(prevFineEnd, fineEnd);
             }
+
+            // 4:1 mean-pool (linear domain) back onto the vocoder grid.
+            for (int frame = 0; frame < targetFrames; frame++) {
+                int first = frame * FineRatio;
+                for (int m = 0; m < bins; m++) {
+                    double sum = 0;
+                    for (int k = 0; k < FineRatio; k++) {
+                        sum += fine[m, first + k];
+                    }
+                    output[m, frame] = (float)Math.Log(Math.Max(sum / FineRatio, 1e-5));
+                }
+            }
+        }
+
+        /// <summary>
+        /// Measures the average per-bin log-mel step between the already-written old content and
+        /// the incoming segment over the head of the overlap, band-smooths it so only the broad
+        /// timbre/level trend remains, and returns half of it (each side of the joint absorbs
+        /// half). Returns false when either side is close to silence.
+        /// </summary>
+        static bool TryMeasureBoundaryBias(
+            float[,] fine,
+            PhoneMelSegment seg,
+            int fineStart,
+            int overlapLen,
+            double[] biasHalf) {
+            int bins = fine.GetLength(0);
+            int measure = Math.Min(BoundaryBiasMeasureFineFrames, overlapLen);
+            if (measure < 2) {
+                return false;
+            }
+            var oldMean = new double[bins];
+            var newMean = new double[bins];
+            for (int t = 0; t < measure; t++) {
+                int localIdx = Math.Min(seg.FrameCount - 1, t / FineRatio);
+                for (int m = 0; m < bins; m++) {
+                    oldMean[m] += Math.Log(Math.Max(fine[m, fineStart + t], LinearFloor));
+                    newMean[m] += seg.Mel[m, localIdx];
+                }
+            }
+            double oldOverall = 0;
+            double newOverall = 0;
+            for (int m = 0; m < bins; m++) {
+                oldMean[m] /= measure;
+                newMean[m] /= measure;
+                oldOverall += oldMean[m];
+                newOverall += newMean[m];
+            }
+            oldOverall /= Math.Max(1, bins);
+            newOverall /= Math.Max(1, bins);
+            if (oldOverall <= BoundaryBiasActiveFloor || newOverall <= BoundaryBiasActiveFloor) {
+                return false;
+            }
+            for (int m = 0; m < bins; m++) {
+                double sum = 0;
+                double weightSum = 0;
+                int first = Math.Max(0, m - BoundaryBiasBandRadius);
+                int last = Math.Min(bins - 1, m + BoundaryBiasBandRadius);
+                for (int k = first; k <= last; k++) {
+                    double distance = Math.Abs(k - m) / (double)(BoundaryBiasBandRadius + 1);
+                    double weight = 0.5 + 0.5 * Math.Cos(Math.PI * distance);
+                    sum += (oldMean[k] - newMean[k]) * weight;
+                    weightSum += weight;
+                }
+                double step = weightSum > 0 ? sum / weightSum : 0;
+                biasHalf[m] = Math.Clamp(step * 0.5, -BoundaryBiasMaxLog, BoundaryBiasMaxLog);
+            }
+            return true;
         }
 
         static void BuildAssemblyReport(
@@ -410,6 +614,7 @@ namespace OpenUtau.Core.HifiNeural {
                     ConsonantFrameCount = fixedFrames,
                     SourceSkipOverMs = seg.SourceSkipOverMs,
                     SourceStartOffsetFrames = seg.SourceStartOffsetFrames,
+                    SourceF0Hz = seg.SourceF0Hz,
                     Parameters = new HifiPhoneParameterMetadata {
                         Gender = seg.Parameters.Gender,
                         Breathiness = seg.Parameters.Breathiness,
@@ -425,14 +630,18 @@ namespace OpenUtau.Core.HifiNeural {
                 });
                 if (i > 0) {
                     var left = segments[i - 1];
+                    int boundaryFrame = Math.Clamp(
+                        (int)Math.Round(seg.StartFineFrame / (double)FineRatio),
+                        0,
+                        Math.Max(0, targetFrames - 1));
                     report.Boundaries.Add(new HifiBoundaryMetadata {
                         Index = i - 1,
                         LeftPhoneIndex = left.PhoneIndex,
                         RightPhoneIndex = seg.PhoneIndex,
                         LeftPhone = left.Phoneme,
                         RightPhone = seg.Phoneme,
-                        Frame = start,
-                        PositionMs = phraseStartMs + start * HifiF0Builder.FrameMs,
+                        Frame = boundaryFrame,
+                        PositionMs = phraseStartMs + seg.StartFineFrame * FineFrameMs,
                         TransitionType = seg.OverlapFramesWithPrev > 0 ? "oto-overlap" : "phone",
                     });
                 }

@@ -7,7 +7,6 @@ namespace OpenUtau.Core.HifiNeural {
         int FrameCount,
         int ActiveFrames,
         double ReferenceRmsDb,
-        double ReferenceF0,
         double MinGainDb,
         double MaxGainDb,
         int CutFrames,
@@ -19,7 +18,6 @@ namespace OpenUtau.Core.HifiNeural {
         const double ActiveFloor = 0.0025;
         const double ActivePeakRatio = 0.015;
         const double ReferencePercentile = 0.40;
-        const double F0ReferencePercentile = 0.40;
         const double LoudToleranceDb = 1.5;
         const double QuietToleranceDb = 4.0;
         const double CutStrength = 0.78;
@@ -44,7 +42,6 @@ namespace OpenUtau.Core.HifiNeural {
             double peak = Peak(samples);
             double activeThreshold = Math.Max(ActiveFloor, peak * ActivePeakRatio);
             var activeDbs = new List<double>(frameCount);
-            var voicedF0s = new List<double>(frameCount);
             var active = new bool[frameCount];
             var frameF0 = new double[frameCount];
 
@@ -54,18 +51,14 @@ namespace OpenUtau.Core.HifiNeural {
                 if (rms[i] >= activeThreshold && IsFinite(rms[i])) {
                     active[i] = true;
                     activeDbs.Add(LinearToDb(rms[i]));
-                    if (f0 >= 55 && f0 <= 1400) {
-                        voicedF0s.Add(f0);
-                    }
                 }
             }
 
             if (activeDbs.Count < 3) {
-                return new HifiPostVocoderLevelerReport(frameCount, activeDbs.Count, 0, 0, 0, 0, 0, 0);
+                return new HifiPostVocoderLevelerReport(frameCount, activeDbs.Count, 0, 0, 0, 0, 0);
             }
 
             double referenceDb = Percentile(activeDbs, ReferencePercentile);
-            double referenceF0 = voicedF0s.Count >= 3 ? Percentile(voicedF0s, F0ReferencePercentile) : 0;
             double[] boostAllowance = BuildBoostAllowance(frameCount, features.Metadata);
             var desiredGainDb = new double[frameCount];
 
@@ -112,11 +105,10 @@ namespace OpenUtau.Core.HifiNeural {
             }
 
             Log.Information(
-                "Hifi post-vocoder local loudness leveler frames={Frames} active_frames={ActiveFrames} reference_rms_db={ReferenceDb:F2} reference_f0={ReferenceF0:F2} min_gain_db={MinGainDb:F2} max_gain_db={MaxGainDb:F2} cut_frames={CutFrames} boost_frames={BoostFrames}",
+                "Hifi post-vocoder local loudness leveler frames={Frames} active_frames={ActiveFrames} reference_rms_db={ReferenceDb:F2} min_gain_db={MinGainDb:F2} max_gain_db={MaxGainDb:F2} cut_frames={CutFrames} boost_frames={BoostFrames}",
                 frameCount,
                 activeDbs.Count,
                 referenceDb,
-                referenceF0,
                 minGainDb,
                 maxGainDb,
                 cutFrames,
@@ -126,7 +118,6 @@ namespace OpenUtau.Core.HifiNeural {
                 frameCount,
                 activeDbs.Count,
                 referenceDb,
-                referenceF0,
                 minGainDb,
                 maxGainDb,
                 cutFrames,
@@ -269,7 +260,9 @@ namespace OpenUtau.Core.HifiNeural {
                 return;
             }
             for (int i = 0; i < samples.Length; i++) {
-                double position = i / (double)HopSize;
+                // Frame RMS windows are centered at frame*HopSize + HopSize/2, so the gain
+                // envelope must be interpolated on the same centers.
+                double position = Math.Max(0, (i - HopSize * 0.5) / HopSize);
                 int left = (int)Math.Floor(position);
                 int right = Math.Min(gainDbEnvelope.Length - 1, left + 1);
                 left = Math.Clamp(left, 0, gainDbEnvelope.Length - 1);
