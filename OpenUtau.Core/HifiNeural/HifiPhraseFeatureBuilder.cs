@@ -38,12 +38,16 @@ namespace OpenUtau.Core.HifiNeural {
         const double SustainTextureMaxStepFrames = SustainTextureNaturalStepFrames * 1.35;
         const double SustainTextureBodyAmount = 0.88;
         const double SustainTextureBodyClamp = 0.22;
-        const double SustainTextureBodyLowBandResidual = 0.42;
+        const double SustainTextureBodyLowBandResidual = 0.06;
+        const double SustainTextureBodyHighBandResidual = 0.36;
+        const double SustainResidualLowFrequencyHz = 1300.0;
+        const double SustainResidualHighFrequencyHz = 5200.0;
         const int StableLoopMinStableFrames = 8;
         const int StableLoopMinOutputFrames = 14;
         const double StableLoopBodyAmount = 0.78;
         const double StableLoopResidualClamp = 0.18;
-        const double StableLoopLowBandWeight = 0.36;
+        const double StableLoopLowBandWeight = 0.06;
+        const double StableLoopHighBandWeight = 0.32;
         const double StableLoopStepDriftFrames = 0.28;
         const int StableLoopPoolSwitchMinFrames = 18;
         const double StableLoopPoolSwitchBlendPortion = 0.28;
@@ -1635,8 +1639,7 @@ namespace OpenUtau.Core.HifiNeural {
             if (bins <= 1) {
                 return StableLoopLowBandWeight;
             }
-            double high = SmoothStep((bin - 10) / (double)Math.Max(1, bins - 10));
-            return StableLoopLowBandWeight + (1.0 - StableLoopLowBandWeight) * high;
+            return ResidualWeightByMelFrequency(bin, StableLoopLowBandWeight, StableLoopHighBandWeight);
         }
 
         static double PositiveModulo(double value, double divisor) {
@@ -1857,8 +1860,17 @@ namespace OpenUtau.Core.HifiNeural {
             if (bins <= 1) {
                 return SustainTextureBodyLowBandResidual;
             }
-            double high = SmoothStep((bin - 12) / (double)Math.Max(1, bins - 12));
-            return SustainTextureBodyLowBandResidual + (1.0 - SustainTextureBodyLowBandResidual) * high;
+            return ResidualWeightByMelFrequency(bin, SustainTextureBodyLowBandResidual, SustainTextureBodyHighBandResidual);
+        }
+
+        static double ResidualWeightByMelFrequency(int bin, double lowWeight, double highWeight) {
+            double centerHz = HifiMelExtractor.MelBinCenterHz(bin);
+            if (!IsFinite(centerHz)) {
+                return lowWeight;
+            }
+            double blend = SmoothStep((centerHz - SustainResidualLowFrequencyHz)
+                / Math.Max(1.0, SustainResidualHighFrequencyHz - SustainResidualLowFrequencyHz));
+            return lowWeight + (highWeight - lowWeight) * blend;
         }
 
         static void CopyMelColumn(float[,] mel, int frame, float[] output) {
@@ -1968,18 +1980,32 @@ namespace OpenUtau.Core.HifiNeural {
                 return stableStart;
             }
             double span = stableFrames - 1;
-            double center = stableStart + span * 0.5;
-            double wanderRange = Math.Max(0.5, span * Math.Clamp(0.18 + 0.05 * Math.Log(Math.Max(1.0, stretchRatio), 2.0), 0.18, 0.36));
-            double slow = SmoothWobble(targetFrame * 0.021, seed + 0.37);
-            double slower = SmoothWobble(targetFrame * 0.0067, seed + 1.11);
-            double detail = SmoothWobble(targetFrame * 0.113, seed + 2.73);
-            double wander = (slow * 0.55 + slower * 0.35 + detail * 0.10) * wanderRange;
-            return Math.Clamp(center + wander, stableStart, stableStart + span);
+            double baseStep = Math.Clamp(
+                span / Math.Max(1.0, targetFrames * 0.72),
+                0.22,
+                SustainTextureMaxStepFrames);
+            int segmentFrames = Math.Max(4, (int)Math.Ceiling((span + 1.0) / Math.Max(0.1, baseStep)));
+            double segment = Math.Floor(targetFrame / (double)segmentFrames);
+            double localFrame = targetFrame - segment * segmentFrames;
+
+            // The old texture cursor wandered around the stable center and could scan backward.
+            // Keep texture reads as short forward passes, then reseed the next pass instead of
+            // sweeping back through source vibrato/formant motion.
+            double startJitter = Math.Min(3.0, span * 0.18)
+                * (0.5 + 0.5 * SmoothWobble(segment * 0.73, seed + 0.37));
+            double stepScale = 1.0 + 0.10 * SmoothWobble(segment * 0.41, seed + 1.11);
+            double forward = startJitter + localFrame * Math.Max(0.12, baseStep * stepScale);
+            return stableStart + Math.Clamp(forward, 0, span);
         }
 
         static double LimitTextureIndexStep(double previous, double current, double stretchRatio) {
             double maxStep = SustainTextureMaxStepFrames + Math.Clamp((stretchRatio - 2.0) * 0.12, 0, 0.55);
-            return previous + Math.Clamp(current - previous, -maxStep, maxStep);
+            if (current < previous) {
+                // Segment reset: jump to the next forward pass. Do not turn this into a slow
+                // backwards sweep, because that reintroduces repeated source-vibrato texture.
+                return current;
+            }
+            return previous + Math.Min(current - previous, maxStep);
         }
 
         static void SampleInterpolatedFrame(
