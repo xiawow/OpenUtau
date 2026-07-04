@@ -57,9 +57,11 @@ namespace OpenUtau.Core.HifiNeural {
 
         public Task<RenderResult> Render(RenderPhrase phrase, Progress progress, int trackNo, CancellationTokenSource cancellation, bool isPreRender = false) {
             return Task.Run(() => {
-                renderGate.Wait(cancellation.Token);
+                var result = Layout(phrase);
+                bool gateTaken = false;
                 try {
-                    var result = Layout(phrase);
+                    renderGate.Wait(cancellation.Token);
+                    gateTaken = true;
                     string progressInfo = $"Track {trackNo + 1}: {this} notes={phrase.notes.Length} phones={phrase.phones.Length} duration={result.estimatedLengthMs:F1}ms sr={HifiMelExtractor.SampleRate}";
                     progress.Complete(0, progressInfo);
                     if (cancellation.IsCancellationRequested) {
@@ -86,8 +88,13 @@ namespace OpenUtau.Core.HifiNeural {
                     }
                     progress.Complete(Math.Max(1, phrase.phones.Length), progressInfo);
                     return result;
+                } catch (OperationCanceledException) when (cancellation.IsCancellationRequested) {
+                    result.samples = Array.Empty<float>();
+                    return result;
                 } finally {
-                    renderGate.Release();
+                    if (gateTaken) {
+                        renderGate.Release();
+                    }
                 }
             });
         }
