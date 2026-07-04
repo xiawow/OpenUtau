@@ -13,7 +13,7 @@ namespace OpenUtau.Core.HifiNeural {
         // Files up to this length are separated whole and cached once; every oto slice of the file
         // then crops from the same result. This removes the repeated slice+context inference for
         // VCV banks (many entries per wav) and the inconsistency between per-slice separations.
-        const int MaxWholeFileSamples = HifiMelExtractor.SampleRate * 60;
+        const int MaxWholeFileSamples = HifiMelExtractor.SampleRate * 5;
 
         readonly Dictionary<string, HifiHnsepResult?> fileCache = new(StringComparer.OrdinalIgnoreCase);
         readonly Dictionary<string, HifiHnsepResult?> sliceCache = new(StringComparer.OrdinalIgnoreCase);
