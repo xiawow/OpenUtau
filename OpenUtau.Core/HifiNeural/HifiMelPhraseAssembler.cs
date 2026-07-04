@@ -31,15 +31,18 @@ namespace OpenUtau.Core.HifiNeural {
         // The fine buffer is mean-pooled 4:1 back to the vocoder grid at the end.
         const int FineRatio = HifiF0Builder.HopSize / HifiMelExtractor.OriginHopSize;
         const double FineFrameMs = HifiF0Builder.FrameMs / FineRatio;
-        // Voiced-to-voiced joints get at least this many vocoder frames of cross-fade even when
-        // the oto overlap is shorter; a 1-2 frame overlap otherwise degenerates to a butt splice.
-        const int MinCrossfadeFrames = 3;
+        // Connected joints can need a tiny safety fade when OTO overlap is near zero, but forcing a
+        // 3-frame fade on every boundary smears fast consonants. The minimum is resolved per joint.
+        const int MaxAdaptiveCrossfadeFrames = 3;
         // Boundary spectral bias matching: measure the average log-mel step between the two sides
         // of a joint over this window, band-smooth it, and remove half of it from each side over
-        // a longer ramp so timbre/level differences between source recordings become glides.
+        // a short vowel-only ramp so timbre/level differences between source recordings become
+        // glides without flattening fast consonant articulation.
         const int BoundaryBiasMeasureFineFrames = 16;
-        const int BoundaryBiasRampFineFrames = 32;
-        const double BoundaryBiasMaxLog = 0.6; // per side, natural log (~5.2dB)
+        const int BoundaryBiasDefaultRampFineFrames = 10;
+        const int BoundaryBiasLongRampFineFrames = 16;
+        const int BoundaryBiasMaxRampFineFrames = 20;
+        const double BoundaryBiasMaxLog = 0.35; // per side, natural log (~3.0dB)
         const int BoundaryBiasBandRadius = 6;
         const double BoundaryBiasActiveFloor = LogFloor + 2.0;
 
@@ -159,17 +162,16 @@ namespace OpenUtau.Core.HifiNeural {
 
             // Overlap with the next segment: the next phone's overlap window (overlapMs) is the
             // region where both phones sound. We extend this segment past the next anchor by that
-            // overlap so the cross-fade has frames to work with. Connected joints get a minimum
-            // cross-fade width even when the oto overlap is tiny; without it a <=2 frame overlap
-            // degenerates to a butt splice on the vocoder grid.
+            // overlap so the cross-fade has frames to work with. Only add a small adaptive safety
+            // overlap when the boundary is vowel-like; fast consonant/short-note boundaries can
+            // stay as hard joins because a forced fade smears articulation.
             int overlapTailFrames = 0;
             if (hasNextPhone) {
                 var next = phrase.phones[phoneIndex + 1];
                 double nextOverlapMs = Math.Max(0, next.overlapMs);
                 overlapTailFrames = (int)Math.Round(nextOverlapMs / HifiF0Builder.FrameMs);
                 if (!hasRestGap) {
-                    int nextDurationFrames = Math.Max(1, MsToFrame(next.durationMs));
-                    int minOverlapFrames = Math.Min(MinCrossfadeFrames, Math.Max(1, nextDurationFrames / 2));
+                    int minOverlapFrames = ResolveAdaptiveMinimumCrossfadeFrames(phone, next);
                     overlapTailFrames = Math.Max(overlapTailFrames, minOverlapFrames);
                 }
                 overlapTailFrames = Math.Clamp(overlapTailFrames, 0, Math.Max(0, targetFrames - nextAnchorFrame));
@@ -256,6 +258,40 @@ namespace OpenUtau.Core.HifiNeural {
                 Parameters = parameters,
                 HnsepReport = hnsepReport,
             };
+        }
+
+        static int ResolveAdaptiveMinimumCrossfadeFrames(RenderPhone left, RenderPhone right) {
+            int leftFrames = Math.Max(1, MsToFrame(left.durationMs));
+            int rightFrames = Math.Max(1, MsToFrame(right.durationMs));
+            int shorterFrames = Math.Min(leftFrames, rightFrames);
+            if (shorterFrames <= 2) {
+                return 0;
+            }
+
+            int rightFixedFrames = EstimateTargetFixedFrames(right);
+            bool rightHasTransientHead = rightFixedFrames >= 2
+                || HifiPhraseFeatureBuilder.ResolveTargetFixedMs(right) >= HifiF0Builder.FrameMs * 1.25;
+            if (rightHasTransientHead) {
+                return shorterFrames <= 5 ? 0 : 1;
+            }
+
+            bool leftHasVowelBody = leftFrames - EstimateTargetFixedFrames(left) >= 4;
+            bool rightHasVowelBody = rightFrames - rightFixedFrames >= 4;
+            if (leftHasVowelBody && rightHasVowelBody) {
+                if (shorterFrames >= 12) {
+                    return MaxAdaptiveCrossfadeFrames;
+                }
+                return shorterFrames >= 7 ? 2 : 1;
+            }
+            return shorterFrames <= 5 ? 0 : 1;
+        }
+
+        static int EstimateTargetFixedFrames(RenderPhone phone) {
+            double fixedMs = HifiPhraseFeatureBuilder.ResolveTargetFixedMs(phone);
+            if (fixedMs <= 0 || double.IsNaN(fixedMs) || double.IsInfinity(fixedMs)) {
+                return 0;
+            }
+            return Math.Max(0, (int)Math.Round(fixedMs / HifiF0Builder.FrameMs));
         }
 
         static int ResolveStartFineFrame(RenderPhone phone, double phraseStartMs, int startFrame, int targetFrames) {
@@ -453,10 +489,14 @@ namespace OpenUtau.Core.HifiNeural {
                 bool contained = s > 0 && overlapLen > 0 && fineEnd <= prevFineEnd;
                 seg.OverlapFramesWithPrev = (int)Math.Round(overlapLen / (double)FineRatio);
 
-                bool hasBias = connected && overlapLen >= 2
+                var leftSeg = s > 0 ? segments[s - 1] : null;
+                int biasRampFrames = leftSeg != null
+                    ? ResolveBoundaryBiasRampFineFrames(leftSeg, seg, overlapLen, fineStart - prevFineStart, fineEnd - fineStart)
+                    : 0;
+                bool hasBias = connected && biasRampFrames > 0
                     && TryMeasureBoundaryBias(fine, seg, fineStart, overlapLen, biasHalf);
                 if (hasBias) {
-                    int oldRampFrames = Math.Clamp(fineStart - prevFineStart, 0, BoundaryBiasRampFineFrames);
+                    int oldRampFrames = Math.Clamp(fineStart - prevFineStart, 0, biasRampFrames);
                     for (int t = Math.Max(0, fineStart - oldRampFrames); t < overlapEnd; t++) {
                         double w = t >= fineStart
                             ? 1.0
@@ -467,7 +507,7 @@ namespace OpenUtau.Core.HifiNeural {
                     }
                 }
                 int newRampFrames = hasBias
-                    ? Math.Min(BoundaryBiasRampFineFrames, (fineEnd - fineStart) / 2)
+                    ? Math.Min(biasRampFrames, (fineEnd - fineStart) / 2)
                     : 0;
 
                 int lastLocalIdx = -1;
@@ -527,6 +567,52 @@ namespace OpenUtau.Core.HifiNeural {
                     output[m, frame] = (float)Math.Log(Math.Max(sum / FineRatio, 1e-5));
                 }
             }
+        }
+
+        // Returns the fine-frame ramp length for boundary bias matching. Zero means the boundary is
+        // too short or too consonant/transient-heavy and should only use normal overlap handling.
+        static int ResolveBoundaryBiasRampFineFrames(
+            PhoneMelSegment left,
+            PhoneMelSegment right,
+            int overlapLen,
+            int leftFineFrames,
+            int rightFineFrames) {
+            if (overlapLen < Math.Max(2, FineRatio / 2) || !IsStableVowelBoundary(left, right)) {
+                return 0;
+            }
+
+            int leftVowelFrames = Math.Max(0, left.FrameCount - Math.Clamp(left.FixedFrames, 0, left.FrameCount));
+            int rightVowelFrames = Math.Max(0, right.FrameCount - Math.Clamp(right.FixedFrames, 0, right.FrameCount));
+            int baseRamp = Math.Min(leftVowelFrames, rightVowelFrames) >= 12
+                ? BoundaryBiasLongRampFineFrames
+                : BoundaryBiasDefaultRampFineFrames;
+            if (Math.Min(leftVowelFrames, rightVowelFrames) >= 20 && overlapLen >= FineRatio * 2) {
+                baseRamp = BoundaryBiasMaxRampFineFrames;
+            }
+
+            int durationLimit = Math.Max(0, Math.Min(leftFineFrames, rightFineFrames) / 4);
+            int overlapLimit = Math.Max(0, overlapLen * 2);
+            int ramp = Math.Min(baseRamp, Math.Min(durationLimit, overlapLimit));
+            return ramp >= 4 ? Math.Clamp(ramp, 0, BoundaryBiasMaxRampFineFrames) : 0;
+        }
+
+        static bool IsStableVowelBoundary(PhoneMelSegment left, PhoneMelSegment right) {
+            if (left.FrameCount <= 5 || right.FrameCount <= 5) {
+                return false;
+            }
+            int leftFixed = Math.Clamp(left.FixedFrames, 0, left.FrameCount);
+            int rightFixed = Math.Clamp(right.FixedFrames, 0, right.FrameCount);
+            int leftVowelFrames = left.FrameCount - leftFixed;
+            int rightVowelFrames = right.FrameCount - rightFixed;
+            if (leftVowelFrames < 4 || rightVowelFrames < 4) {
+                return false;
+            }
+            // If the incoming phone still has a visible fixed/transient lead, keep its articulation
+            // intact and leave only the overlap cross-fade to handle the joint.
+            if (rightFixed >= 2 || rightFixed * 3 > right.FrameCount) {
+                return false;
+            }
+            return true;
         }
 
         /// <summary>
