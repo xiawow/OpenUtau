@@ -36,6 +36,7 @@ namespace OpenUtau.Core.HifiNeural {
                 || descriptor.abbr == Format.Ustx.BREC
                 || descriptor.abbr == Format.Ustx.TENC
                 || descriptor.abbr == Format.Ustx.VOIC
+                || descriptor.abbr == Format.Ustx.AC
                 || descriptor.abbr == Format.Ustx.HE
                 || string.Equals(descriptor.abbr, HifiGrowlProcessor.CurveAbbr, StringComparison.OrdinalIgnoreCase);
         }
@@ -134,13 +135,16 @@ namespace OpenUtau.Core.HifiNeural {
             // 2. Growl: pitch modulation on highpass band. Runs after the leveler so it operates
             //    on a dynamically balanced signal; its internal RMS matching compensates for any
             //    level change it introduces.
-            // 3. Normalizer: global RMS targeting to -17 dBFS with soft-knee limiting. Runs last
+            // 3. AC: phrase-level amplitude response to target F0 motion. Runs after the local
+            //    leveler so its small vibrato/slide envelope is not immediately flattened.
+            // 4. Normalizer: global RMS targeting to -17 dBFS with soft-knee limiting. Runs last
             //    among the DSP processors because it sets the final loudness for the OpenUtau
             //    dynamics/mixing stage that follows.
-            // 4. Edge guard: cosine fade-in/fade-out at phrase boundaries to suppress clicks.
+            // 5. Edge guard: cosine fade-in/fade-out at phrase boundaries to suppress clicks.
             //    Runs after all DSP to ensure the fades see the final signal.
             HifiPostVocoderLeveler.LevelInPlace(samples, features, HifiMelExtractor.SampleRate);
             HifiGrowlProcessor.ApplyInPlace(samples, phrase, layout.positionMs - layout.leadingMs, HifiMelExtractor.SampleRate);
+            HifiAmplitudeCurveProcessor.ApplyInPlace(samples, phrase, features, layout.positionMs - layout.leadingMs, HifiMelExtractor.SampleRate);
             HifiLoudnessNormalizer.NormalizeInPlace(samples, HifiMelExtractor.SampleRate);
             ApplyPhraseEdgeGuard(samples, HifiMelExtractor.SampleRate);
             if (HifiRenderConfig.DebugExportEnabled) {
@@ -250,6 +254,15 @@ namespace OpenUtau.Core.HifiNeural {
                     abbr = HifiGrowlProcessor.CurveAbbr,
                     type = UExpressionType.Curve,
                     min = 0,
+                    max = 100,
+                    defaultValue = 0,
+                    isFlag = false,
+                },
+                new UExpressionDescriptor {
+                    name = HifiAmplitudeCurveProcessor.CurveName,
+                    abbr = Format.Ustx.AC,
+                    type = UExpressionType.Curve,
+                    min = -100,
                     max = 100,
                     defaultValue = 0,
                     isFlag = false,
