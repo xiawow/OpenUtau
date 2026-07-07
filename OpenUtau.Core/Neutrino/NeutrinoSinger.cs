@@ -48,10 +48,26 @@ namespace OpenUtau.Core.Neutrino {
         public InferenceSession pitchSession;
         public InferenceSession melspecSession;
         public InferenceSession vocoderSession;
+        public InferenceSession legacyEmbeddingSession;
+        public InferenceSession legacyAcousticSession;
+        public InferenceSession legacyWorldF0Session;
+        public InferenceSession legacyVocoderSession;
+        NeutrinoLegacyTimingModel legacyTimingModel;
         string timingModelPath = string.Empty;
         string pitchModelPath = string.Empty;
         string melspecModelPath = string.Empty;
         string vocoderModelPath = string.Empty;
+        string legacyTimingModelPath = string.Empty;
+        string legacyTimingStatsPath = string.Empty;
+        string legacyEmbeddingModelPath = string.Empty;
+        string legacyAcousticModelPath = string.Empty;
+        string legacyWorldF0ModelPath = string.Empty;
+        string legacyVocoderModelPath = string.Empty;
+        int legacyV2RenderQuality = -1;
+
+        public bool IsLegacyV2 => config?.isLegacyV2 == true || HasLegacyV2ModelFiles(ResolveModelDir());
+        public int LegacyV2SampleRate { get; private set; } = 48000;
+        public int LegacyV2SamplesPerFrame => Math.Max(1, LegacyV2SampleRate / 200);
 
         static readonly object sessionLock = new object();
 
@@ -78,6 +94,7 @@ namespace OpenUtau.Core.Neutrino {
 
         void Load() {
             config = NeutrinoConfig.Load(Location);
+            config.isLegacyV2 |= HasLegacyV2ModelFiles(ResolveModelDir());
 
             var dictPath = ResolveDictionaryPath();
             if (!string.IsNullOrEmpty(dictPath)) {
@@ -195,6 +212,32 @@ namespace OpenUtau.Core.Neutrino {
             }
         }
 
+        public void EnsureLegacyV2Sessions() {
+            lock (sessionLock) {
+                EnsureLegacyV2ModelPaths();
+                if (legacyEmbeddingSession != null
+                    && legacyAcousticSession != null
+                    && legacyWorldF0Session != null
+                    && legacyVocoderSession != null) {
+                    return;
+                }
+                legacyEmbeddingSession ??= LoadSession(legacyEmbeddingModelPath, OnnxRunnerChoice.Default);
+                legacyAcousticSession ??= LoadSession(legacyAcousticModelPath, OnnxRunnerChoice.Default);
+                legacyWorldF0Session ??= LoadSession(legacyWorldF0ModelPath, OnnxRunnerChoice.Default);
+                legacyVocoderSession ??= LoadSession(legacyVocoderModelPath, OnnxRunnerChoice.Default);
+                Log.Information($"Loaded NEUTRINO v2 ONNX sessions for {Name}");
+            }
+        }
+
+        public void EnsureLegacyV2TimingModel() {
+            if (legacyTimingModel != null) return;
+            lock (sessionLock) {
+                EnsureLegacyV2ModelPaths();
+                legacyTimingModel ??= NeutrinoLegacyTimingModel.Load(legacyTimingModelPath, legacyTimingStatsPath);
+                Log.Information($"Loaded NEUTRINO v2 timing model for {Name}");
+            }
+        }
+
         void EnsureModelPaths() {
             if (!string.IsNullOrEmpty(timingModelPath)
                 && !string.IsNullOrEmpty(pitchModelPath)
@@ -209,15 +252,165 @@ namespace OpenUtau.Core.Neutrino {
             vocoderModelPath = Path.Combine(modelDir, "v.bin");
         }
 
+        void EnsureLegacyV2ModelPaths() {
+            int requestedQuality = NormalizeLegacyV2RenderQuality(Preferences.Default.NeutrinoLegacyV2RenderQuality);
+            if (!string.IsNullOrEmpty(legacyEmbeddingModelPath)
+                && !string.IsNullOrEmpty(legacyTimingModelPath)
+                && !string.IsNullOrEmpty(legacyTimingStatsPath)
+                && !string.IsNullOrEmpty(legacyAcousticModelPath)
+                && !string.IsNullOrEmpty(legacyWorldF0ModelPath)
+                && !string.IsNullOrEmpty(legacyVocoderModelPath)
+                && legacyV2RenderQuality == requestedQuality) {
+                return;
+            }
+
+            if (legacyV2RenderQuality >= 0 && legacyV2RenderQuality != requestedQuality) {
+                legacyAcousticSession?.Dispose();
+                legacyAcousticSession = null;
+                legacyVocoderSession?.Dispose();
+                legacyVocoderSession = null;
+                legacyAcousticModelPath = string.Empty;
+                legacyVocoderModelPath = string.Empty;
+            }
+            legacyV2RenderQuality = requestedQuality;
+
+            var modelDir = ResolveModelDir();
+            legacyTimingModelPath = RequireExisting(Path.Combine(modelDir, "t.bin"), "NEUTRINO v2 timing model");
+            legacyTimingStatsPath = RequireExisting(Path.Combine(modelDir, "ts.bin"), "NEUTRINO v2 timing stats");
+            legacyEmbeddingModelPath = RequireExisting(Path.Combine(modelDir, "e.bin"), "NEUTRINO v2 embedding model");
+            var suffixes = ResolveLegacyV2QualitySuffixFallbacks(requestedQuality);
+            foreach (var suffix in suffixes) {
+                var acoustic = Path.Combine(modelDir, $"d{suffix}.bin");
+                var vocoder = Path.Combine(modelDir, $"v{suffix}.bin");
+                if (File.Exists(acoustic) && File.Exists(vocoder)) {
+                    legacyAcousticModelPath = acoustic;
+                    legacyVocoderModelPath = vocoder;
+                    break;
+                }
+            }
+            if (string.IsNullOrEmpty(legacyAcousticModelPath)) {
+                legacyAcousticModelPath = FirstExisting(suffixes
+                    .Select(suffix => Path.Combine(modelDir, $"d{suffix}.bin"))
+                    .ToArray());
+            }
+            if (string.IsNullOrEmpty(legacyVocoderModelPath)) {
+                legacyVocoderModelPath = FirstExisting(suffixes
+                    .Select(suffix => Path.Combine(modelDir, $"v{suffix}.bin"))
+                    .ToArray());
+            }
+            legacyWorldF0ModelPath = ResolveLegacyWorldF0ModelPath(modelDir);
+
+            if (string.IsNullOrEmpty(legacyAcousticModelPath)) {
+                throw new FileNotFoundException($"NEUTRINO v2 acoustic model was not found in {modelDir}");
+            }
+            if (string.IsNullOrEmpty(legacyVocoderModelPath)) {
+                throw new FileNotFoundException($"NEUTRINO v2 vocoder model was not found in {modelDir}");
+            }
+            if (string.IsNullOrEmpty(legacyWorldF0ModelPath)) {
+                throw new FileNotFoundException(
+                    $"NEUTRINO v2 world_f0.bin was not found near {modelDir}. " +
+                    "Place it in the original NEUTRINO bin directory or OpenUtau data Neutrino/v2 directory.");
+            }
+
+            LegacyV2SampleRate = Path.GetFileName(legacyVocoderModelPath).Equals("ve.bin", StringComparison.OrdinalIgnoreCase)
+                ? 24000
+                : 48000;
+        }
+
         string ResolveModelDir() {
             var nested = Path.Combine(Location, "model");
-            if (File.Exists(Path.Combine(nested, "t.bin"))) {
+            if (HasV3ModelFiles(nested)) {
                 return nested;
             }
-            if (File.Exists(Path.Combine(Location, "t.bin"))) {
+            if (HasV3ModelFiles(Location)) {
                 return Location;
             }
+            if (HasLegacyV2ModelFiles(Location)) {
+                return Location;
+            }
+            if (HasLegacyV2ModelFiles(nested)) {
+                return nested;
+            }
+            if (Directory.Exists(nested)) {
+                var legacyModelDir = Directory.EnumerateDirectories(nested)
+                    .FirstOrDefault(HasLegacyV2ModelFiles);
+                if (!string.IsNullOrEmpty(legacyModelDir)) {
+                    return legacyModelDir;
+                }
+            }
             return nested;
+        }
+
+        static bool HasV3ModelFiles(string directory) {
+            return File.Exists(Path.Combine(directory, "t.bin"))
+                && File.Exists(Path.Combine(directory, "p.bin"))
+                && File.Exists(Path.Combine(directory, "s.bin"))
+                && File.Exists(Path.Combine(directory, "v.bin"));
+        }
+
+        static bool HasLegacyV2ModelFiles(string directory) {
+            return File.Exists(Path.Combine(directory, "e.bin"))
+                && File.Exists(Path.Combine(directory, "t.bin"))
+                && (File.Exists(Path.Combine(directory, "ds.bin"))
+                    || File.Exists(Path.Combine(directory, "da.bin"))
+                    || File.Exists(Path.Combine(directory, "de.bin")))
+                && (File.Exists(Path.Combine(directory, "vs.bin"))
+                    || File.Exists(Path.Combine(directory, "va.bin"))
+                    || File.Exists(Path.Combine(directory, "ve.bin")));
+        }
+
+        public static int NormalizeLegacyV2RenderQuality(int quality) {
+            return Math.Clamp(quality, 0, 2);
+        }
+
+        public static string LegacyV2RenderQualityCacheKey() {
+            return ResolveLegacyV2QualitySuffix(NormalizeLegacyV2RenderQuality(
+                Preferences.Default.NeutrinoLegacyV2RenderQuality));
+        }
+
+        static string ResolveLegacyV2QualitySuffix(int quality) {
+            return quality switch {
+                0 => "e",
+                2 => "a",
+                _ => "s",
+            };
+        }
+
+        static string[] ResolveLegacyV2QualitySuffixFallbacks(int quality) {
+            return quality switch {
+                0 => new[] { "e", "s", "a" },
+                2 => new[] { "a", "s", "e" },
+                _ => new[] { "s", "a", "e" },
+            };
+        }
+
+        static string FirstExisting(params string[] paths) {
+            return paths.FirstOrDefault(File.Exists) ?? string.Empty;
+        }
+
+        static string RequireExisting(string path, string description) {
+            if (!File.Exists(path)) {
+                throw new FileNotFoundException($"{description} was not found: {path}", path);
+            }
+            return path;
+        }
+
+        string ResolveLegacyWorldF0ModelPath(string modelDir) {
+            var candidates = new List<string>();
+            void AddCandidate(string path) {
+                if (!string.IsNullOrEmpty(path) && !candidates.Contains(path)) {
+                    candidates.Add(path);
+                }
+            }
+
+            var dir = new DirectoryInfo(modelDir);
+            for (int i = 0; i < 8 && dir != null; i++, dir = dir.Parent) {
+                AddCandidate(Path.Combine(dir.FullName, "world_f0.bin"));
+                AddCandidate(Path.Combine(dir.FullName, "bin", "world_f0.bin"));
+            }
+            AddCandidate(Path.Combine(PathManager.Inst.DataPath, "Neutrino", "v2", "world_f0.bin"));
+            AddCandidate(Path.Combine(AppContext.BaseDirectory, "Neutrino", "v2", "world_f0.bin"));
+            return candidates.FirstOrDefault(File.Exists) ?? string.Empty;
         }
 
         static InferenceSession LoadSession(string path, OnnxRunnerChoice runnerChoice) {
@@ -243,6 +436,31 @@ namespace OpenUtau.Core.Neutrino {
         public float[] RunVocoder(IReadOnlyCollection<NamedOnnxValue> inputs) {
             EnsureVocoderSession();
             return RunWithCpuFallback(ref vocoderSession, vocoderModelPath, inputs, "vocoder");
+        }
+
+        public float[] RunLegacyEmbedding(IReadOnlyCollection<NamedOnnxValue> inputs) {
+            EnsureLegacyV2Sessions();
+            return RunWithCpuFallback(ref legacyEmbeddingSession, legacyEmbeddingModelPath, inputs, "v2 embedding");
+        }
+
+        public float[] RunLegacyTiming(float[] rawFeatures, int phones) {
+            EnsureLegacyV2TimingModel();
+            return legacyTimingModel.PredictDeltasMs(rawFeatures, phones);
+        }
+
+        public float[] RunLegacyAcoustic(IReadOnlyCollection<NamedOnnxValue> inputs) {
+            EnsureLegacyV2Sessions();
+            return RunWithCpuFallback(ref legacyAcousticSession, legacyAcousticModelPath, inputs, "v2 acoustic");
+        }
+
+        public float[] RunLegacyWorldF0(IReadOnlyCollection<NamedOnnxValue> inputs) {
+            EnsureLegacyV2Sessions();
+            return RunWithCpuFallback(ref legacyWorldF0Session, legacyWorldF0ModelPath, inputs, "v2 world_f0");
+        }
+
+        public float[] RunLegacyVocoder(IReadOnlyCollection<NamedOnnxValue> inputs) {
+            EnsureLegacyV2Sessions();
+            return RunWithCpuFallback(ref legacyVocoderSession, legacyVocoderModelPath, inputs, "v2 vocoder");
         }
 
         float[] RunWithCpuFallback(
@@ -286,6 +504,15 @@ namespace OpenUtau.Core.Neutrino {
                 melspecSession = null;
                 vocoderSession?.Dispose();
                 vocoderSession = null;
+                legacyEmbeddingSession?.Dispose();
+                legacyEmbeddingSession = null;
+                legacyAcousticSession?.Dispose();
+                legacyAcousticSession = null;
+                legacyWorldF0Session?.Dispose();
+                legacyWorldF0Session = null;
+                legacyVocoderSession?.Dispose();
+                legacyVocoderSession = null;
+                legacyTimingModel = null;
             }
         }
 

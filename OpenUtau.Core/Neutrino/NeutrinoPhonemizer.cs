@@ -31,6 +31,9 @@ namespace OpenUtau.Core.Neutrino {
             if (neutrinoSinger == null || notes == null || notes.Length == 0 || timeAxis == null) {
                 return;
             }
+            if (neutrinoSinger.IsLegacyV2) {
+                return;
+            }
             try {
                 neutrinoSinger.EnsureTimingSession();
                 foreach (var phrase in SplitPhrases(notes)) {

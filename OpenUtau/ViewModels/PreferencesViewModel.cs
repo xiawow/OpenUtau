@@ -95,6 +95,7 @@ namespace OpenUtau.App.ViewModels {
         public List<string> HifiNeuralHnsepRunnerOptions { get; set; }
         [Reactive] public string HifiNeuralHnsepRunner { get; set; }
         [Reactive] public bool HifiNeuralDebugExportEnabled { get; set; }
+        [Reactive] public int NeutrinoLegacyV2RenderQuality { get; set; }
         public List<GpuInfo> OnnxGpuOptions { get; set; }
         [Reactive] public GpuInfo OnnxGpu { get; set; }
         [Reactive] public bool ShowOnnxGpu { get; set; }
@@ -180,6 +181,7 @@ namespace OpenUtau.App.ViewModels {
             HifiNeuralHnsepRunnerOptions = HifiHnsepOnnx.RunnerOptions();
             HifiNeuralHnsepRunner = HifiHnsepOnnx.NormalizeRunner(Preferences.Default.HifiNeuralHnsepRunner);
             HifiNeuralDebugExportEnabled = Preferences.Default.HifiNeuralDebugExportEnabled;
+            NeutrinoLegacyV2RenderQuality = Math.Clamp(Preferences.Default.NeutrinoLegacyV2RenderQuality, 0, 2);
             OnnxGpuOptions = Onnx.getGpuInfo();
             OnnxGpu = OnnxGpuOptions.FirstOrDefault(x => x.deviceId == Preferences.Default.OnnxGpu, OnnxGpuOptions[0]);
             ShowOnnxGpu = UsesDirectML(OnnxRunner) || UsesDirectML(HifiNeuralHnsepRunner);
@@ -365,6 +367,11 @@ namespace OpenUtau.App.ViewModels {
             this.WhenAnyValue(vm => vm.HifiNeuralDebugExportEnabled)
                 .Subscribe(enabled => {
                     Preferences.Default.HifiNeuralDebugExportEnabled = enabled;
+                    Preferences.Save();
+                });
+            this.WhenAnyValue(vm => vm.NeutrinoLegacyV2RenderQuality)
+                .Subscribe(quality => {
+                    Preferences.Default.NeutrinoLegacyV2RenderQuality = Math.Clamp(quality, 0, 2);
                     Preferences.Save();
                 });
             this.WhenAnyValue(vm => vm.OnnxGpu)

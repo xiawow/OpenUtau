@@ -210,6 +210,12 @@
             <TextBlock Text="HifiNeural debug export" HorizontalAlignment="Left"/>
             <ToggleSwitch IsChecked="{Binding HifiNeuralDebugExportEnabled}"/>
           </Grid>
+          <TextBlock Text="{DynamicResource prefs.rendering.neutrinolegacyquality}" Margin="0,10,0,0"/>
+          <ComboBox SelectedIndex="{Binding NeutrinoLegacyV2RenderQuality}">
+            <ComboBoxItem Content="{DynamicResource prefs.rendering.neutrinolegacyquality.performance}"/>
+            <ComboBoxItem Content="{DynamicResource prefs.rendering.neutrinolegacyquality.balanced}"/>
+            <ComboBoxItem Content="{DynamicResource prefs.rendering.neutrinolegacyquality.quality}"/>
+          </ComboBox>
           <StackPanel IsVisible="{Binding ShowOnnxGpu}">
             <TextBlock Text="{DynamicResource prefs.rendering.onnxgpu}" Margin="0,10,0,0"/>
             <ComboBox ItemsSource="{Binding OnnxGpuOptions}" SelectedItem="{Binding OnnxGpu}"/>

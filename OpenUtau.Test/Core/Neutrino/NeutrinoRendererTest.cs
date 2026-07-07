@@ -1,6 +1,11 @@
+using System;
+using System.IO;
+using System.Text;
+using OpenUtau.Classic;
 using OpenUtau.Core.Format;
 using OpenUtau.Core.HifiNeural;
 using OpenUtau.Core.Neutrino;
+using OpenUtau.Core.Render;
 using OpenUtau.Core.Ustx;
 using Xunit;
 using FormatUstx = OpenUtau.Core.Format.Ustx;
@@ -18,6 +23,40 @@ namespace OpenUtau.Core.Test.Neutrino {
             };
 
             Assert.True(new NeutrinoRenderer().SupportsExpression(descriptor));
+            Assert.True(new NeutrinoLegacyV2Renderer().SupportsExpression(descriptor));
+        }
+
+        [Fact]
+        public void RegistersLegacyV2RendererSeparately() {
+            Assert.Contains(Renderers.NEUTRINO, Renderers.GetSupportedRenderers(USingerType.Neutrino));
+            Assert.Contains(Renderers.NEUTRINO_V2, Renderers.GetSupportedRenderers(USingerType.Neutrino));
+            Assert.IsType<NeutrinoRenderer>(Renderers.CreateRenderer(Renderers.NEUTRINO));
+            Assert.IsType<NeutrinoLegacyV2Renderer>(Renderers.CreateRenderer(Renderers.NEUTRINO_V2));
+        }
+
+        [Fact]
+        public void LegacyV2SingerDefaultsToLegacyV2Renderer() {
+            string dir = Path.Combine(Path.GetTempPath(), $"neutrino-v2-renderer-{Guid.NewGuid():N}");
+            try {
+                string modelDir = Path.Combine(dir, "model", "MERROW");
+                Directory.CreateDirectory(modelDir);
+                string characterPath = Path.Combine(dir, "character.txt");
+                File.WriteAllText(characterPath, "name=Legacy NEUTRINO\n", Encoding.UTF8);
+                foreach (string model in new[] { "t.bin", "e.bin", "ds.bin", "vs.bin" }) {
+                    File.WriteAllBytes(Path.Combine(modelDir, model), new byte[] { 0 });
+                }
+                var singer = new NeutrinoSinger(new Voicebank {
+                    BasePath = Path.GetDirectoryName(dir),
+                    File = characterPath,
+                    Name = "Legacy NEUTRINO",
+                    Id = "Legacy NEUTRINO",
+                    SingerType = USingerType.Neutrino,
+                });
+
+                Assert.Equal(Renderers.NEUTRINO_V2, Renderers.GetDefaultRenderer(singer));
+            } finally {
+                Directory.Delete(dir, recursive: true);
+            }
         }
 
         [Fact]

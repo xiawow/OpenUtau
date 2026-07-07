@@ -73,5 +73,29 @@ aoieu.wav=u R,5,,33,44,
                 Directory.Delete(dir, recursive: true);
             }
         }
+
+        [Fact]
+        public void DetectsLegacyNeutrinoV2NestedModel() {
+            string dir = Path.Combine(Path.GetTempPath(), $"neutrino-v2-detect-{System.Guid.NewGuid():N}");
+            try {
+                string modelDir = Path.Combine(dir, "model", "MERROW");
+                Directory.CreateDirectory(modelDir);
+                string characterPath = Path.Combine(dir, "character.txt");
+                File.WriteAllText(characterPath, "name=Legacy NEUTRINO\n", Encoding.UTF8);
+                using (var stream = File.Create(Path.Combine(dir, "character.yaml"))) {
+                    new VoicebankConfig { SingerType = "utau" }.Save(stream);
+                }
+                foreach (string model in new[] { "t.bin", "e.bin", "ds.bin", "vs.bin" }) {
+                    File.WriteAllBytes(Path.Combine(modelDir, model), new byte[] { 0 });
+                }
+
+                var voicebank = new Voicebank();
+                VoicebankLoader.LoadInfo(voicebank, characterPath, Path.GetDirectoryName(dir)!);
+
+                Assert.Equal(USingerType.Neutrino, voicebank.SingerType);
+            } finally {
+                Directory.Delete(dir, recursive: true);
+            }
+        }
     }
 }

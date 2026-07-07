@@ -28,7 +28,7 @@ namespace OpenUtau.Core.Ustx {
                 return;
             }
             if (string.IsNullOrEmpty(renderer)) {
-                renderer = Renderers.GetDefaultRenderer(track.Singer.SingerType);
+                renderer = Renderers.GetDefaultRenderer(track.Singer);
             }
             if (renderer != Renderer?.ToString()) {
                 Renderer = Renderers.CreateRenderer(renderer);
@@ -232,7 +232,7 @@ namespace OpenUtau.Core.Ustx {
             }
             if (Singer != null && Singer.Found) {
                 if (string.IsNullOrEmpty(RendererSettings.renderer)) {
-                    RendererSettings.renderer = Renderers.GetDefaultRenderer(Singer.SingerType);
+                    RendererSettings.renderer = Renderers.GetDefaultRenderer(Singer);
                 }
             }
             TrackNo = project.tracks.IndexOf(this);

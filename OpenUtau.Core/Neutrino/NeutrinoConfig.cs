@@ -13,6 +13,9 @@ namespace OpenUtau.Core.Neutrino {
         public int topKey = 86;     // MIDI note upper limit
         public int bottomKey = 41;  // MIDI note lower limit
         public string modelVersion = "";
+        public string acousticType = "stable";
+        public string vocoderType = "stable";
+        public bool isLegacyV2 = false;
         public bool support = true;
 
         // Model file paths (relative to singer location)
@@ -67,6 +70,23 @@ namespace OpenUtau.Core.Neutrino {
                         case "bottom_key": int.TryParse(value, out config.bottomKey); break;
                         case "version": config.modelVersion = value; break;
                         case "support": config.support = value.ToLower() == "true"; break;
+                    }
+                } else if (section == "acoustic") {
+                    switch (key) {
+                        case "version":
+                            config.modelVersion = value;
+                            config.isLegacyV2 |= value.StartsWith("v2.", StringComparison.OrdinalIgnoreCase);
+                            break;
+                        case "type": config.acousticType = value; break;
+                        case "top_key": int.TryParse(value, out config.topKey); break;
+                        case "bottom_key": int.TryParse(value, out config.bottomKey); break;
+                    }
+                } else if (section == "vocoder") {
+                    switch (key) {
+                        case "version":
+                            config.isLegacyV2 |= value.StartsWith("v2.", StringComparison.OrdinalIgnoreCase);
+                            break;
+                        case "type": config.vocoderType = value; break;
                     }
                 }
             }
