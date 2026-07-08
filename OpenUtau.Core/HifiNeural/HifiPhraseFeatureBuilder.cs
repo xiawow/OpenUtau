@@ -133,6 +133,11 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         public HifiPhraseFeatures Build(RenderPhrase phrase, RenderResult layout) {
+            return Build(phrase, layout, HifiRenderContext.None);
+        }
+
+        public HifiPhraseFeatures Build(RenderPhrase phrase, RenderResult layout, HifiRenderContext context) {
+            context.ThrowIfCancellationRequested();
             double phraseStartMs = layout.positionMs - layout.leadingMs;
             int targetFrames = Math.Max(1, (int)Math.Ceiling(layout.estimatedLengthMs / HifiF0Builder.FrameMs));
             float[] f0 = f0Builder.Build(phrase, targetFrames, phraseStartMs);
@@ -145,7 +150,8 @@ namespace OpenUtau.Core.HifiNeural {
             // overlap cross-fades. Replaces the previous SharpWavtool rough + variable-position
             // mel sampling, which broke VCV/CVVC vowel boundaries under stretch.
             var sourceCache = new Dictionary<string, float[]>(StringComparer.OrdinalIgnoreCase);
-            float[,] alignedMel = melAssembler.Build(phrase, phraseStartMs, targetFrames, f0, sourceCache, out var assemblyReport);
+            float[,] alignedMel = melAssembler.Build(phrase, phraseStartMs, targetFrames, f0, sourceCache, out var assemblyReport, context);
+            context.ThrowIfCancellationRequested();
 
             // NOTE: F0 is kept continuous across consonants on purpose. This NSF vocoder produces
             // silence (not noise) when F0 == 0, so masking the consonant F0 made those frames go

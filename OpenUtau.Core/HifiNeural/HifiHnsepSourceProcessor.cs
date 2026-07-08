@@ -25,11 +25,16 @@ namespace OpenUtau.Core.HifiNeural {
         public string LastFailureReason => lastFailureReason;
 
         public bool TryGetSlice(string sourcePath, RenderPhone phone, float[] fullSamples, float[] sourceSlice, out HifiHnsepResult result) {
+            return TryGetSlice(sourcePath, phone, fullSamples, sourceSlice, out result, HifiRenderContext.None);
+        }
+
+        public bool TryGetSlice(string sourcePath, RenderPhone phone, float[] fullSamples, float[] sourceSlice, out HifiHnsepResult result, HifiRenderContext context) {
             result = null!;
             if (fullSamples.Length == 0 || sourceSlice.Length == 0) {
                 lastFailureReason = "empty_source";
                 return false;
             }
+            context.ThrowIfCancellationRequested();
             if (!TryGetOtoSliceBounds(phone, fullSamples.Length, out int sliceStart, out int sliceLength)
                 || sliceLength != sourceSlice.Length) {
                 lastFailureReason = $"slice_bounds_mismatch:source={fullSamples.Length}:slice={sourceSlice.Length}";
@@ -55,23 +60,27 @@ namespace OpenUtau.Core.HifiNeural {
             }
 
             return fullSamples.Length <= MaxWholeFileSamples
-                ? TryGetSliceFromWholeFile(sourcePath, fullSamples, sliceStart, sliceLength, out result)
-                : TryGetSliceWithContext(sourcePath, fullSamples, sliceStart, sliceLength, out result);
+                ? TryGetSliceFromWholeFile(sourcePath, fullSamples, sliceStart, sliceLength, out result, context)
+                : TryGetSliceWithContext(sourcePath, fullSamples, sliceStart, sliceLength, out result, context);
         }
 
-        bool TryGetSliceFromWholeFile(string sourcePath, float[] fullSamples, int sliceStart, int sliceLength, out HifiHnsepResult result) {
+        bool TryGetSliceFromWholeFile(string sourcePath, float[] fullSamples, int sliceStart, int sliceLength, out HifiHnsepResult result, HifiRenderContext context) {
             result = null!;
             string key = FileCacheKey(sourcePath, fullSamples.Length);
             if (!fileCache.TryGetValue(key, out var cached)) {
                 string diskPath = HifiHnsepDiskCache.GetPath(key);
                 if (!HifiHnsepDiskCache.TryLoad(diskPath, fullSamples.Length, out cached)) {
                     try {
-                        cached = model!.Separate(fullSamples);
+                        context.ThrowIfCancellationRequested();
+                        cached = model!.Separate(fullSamples, context);
+                        context.ThrowIfCancellationRequested();
                         HifiHnsepDiskCache.TrySave(diskPath, cached);
                         Log.Debug(
                             "Hifi HNSEP file separated source={Source} source_samples={SourceSamples}",
                             sourcePath,
                             fullSamples.Length);
+                    } catch (OperationCanceledException) {
+                        throw;
                     } catch (Exception e) {
                         Log.Warning(e, "Hifi HNSEP separation failed source={Source}", sourcePath);
                         lastFailureReason = "separation_failed:" + e.GetType().Name + ":" + e.Message;
@@ -97,7 +106,7 @@ namespace OpenUtau.Core.HifiNeural {
 
         // Oversized files (well beyond normal voicebank samples) keep the slice+context path so a
         // single phone never triggers a minutes-long separation.
-        bool TryGetSliceWithContext(string sourcePath, float[] fullSamples, int sliceStart, int sliceLength, out HifiHnsepResult result) {
+        bool TryGetSliceWithContext(string sourcePath, float[] fullSamples, int sliceStart, int sliceLength, out HifiHnsepResult result, HifiRenderContext context) {
             result = null!;
             int contextSamples = HifiMelExtractor.SampleRate / 4;
             int contextStart = Math.Max(0, sliceStart - contextSamples);
@@ -113,9 +122,11 @@ namespace OpenUtau.Core.HifiNeural {
                 string diskPath = HifiHnsepDiskCache.GetPath(key);
                 if (!HifiHnsepDiskCache.TryLoad(diskPath, sliceLength, out cached)) {
                     try {
-                        var context = new float[contextLength];
-                        Array.Copy(fullSamples, contextStart, context, 0, contextLength);
-                        var separatedContext = model!.Separate(context);
+                        context.ThrowIfCancellationRequested();
+                        var contextSamplesBuffer = new float[contextLength];
+                        Array.Copy(fullSamples, contextStart, contextSamplesBuffer, 0, contextLength);
+                        var separatedContext = model!.Separate(contextSamplesBuffer, context);
+                        context.ThrowIfCancellationRequested();
                         int cropStart = sliceStart - contextStart;
                         if (separatedContext.Harmonic.Length < cropStart + sliceLength) {
                             throw new InvalidDataException(
@@ -131,6 +142,8 @@ namespace OpenUtau.Core.HifiNeural {
                             sliceStart,
                             sliceLength,
                             contextLength);
+                    } catch (OperationCanceledException) {
+                        throw;
                     } catch (Exception e) {
                         Log.Warning(e, "Hifi HNSEP separation failed source={Source}", sourcePath);
                         lastFailureReason = "separation_failed:" + e.GetType().Name + ":" + e.Message;
@@ -396,12 +409,25 @@ namespace OpenUtau.Core.HifiNeural {
             HifiFrameParameterTrack parameterTrack,
             HifiHnsepSourceCache cache,
             out HifiHnsepProcessingReport report) {
+            return Apply(phone, sourcePath, fullSamples, sourceSlice, parameterTrack, cache, out report, HifiRenderContext.None);
+        }
+
+        public static float[] Apply(
+            RenderPhone phone,
+            string sourcePath,
+            float[] fullSamples,
+            float[] sourceSlice,
+            HifiFrameParameterTrack parameterTrack,
+            HifiHnsepSourceCache cache,
+            out HifiHnsepProcessingReport report,
+            HifiRenderContext context) {
             var parameters = parameterTrack.Average;
             if (!parameterTrack.NeedsHnsep || sourceSlice.Length == 0) {
                 report = new HifiHnsepProcessingReport(false, false, "neutral_parameters_or_empty_slice");
                 return sourceSlice;
             }
-            if (!cache.TryGetSlice(sourcePath, phone, fullSamples, sourceSlice, out var separated)) {
+            context.ThrowIfCancellationRequested();
+            if (!cache.TryGetSlice(sourcePath, phone, fullSamples, sourceSlice, out var separated, context)) {
                 string reason = string.IsNullOrWhiteSpace(cache.LastFailureReason)
                     ? "no_model_or_separation_failed"
                     : cache.LastFailureReason;

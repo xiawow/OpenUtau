@@ -25,6 +25,7 @@ namespace OpenUtau.Core.HifiNeural {
 
         readonly string modelPath;
         readonly InferenceSession session;
+        readonly bool usesDirectML;
         readonly int[] melDims;
         readonly int[] f0Dims;
 
@@ -32,15 +33,25 @@ namespace OpenUtau.Core.HifiNeural {
 
         public HifiOnnxVocoder(string? modelPath = null) {
             this.modelPath = ResolveModelPath(modelPath);
+            usesDirectML = IsDirectMLRunner(ResolveSessionContext().Runner);
             session = GetCachedSession(this.modelPath);
             (melDims, f0Dims) = GetCachedDims(session, this.modelPath);
         }
 
         public float[] Infer(HifiPhraseFeatures features) {
-            return Infer(features.Mel, features.F0);
+            return Infer(features, HifiRenderContext.None);
+        }
+
+        public float[] Infer(HifiPhraseFeatures features, HifiRenderContext context) {
+            return Infer(features.Mel, features.F0, context);
         }
 
         public float[] Infer(float[,] mel, float[] f0) {
+            return Infer(mel, f0, HifiRenderContext.None);
+        }
+
+        public float[] Infer(float[,] mel, float[] f0, HifiRenderContext context) {
+            context.ThrowIfCancellationRequested();
             int bins = mel.GetLength(0);
             int frames = mel.GetLength(1);
             if (bins != MelBins) {
@@ -55,7 +66,12 @@ namespace OpenUtau.Core.HifiNeural {
                 NamedOnnxValue.CreateFromTensor("f0", CreateF0Tensor(f0)),
             };
             Onnx.VerifyInputNames(session, inputs);
-            using var outputs = session.Run(inputs);
+            using var outputs = HifiDmlInferenceGate.Run(
+                usesDirectML,
+                "vocoder",
+                context,
+                () => session.Run(inputs));
+            context.ThrowIfCancellationRequested();
             var tensor = outputs.First().AsTensor<float>();
             return tensor.ToArray();
         }
@@ -257,6 +273,10 @@ namespace OpenUtau.Core.HifiNeural {
             }
             int gpu = Math.Max(0, Preferences.Default.OnnxGpu);
             return (runner, gpu);
+        }
+
+        static bool IsDirectMLRunner(string runner) {
+            return string.Equals(runner, "DirectML", StringComparison.OrdinalIgnoreCase);
         }
     }
 }

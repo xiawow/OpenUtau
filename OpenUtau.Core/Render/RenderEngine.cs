@@ -165,7 +165,7 @@ namespace OpenUtau.Core.Render {
                     if (trackRequests.Length == 0) {
                         trackMixes.Add(null);
                     } else {
-                        RenderRequests(trackRequests, newCancellation);
+                        RenderRequests(trackRequests, newCancellation, isPreRender: false);
                         var mix = new WaveMix(trackRequests.Select(req => req.mix).ToArray());
                         trackMixes.Add(mix);
                     }
@@ -187,7 +187,7 @@ namespace OpenUtau.Core.Render {
                     if (newCancellation.Token.IsCancellationRequested) {
                         return;
                     }
-                    RenderRequests(PrepareRequests(), newCancellation);
+                    RenderRequests(PrepareRequests(), newCancellation, isPreRender: true);
                 } catch (Exception e) {
                     if (!newCancellation.IsCancellationRequested) {
                         Log.Error(e, "Failed to pre-render.");
@@ -232,7 +232,8 @@ namespace OpenUtau.Core.Render {
         private void RenderRequests(
             RenderPartRequest[] requests,
             CancellationTokenSource cancellation,
-            bool playing = false) {
+            bool playing = false,
+            bool isPreRender = false) {
             if (requests.Length == 0 || cancellation.IsCancellationRequested) {
                 return;
             }
@@ -253,7 +254,7 @@ namespace OpenUtau.Core.Render {
                 var phrase = tuple.Item1;
                 var source = tuple.Item2;
                 var request = tuple.Item3;
-                var task = phrase.renderer.Render(phrase, progress, request.trackNo, cancellation, true);
+                var task = phrase.renderer.Render(phrase, progress, request.trackNo, cancellation, isPreRender);
                 task.Wait();
                 if (cancellation.IsCancellationRequested) {
                     break;

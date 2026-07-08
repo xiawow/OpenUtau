@@ -30,6 +30,8 @@ namespace OpenUtau.Core.HifiNeural {
 
         readonly string modelPath;
         readonly InferenceSession session;
+        readonly string runner;
+        readonly bool usesDirectML;
         readonly int nfft;
         readonly int hop;
         readonly int workerThreads;
@@ -40,8 +42,10 @@ namespace OpenUtau.Core.HifiNeural {
             this.modelPath = modelPath;
             this.nfft = nfft;
             this.hop = hop;
-            workerThreads = ResolveCpuThreadCount();
-            maxConcurrentSeparations = ResolveMaxConcurrentSeparations(workerThreads);
+            runner = ResolveHnsepRunner(Path.GetFullPath(modelPath));
+            usesDirectML = string.Equals(runner, RunnerDirectML, StringComparison.OrdinalIgnoreCase);
+            workerThreads = ResolveWorkerThreadCountForRunner(runner);
+            maxConcurrentSeparations = ResolveMaxConcurrentSeparationsForRunner(workerThreads, runner);
             window = BuildHannWindow(nfft);
             session = GetCachedSession(modelPath, workerThreads, maxConcurrentSeparations);
         }
@@ -93,20 +97,25 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         public HifiHnsepResult Separate(float[] samples) {
+            return Separate(samples, HifiRenderContext.None);
+        }
+
+        public HifiHnsepResult Separate(float[] samples, HifiRenderContext context) {
             if (samples.Length == 0) {
                 return new HifiHnsepResult { Harmonic = Array.Empty<float>() };
             }
+            context.ThrowIfCancellationRequested();
 
             var gate = separationGates.GetOrAdd(maxConcurrentSeparations, count => new SemaphoreSlim(count, count));
-            gate.Wait();
+            gate.Wait(context.CancellationToken);
             try {
-                return SeparateCore(samples);
+                return SeparateCore(samples, context);
             } finally {
                 gate.Release();
             }
         }
 
-        HifiHnsepResult SeparateCore(float[] samples) {
+        HifiHnsepResult SeparateCore(float[] samples, HifiRenderContext context) {
             int originalLength = samples.Length;
             int t1 = originalLength + hop;
             int segmentLength = 32 * hop;
@@ -117,21 +126,30 @@ namespace OpenUtau.Core.HifiNeural {
             Array.Copy(samples, 0, padded, leftPad, originalLength);
 
             var spec = Stft(padded);
+            context.ThrowIfCancellationRequested();
             int bins = spec.GetLength(0);
             int frames = spec.GetLength(1);
             var inputData = new float[2 * bins * frames];
             WriteInputTensorData(spec, inputData, bins, frames);
+            context.ThrowIfCancellationRequested();
 
             string inputName = session.InputMetadata.Keys.First();
-            using var outputs = session.Run(new[] {
-                NamedOnnxValue.CreateFromTensor(inputName, new DenseTensor<float>(inputData, new[] { 1, 2, bins, frames })),
-            });
+            using var outputs = HifiDmlInferenceGate.Run(
+                usesDirectML,
+                "hnsep",
+                context,
+                () => session.Run(new[] {
+                    NamedOnnxValue.CreateFromTensor(inputName, new DenseTensor<float>(inputData, new[] { 1, 2, bins, frames })),
+                }));
             var output = outputs.First().AsTensor<float>().ToArray();
+            context.ThrowIfCancellationRequested();
 
             var predicted = new Complex[bins, frames];
             DecodeMaskOutput(output, spec, predicted, bins, frames);
+            context.ThrowIfCancellationRequested();
 
             var separatedPadded = Istft(predicted, padded.Length);
+            context.ThrowIfCancellationRequested();
             var harmonic = new float[originalLength];
             Array.Copy(separatedPadded, leftPad, harmonic, 0, originalLength);
             return new HifiHnsepResult { Harmonic = harmonic };
@@ -425,6 +443,10 @@ namespace OpenUtau.Core.HifiNeural {
             }
             var options = new SessionOptions {
                 GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
+                EnableMemoryPattern = false,
+                ExecutionMode = ExecutionMode.ORT_SEQUENTIAL,
+                InterOpNumThreads = 1,
+                IntraOpNumThreads = 1,
             };
             options.AppendExecutionProvider_DML(Math.Max(0, Preferences.Default.OnnxGpu));
             return new InferenceSession(fullPath, options);
@@ -436,17 +458,31 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         internal static int ResolveCpuThreadCount() {
+            return ResolveWorkerThreadCountForRunner(RunnerCpu);
+        }
+
+        internal static int ResolveWorkerThreadCountForRunner(string runner) {
             if (TryReadPositiveEnvironmentInt("HIFI_NEURAL_HNSEP_THREADS", out int explicitThreads)) {
                 return Math.Clamp(explicitThreads, 1, Math.Max(1, Environment.ProcessorCount));
             }
             int renderThreads = Math.Max(1, Preferences.Default.NumRenderThreads);
+            if (string.Equals(runner, RunnerDirectML, StringComparison.OrdinalIgnoreCase)) {
+                return Math.Clamp(renderThreads, 1, Math.Min(2, Math.Max(1, Environment.ProcessorCount / 2)));
+            }
             int cpuThreadCap = Math.Max(1, Environment.ProcessorCount / 2);
             return Math.Clamp(renderThreads, 1, cpuThreadCap);
         }
 
         internal static int ResolveMaxConcurrentSeparations(int workerThreads) {
+            return ResolveMaxConcurrentSeparationsForRunner(workerThreads, RunnerCpu);
+        }
+
+        internal static int ResolveMaxConcurrentSeparationsForRunner(int workerThreads, string runner) {
             if (TryReadPositiveEnvironmentInt("HIFI_NEURAL_HNSEP_CONCURRENCY", out int explicitConcurrency)) {
                 return Math.Clamp(explicitConcurrency, 1, Math.Max(1, Preferences.Default.NumRenderThreads));
+            }
+            if (string.Equals(runner, RunnerDirectML, StringComparison.OrdinalIgnoreCase)) {
+                return 1;
             }
             workerThreads = Math.Max(1, workerThreads);
             int renderThreads = Math.Max(1, Preferences.Default.NumRenderThreads);

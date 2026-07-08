@@ -59,6 +59,7 @@ namespace OpenUtau.Core.HifiNeural {
         public Task<RenderResult> Render(RenderPhrase phrase, Progress progress, int trackNo, CancellationTokenSource cancellation, bool isPreRender = false) {
             return Task.Run(() => {
                 var result = Layout(phrase);
+                var context = new HifiRenderContext(isPreRender, cancellation.Token);
                 bool gateTaken = false;
                 try {
                     renderGate.Wait(cancellation.Token);
@@ -82,7 +83,7 @@ namespace OpenUtau.Core.HifiNeural {
                         result.samples = Wave.GetSamples(waveStream.ToSampleProvider().ToMono(1, 0));
                     }
                     if (result.samples == null) {
-                        result.samples = RenderInternal(phrase, result, cancellation, wavPath, modelPath, modelDiagnostic);
+                        result.samples = RenderInternal(phrase, result, context, wavPath, modelPath, modelDiagnostic);
                     }
                     if (result.samples != null) {
                         Renderers.ApplyDynamics(phrase, result);
@@ -100,7 +101,7 @@ namespace OpenUtau.Core.HifiNeural {
             });
         }
 
-        float[] RenderInternal(RenderPhrase phrase, RenderResult layout, CancellationTokenSource cancellation, string? wavPath, string modelPath, string modelDiagnostic) {
+        float[] RenderInternal(RenderPhrase phrase, RenderResult layout, HifiRenderContext context, string? wavPath, string modelPath, string modelDiagnostic) {
             Log.Information("HifiNeuralPhraseRenderer phrase notes={Notes} phones={Phones} durationMs={Duration:F1} sampleRate={SampleRate}",
                 phrase.notes.Length, phrase.phones.Length, layout.estimatedLengthMs, HifiMelExtractor.SampleRate);
             if (phrase.phones.Length == 0) {
@@ -108,15 +109,14 @@ namespace OpenUtau.Core.HifiNeural {
             }
             Log.Information("HifiNeuralPhraseRenderer mel_domain_concat mode=overlap_only phones={Phones}", phrase.phones.Length);
             var featureBuilder = new HifiPhraseFeatureBuilder(HifiRenderConfig.CreateMelEnhancer());
-            var features = featureBuilder.Build(phrase, layout);
+            var features = featureBuilder.Build(phrase, layout, context);
+            context.ThrowIfCancellationRequested();
             string debugKey = $"{phrase.hash:x16}";
             if (HifiRenderConfig.DebugExportEnabled) {
                 HifiDebugExporter.Export(debugKey, features);
             }
 
-            if (cancellation.IsCancellationRequested) {
-                return Array.Empty<float>();
-            }
+            context.ThrowIfCancellationRequested();
 
             if (string.IsNullOrWhiteSpace(modelPath)) {
                 var missing = new FileNotFoundException(modelDiagnostic);
@@ -128,7 +128,8 @@ namespace OpenUtau.Core.HifiNeural {
             }
 
             using var vocoder = new HifiOnnxVocoder(modelPath);
-            float[] samples = vocoder.Infer(features);
+            float[] samples = vocoder.Infer(features, context);
+            context.ThrowIfCancellationRequested();
             // Post-processing chain order:
             // 1. Leveler: per-frame RMS leveling to even out dynamics within the phrase.
             //    Runs first because it operates on the raw vocoder output's local loudness profile.
@@ -147,6 +148,7 @@ namespace OpenUtau.Core.HifiNeural {
             HifiAmplitudeCurveProcessor.ApplyInPlace(samples, phrase, features, layout.positionMs - layout.leadingMs, HifiMelExtractor.SampleRate);
             HifiLoudnessNormalizer.NormalizeInPlace(samples, HifiMelExtractor.SampleRate);
             ApplyPhraseEdgeGuard(samples, HifiMelExtractor.SampleRate);
+            context.ThrowIfCancellationRequested();
             if (HifiRenderConfig.DebugExportEnabled) {
                 HifiClickDiagnostic.Export(debugKey, features, samples);
             }
