@@ -64,6 +64,8 @@ namespace OpenUtau.App.ViewModels {
         // Paths
         public string SingerPath => PathManager.Inst.SingersPath;
         public string AdditionalSingersPath => !string.IsNullOrWhiteSpace(PathManager.Inst.AdditionalSingersPath) ? PathManager.Inst.AdditionalSingersPath : "(None)";
+        public string CudaPath => OnnxRuntimeLibraryLoader.GetCudaDependencyPathDisplay();
+        public string CudnnPath => OnnxRuntimeLibraryLoader.GetCudnnDependencyPathDisplay();
         [Reactive] public bool InstallToAdditionalSingersPath { get; set; }
         [Reactive] public bool LoadDeepFolders { get; set; }
 
@@ -184,7 +186,7 @@ namespace OpenUtau.App.ViewModels {
             NeutrinoLegacyV2RenderQuality = Math.Clamp(Preferences.Default.NeutrinoLegacyV2RenderQuality, 0, 2);
             OnnxGpuOptions = Onnx.getGpuInfo();
             OnnxGpu = OnnxGpuOptions.FirstOrDefault(x => x.deviceId == Preferences.Default.OnnxGpu, OnnxGpuOptions[0]);
-            ShowOnnxGpu = UsesDirectML(OnnxRunner) || UsesDirectML(HifiNeuralHnsepRunner);
+            ShowOnnxGpu = UsesGpuRunner(OnnxRunner) || UsesGpuRunner(HifiNeuralHnsepRunner);
             DiffSingerDepth = Preferences.Default.DiffSingerDepth * 100;
             DiffSingerSteps = Preferences.Default.DiffSingerSteps;
             DiffSingerStepsVariance = Preferences.Default.DiffSingerStepsVariance;
@@ -461,6 +463,18 @@ namespace OpenUtau.App.ViewModels {
             this.RaisePropertyChanged(nameof(AdditionalSingersPath));
         }
 
+        public void SetCudaPath(string path) {
+            Preferences.Default.CudaPath = path;
+            Preferences.Save();
+            this.RaisePropertyChanged(nameof(CudaPath));
+        }
+
+        public void SetCudnnPath(string path) {
+            Preferences.Default.CudnnPath = path;
+            Preferences.Save();
+            this.RaisePropertyChanged(nameof(CudnnPath));
+        }
+
         public void SetVLabelerPath(string path) {
             Preferences.Default.VLabelerPath = path;
             Preferences.Save();
@@ -491,11 +505,12 @@ namespace OpenUtau.App.ViewModels {
         }
 
         void UpdateOnnxGpuDisplay() {
-            ShowOnnxGpu = UsesDirectML(OnnxRunner) || UsesDirectML(HifiNeuralHnsepRunner);
+            ShowOnnxGpu = UsesGpuRunner(OnnxRunner) || UsesGpuRunner(HifiNeuralHnsepRunner);
         }
 
-        static bool UsesDirectML(string runner) {
-            return string.Equals(runner, "DirectML", StringComparison.OrdinalIgnoreCase);
+        static bool UsesGpuRunner(string runner) {
+            return string.Equals(runner, "DirectML", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(runner, "CUDA", StringComparison.OrdinalIgnoreCase);
         }
     }
 }

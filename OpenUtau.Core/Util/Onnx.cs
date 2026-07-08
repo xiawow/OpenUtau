@@ -29,17 +29,21 @@ namespace OpenUtau.Core {
             var ortDevices = env.GetEpDevices();
 
             return ortDevices
-                .Where(device => device.EpName.ToLower().Contains("dml"))
+                .Where(IsGpuExecutionProvider)
                 .Select((device, index) => new { index, device })
                 .ToDictionary(x => x.index, x => x.device);
         }
 
         public static List<string> getRunnerOptions() {
             if (OS.IsWindows()) {
-                return new List<string> {
-                "CPU",
-                "DirectML"
+                var options = new List<string> {
+                    "CPU",
+                    "DirectML"
                 };
+                if (OnnxRuntimeLibraryLoader.IsCudaRuntimeAvailable()) {
+                    options.Add(OnnxRuntimeLibraryLoader.RunnerCuda);
+                }
+                return options;
             } else if (OS.IsMacOS()) {
                 return new List<string> {
                 "CPU",
@@ -67,7 +71,7 @@ namespace OpenUtau.Core {
             var ortDevices = env.GetEpDevices();
 
             var i = 0;
-            foreach (var device in ortDevices.Where(device => device.EpName.ToLower().Contains("dml"))) {
+            foreach (var device in ortDevices.Where(IsGpuExecutionProvider)) {
                 var description = "";
                 foreach (var item in device.HardwareDevice.Metadata.Entries) {
                     if (item.Key.ToLower() == "description") {
@@ -90,6 +94,11 @@ namespace OpenUtau.Core {
                 });
             }
             return gpuList;
+        }
+
+        static bool IsGpuExecutionProvider(OrtEpDevice device) {
+            string epName = device.EpName.ToLowerInvariant();
+            return epName.Contains("dml") || epName.Contains("cuda");
         }
 
         private static SessionOptions getOnnxSessionOptions(bool coremlEnableOnSubgraphs = false) {
@@ -117,6 +126,13 @@ namespace OpenUtau.Core {
                         new List<OrtEpDevice> { d },
                         new Dictionary<string, string> { }
                      );
+                    break;
+                case OnnxRuntimeLibraryLoader.RunnerCuda:
+                    options.EnableMemoryPattern = false;
+                    options.ExecutionMode = ExecutionMode.ORT_SEQUENTIAL;
+                    options.IntraOpNumThreads = 1;
+                    options.InterOpNumThreads = 1;
+                    options.AppendExecutionProvider_CUDA(Math.Max(0, Preferences.Default.OnnxGpu));
                     break;
                 case "CoreML":
                     // Note: MLProgram format has stricter validation and may fail with complex DiffSinger models

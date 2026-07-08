@@ -69,6 +69,7 @@
     <PackageReference Include="Serilog.Sinks.Debug" Version="3.0.0" />
     <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
     <PackageReference Include="System.Text.Json" Version="9.0.2" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Windows" Version="1.23.2" GeneratePathProperty="true" PrivateAssets="all" ExcludeAssets="compile;runtime;build;native;contentfiles;analyzers;buildtransitive" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\OpenUtau.Core\OpenUtau.Core.csproj" />
@@ -79,6 +80,11 @@
   </ItemGroup>
   <ItemGroup Condition="'$(RuntimeIdentifier)' == 'win-x64'">
     <None Include="..\runtimes\win-x64\native\**" CopyToOutputDirectory="PreserveNewest" LinkBase="." />
+  </ItemGroup>
+  <ItemGroup Condition=" '$(OS)' == 'Windows_NT' and Exists('$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Windows)\runtimes\win-x64\native') ">
+    <None Include="$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Windows)\runtimes\win-x64\native\onnxruntime.dll" CopyToOutputDirectory="PreserveNewest" Link="runtimes\win-x64-cuda\native\onnxruntime.dll" />
+    <None Include="$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Windows)\runtimes\win-x64\native\onnxruntime_providers_cuda.dll" CopyToOutputDirectory="PreserveNewest" Link="runtimes\win-x64-cuda\native\onnxruntime_providers_cuda.dll" />
+    <None Include="$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Windows)\runtimes\win-x64\native\onnxruntime_providers_shared.dll" CopyToOutputDirectory="PreserveNewest" Link="runtimes\win-x64-cuda\native\onnxruntime_providers_shared.dll" />
   </ItemGroup>
   <ItemGroup Condition="'$(RuntimeIdentifier)' == 'win-x86'">
     <None Include="..\runtimes\win-x86\native\**" CopyToOutputDirectory="PreserveNewest" LinkBase="." />
