@@ -24,7 +24,7 @@ namespace OpenUtau.Core.Neutrino {
         const int hopSize = 480;
         const int pitchInterval = 5;
         const int numMelBins = 100;
-        const int cacheVersion = 12;
+        const int cacheVersion = 13;
         const int postEffectCacheVersion = 2;
         const int pitchCacheMagic = 0x4E465032; // NFP2
         const int edgeSilenceSamples = 240;
@@ -228,6 +228,7 @@ namespace OpenUtau.Core.Neutrino {
 
             float[] f0 = BuildEditorF0(phrase, timing);
             ClampF0(f0);
+            ApplyF0SilenceMask(timing, f0);
 
             if (cancellation.IsCancellationRequested) return null;
 
@@ -255,6 +256,7 @@ namespace OpenUtau.Core.Neutrino {
             melSpectrogram = singer.RunMelspec(melspecInputs);
             melSpectrogram = FitLength(melSpectrogram, totalFrames * numMelBins);
             ClampMelspec(melSpectrogram);
+            ApplyMelspecSilenceMask(timing, melSpectrogram);
 
             if (cancellation.IsCancellationRequested) return null;
 
@@ -436,6 +438,7 @@ namespace OpenUtau.Core.Neutrino {
             var f0 = FitLength(singer.RunPitch(pitchInputs), timing.TotalFrames);
             ApplyInverseStyleShiftToF0(f0, styleShiftCentsByFrame);
             ClampF0(f0);
+            ApplyF0SilenceMask(timing, f0);
             return f0;
         }
 
@@ -786,10 +789,12 @@ namespace OpenUtau.Core.Neutrino {
                     stau[frame] = phone + 1;
                 }
             }
-            long lastPhone = timingDurations.Length;
+            long lastPhone = timingDurations.Length > 0 ? 1 : 0;
             for (int frame = 0; frame < totalFrames; frame++) {
                 if (stau[frame] == 0) {
                     stau[frame] = lastPhone;
+                } else {
+                    lastPhone = stau[frame];
                 }
             }
             return stau;
@@ -806,7 +811,7 @@ namespace OpenUtau.Core.Neutrino {
 
         void ClampF0(float[] f0) {
             for (int i = 0; i < f0.Length; i++) {
-                if (f0[i] < f0Min) {
+                if (!float.IsFinite(f0[i]) || f0[i] < f0Min) {
                     f0[i] = 0;
                 } else if (f0[i] > f0Max) {
                     f0[i] = f0Max;
@@ -816,10 +821,35 @@ namespace OpenUtau.Core.Neutrino {
 
         void ClampMelspec(float[] melSpectrogram) {
             for (int i = 0; i < melSpectrogram.Length; i++) {
-                if (melSpectrogram[i] < melspecMin) {
+                if (!float.IsFinite(melSpectrogram[i])) {
+                    melSpectrogram[i] = melspecMin;
+                } else if (melSpectrogram[i] < melspecMin) {
                     melSpectrogram[i] = melspecMin;
                 } else if (melSpectrogram[i] > melspecMax) {
                     melSpectrogram[i] = melspecMax;
+                }
+            }
+        }
+
+        void ApplyMelspecSilenceMask(NeutrinoTimingContext timing, float[] melSpectrogram) {
+            int frames = Math.Min(timing.TotalFrames, melSpectrogram.Length / numMelBins);
+            for (int frame = 0; frame < frames; frame++) {
+                int phoneIndex = GetFramePhoneIndex(timing, frame);
+                if (phoneIndex >= 0 && timing.PhonemeIds[phoneIndex] == NeutrinoPhoneme.PAU) {
+                    int offset = frame * numMelBins;
+                    for (int bin = 0; bin < numMelBins; bin++) {
+                        melSpectrogram[offset + bin] = melspecMin;
+                    }
+                }
+            }
+        }
+
+        void ApplyF0SilenceMask(NeutrinoTimingContext timing, float[] f0) {
+            int frames = Math.Min(timing.TotalFrames, f0.Length);
+            for (int frame = 0; frame < frames; frame++) {
+                int phoneIndex = GetFramePhoneIndex(timing, frame);
+                if (phoneIndex >= 0 && timing.PhonemeIds[phoneIndex] == NeutrinoPhoneme.PAU) {
+                    f0[frame] = 0;
                 }
             }
         }
@@ -849,6 +879,7 @@ namespace OpenUtau.Core.Neutrino {
 
             for (int i = 0; i < waveform.Length; i++) {
                 float value = waveform[i] * wavScale;
+                if (!float.IsFinite(value)) value = 0;
                 if (value > wavClamp) value = wavClamp;
                 if (value < -wavClamp) value = -wavClamp;
                 waveform[i] = value;
