@@ -5,6 +5,7 @@ using System.Linq;
 using System.Numerics;
 using K4os.Hash.xxHash;
 using OpenUtau.Classic;
+using OpenUtau.Core.HifiNeural;
 using OpenUtau.Core.Ustx;
 using Serilog;
 
@@ -77,6 +78,7 @@ namespace OpenUtau.Core.Render {
         // voicevox & enunu args
         public readonly int toneShift;
         public readonly int hifiSustainMode;
+        public readonly HifiHnSpectralProfile hifiHnSpectralProfile;
 
         public readonly UOto oto;
         public readonly ulong hash;
@@ -145,6 +147,14 @@ namespace OpenUtau.Core.Render {
             } else {
                 hifiSustainMode = OpenUtau.Core.HifiNeural.HifiSustainModes.Auto;
             }
+            bool isHifiNeura = string.Equals(
+                    track.RendererSettings.renderer,
+                    HifiNeuralPhraseRenderer.RendererId,
+                    StringComparison.OrdinalIgnoreCase)
+                || track.RendererSettings.Renderer is HifiNeuralPhraseRenderer;
+            hifiHnSpectralProfile = isHifiNeura
+                ? HifiHnSpectralProfile.FromNote(note)
+                : new HifiHnSpectralProfile { Enabled = false };
 
             oto = phoneme.oto;
             hash = Hash();
@@ -170,6 +180,10 @@ namespace OpenUtau.Core.Render {
                     writer.Write(modulation);
                     writer.Write(direct);
                     writer.Write(hifiSustainMode);
+                    if (hifiHnSpectralProfile.HasAudibleEffect) {
+                        writer.Write(HifiHnSpectralProfile.RendererSettingKey);
+                        writer.Write(hifiHnSpectralProfile.CacheKey());
+                    }
                     writer.Write(leadingMs);
                     writer.Write(OtoCacheHash(oto));
                     foreach (var point in envelope) {

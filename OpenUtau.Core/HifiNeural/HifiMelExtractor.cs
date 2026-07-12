@@ -110,7 +110,7 @@ namespace OpenUtau.Core.HifiNeural {
 
         static ParallelOptions MelParallelOptions() {
             return new ParallelOptions {
-                MaxDegreeOfParallelism = Math.Max(1, Preferences.Default.NumRenderThreads),
+                MaxDegreeOfParallelism = HifiRenderConcurrency.MelParallelism,
             };
         }
 

@@ -157,9 +157,11 @@ namespace OpenUtau.Core.HifiNeural {
             // silence (not noise) when F0 == 0, so masking the consonant F0 made those frames go
             // dead/mute. The consonant's unvoiced character comes from its mel spectrum; the F0
             // there just needs to be a smooth continuation of the neighbouring vowels' pitch.
-            float[] sourceReferenceF0 = BuildSourceReferenceF0(assemblyReport, targetFrames);
-            ApplyF0MelCompensation(alignedMel, f0, sourceReferenceF0);
-            ApplyBoundaryTemporalSmoothing(alignedMel, assemblyReport);
+            using (HifiRenderProfiler.Measure(HifiRenderStage.FeaturePost)) {
+                float[] sourceReferenceF0 = BuildSourceReferenceF0(assemblyReport, targetFrames);
+                ApplyF0MelCompensation(alignedMel, f0, sourceReferenceF0);
+                ApplyBoundaryTemporalSmoothing(alignedMel, assemblyReport);
+            }
 
             double targetDurationMs = targetFrames * HifiF0Builder.FrameMs;
             Log.Information(
@@ -1656,6 +1658,31 @@ namespace OpenUtau.Core.HifiNeural {
             return result < 0 ? result + divisor : result;
         }
 
+        static ulong HashFloatArray(float[] values) {
+            const ulong offset = 14695981039346656037UL;
+            const ulong prime = 1099511628211UL;
+            ulong hash = offset;
+            for (int i = 0; i < values.Length; i++) {
+                hash ^= unchecked((uint)BitConverter.SingleToInt32Bits(values[i]));
+                hash *= prime;
+            }
+            return hash;
+        }
+
+        static ulong HashDoubleArray(double[] values) {
+            const ulong offset = 14695981039346656037UL;
+            const ulong prime = 1099511628211UL;
+            ulong hash = offset;
+            for (int i = 0; i < values.Length; i++) {
+                ulong bits = unchecked((ulong)BitConverter.DoubleToInt64Bits(values[i]));
+                hash ^= (uint)bits;
+                hash *= prime;
+                hash ^= bits >> 32;
+                hash *= prime;
+            }
+            return hash;
+        }
+
         static bool TryWriteWaveformSustainTexture(
             float[,] sourceMel,
             float[]? sourceSamples,
@@ -1701,7 +1728,23 @@ namespace OpenUtau.Core.HifiNeural {
                 positions[t] = Math.Clamp(MelFrameToSampleCenter(absoluteSourceFrame), 0, sourceSamples.Length - 1);
             }
 
-            float[,] waveformTextureMel = sustainMelExtractor.ExtractAtPositions(sourceSamples, positions, sourceKeyShiftSemitones);
+            string textureCacheKey = string.Concat(
+                "sustain-mel-v1-nfft", HifiMelExtractor.Nfft,
+                "-mels", HifiMelExtractor.NMels,
+                "|samples", sourceSamples.Length, "-", HashFloatArray(sourceSamples).ToString("x16"),
+                "|positions", positions.Length, "-", HashDoubleArray(positions).ToString("x16"),
+                "|shift", BitConverter.DoubleToInt64Bits(sourceKeyShiftSemitones).ToString("x16"));
+            float[,] waveformTextureMel = HifiRenderMemoryCache.Shared.GetOrAdd(
+                textureCacheKey,
+                () => {
+                    using var timing = HifiRenderProfiler.Measure(HifiRenderStage.SustainMel);
+                    return sustainMelExtractor.ExtractAtPositions(sourceSamples, positions, sourceKeyShiftSemitones);
+                },
+                HifiRenderMemoryCache.FloatBytes,
+                out bool sustainMelCacheHit);
+            HifiRenderProfiler.Count(sustainMelCacheHit
+                ? HifiRenderCounter.SustainMelHit
+                : HifiRenderCounter.SustainMelMiss);
             if (waveformTextureMel.GetLength(1) != outputFrames) {
                 return false;
             }

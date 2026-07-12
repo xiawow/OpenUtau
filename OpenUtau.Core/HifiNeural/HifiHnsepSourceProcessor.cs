@@ -67,9 +67,18 @@ namespace OpenUtau.Core.HifiNeural {
         bool TryGetSliceFromWholeFile(string sourcePath, float[] fullSamples, int sliceStart, int sliceLength, out HifiHnsepResult result, HifiRenderContext context) {
             result = null!;
             string key = FileCacheKey(sourcePath, fullSamples.Length);
-            if (!fileCache.TryGetValue(key, out var cached)) {
+            if (fileCache.TryGetValue(key, out var cached)) {
+                HifiRenderProfiler.Count(HifiRenderCounter.HnsepMemoryHit);
+            } else if (HifiRenderMemoryCache.Shared.TryGet("hnsep-whole|" + key, out HifiHnsepResult sharedCached)) {
+                cached = sharedCached;
+                HifiRenderProfiler.Count(HifiRenderCounter.HnsepMemoryHit);
+            } else {
+                HifiRenderProfiler.Count(HifiRenderCounter.HnsepMemoryMiss);
                 string diskPath = HifiHnsepDiskCache.GetPath(key);
-                if (!HifiHnsepDiskCache.TryLoad(diskPath, fullSamples.Length, out cached)) {
+                if (HifiHnsepDiskCache.TryLoad(diskPath, fullSamples.Length, out cached)) {
+                    HifiRenderProfiler.Count(HifiRenderCounter.HnsepDiskHit);
+                } else {
+                    HifiRenderProfiler.Count(HifiRenderCounter.HnsepDiskMiss);
                     try {
                         context.ThrowIfCancellationRequested();
                         cached = model!.Separate(fullSamples, context);
@@ -86,6 +95,12 @@ namespace OpenUtau.Core.HifiNeural {
                         lastFailureReason = "separation_failed:" + e.GetType().Name + ":" + e.Message;
                         cached = null;
                     }
+                }
+                if (cached != null) {
+                    HifiRenderMemoryCache.Shared.AddOrRefresh(
+                        "hnsep-whole|" + key,
+                        cached,
+                        HifiRenderMemoryCache.FloatBytes(cached.Harmonic));
                 }
                 fileCache[key] = cached;
             }
@@ -118,9 +133,18 @@ namespace OpenUtau.Core.HifiNeural {
             }
 
             string key = SliceCacheKey(sourcePath, fullSamples.Length, sliceStart, sliceLength, contextStart, contextLength);
-            if (!sliceCache.TryGetValue(key, out var cached)) {
+            if (sliceCache.TryGetValue(key, out var cached)) {
+                HifiRenderProfiler.Count(HifiRenderCounter.HnsepMemoryHit);
+            } else if (HifiRenderMemoryCache.Shared.TryGet("hnsep-slice|" + key, out HifiHnsepResult sharedCached)) {
+                cached = sharedCached;
+                HifiRenderProfiler.Count(HifiRenderCounter.HnsepMemoryHit);
+            } else {
+                HifiRenderProfiler.Count(HifiRenderCounter.HnsepMemoryMiss);
                 string diskPath = HifiHnsepDiskCache.GetPath(key);
-                if (!HifiHnsepDiskCache.TryLoad(diskPath, sliceLength, out cached)) {
+                if (HifiHnsepDiskCache.TryLoad(diskPath, sliceLength, out cached)) {
+                    HifiRenderProfiler.Count(HifiRenderCounter.HnsepDiskHit);
+                } else {
+                    HifiRenderProfiler.Count(HifiRenderCounter.HnsepDiskMiss);
                     try {
                         context.ThrowIfCancellationRequested();
                         var contextSamplesBuffer = new float[contextLength];
@@ -149,6 +173,12 @@ namespace OpenUtau.Core.HifiNeural {
                         lastFailureReason = "separation_failed:" + e.GetType().Name + ":" + e.Message;
                         cached = null;
                     }
+                }
+                if (cached != null) {
+                    HifiRenderMemoryCache.Shared.AddOrRefresh(
+                        "hnsep-slice|" + key,
+                        cached,
+                        HifiRenderMemoryCache.FloatBytes(cached.Harmonic));
                 }
                 sliceCache[key] = cached;
             }
@@ -421,11 +451,35 @@ namespace OpenUtau.Core.HifiNeural {
             HifiHnsepSourceCache cache,
             out HifiHnsepProcessingReport report,
             HifiRenderContext context) {
+            return Apply(
+                phone,
+                sourcePath,
+                fullSamples,
+                sourceSlice,
+                parameterTrack,
+                cache,
+                spectralProfile: null,
+                out report,
+                context);
+        }
+
+        public static float[] Apply(
+            RenderPhone phone,
+            string sourcePath,
+            float[] fullSamples,
+            float[] sourceSlice,
+            HifiFrameParameterTrack parameterTrack,
+            HifiHnsepSourceCache cache,
+            HifiHnSpectralProfile? spectralProfile,
+            out HifiHnsepProcessingReport report,
+            HifiRenderContext context) {
             var parameters = parameterTrack.Average;
-            if (!parameterTrack.NeedsHnsep || sourceSlice.Length == 0) {
+            bool spectralProfileActive = spectralProfile?.HasAudibleEffect == true;
+            if ((!parameterTrack.NeedsHnsep && !spectralProfileActive) || sourceSlice.Length == 0) {
                 report = new HifiHnsepProcessingReport(false, false, "neutral_parameters_or_empty_slice");
                 return sourceSlice;
             }
+            using var hnsepTiming = HifiRenderProfiler.Measure(HifiRenderStage.Hnsep);
             context.ThrowIfCancellationRequested();
             if (!cache.TryGetSlice(sourcePath, phone, fullSamples, sourceSlice, out var separated, context)) {
                 string reason = string.IsNullOrWhiteSpace(cache.LastFailureReason)
@@ -452,16 +506,21 @@ namespace OpenUtau.Core.HifiNeural {
                 return sourceSlice;
             }
 
-            var output = RemixSeparatedWaveform(sourceSlice, separated.Harmonic, parameterTrack);
+            var output = RemixSeparatedWaveform(
+                sourceSlice,
+                separated.Harmonic,
+                parameterTrack,
+                spectralProfileActive ? spectralProfile : null);
             Log.Debug(
-                "Hifi HNSEP applied phoneme={Phoneme} mode=source_frame_aware frames={Frames} brec_avg={Brec:F2} noise_gain_avg={NoiseGain:F3} voic_avg={Voic:F2} harmonic_gain_avg={HarmonicGain:F3} tenc_avg={Tenc:F2}",
+                "Hifi HNSEP applied phoneme={Phoneme} mode=source_frame_aware frames={Frames} brec_avg={Brec:F2} noise_gain_avg={NoiseGain:F3} voic_avg={Voic:F2} harmonic_gain_avg={HarmonicGain:F3} tenc_avg={Tenc:F2} spectral_profile={SpectralProfile}",
                 phone.phoneme,
                 parameterTrack.FrameCount,
                 parameters.Breathiness,
                 parameters.BreathNoiseGain,
                 parameters.Voicing,
                 parameters.VoicingGain,
-                parameters.Tension);
+                parameters.Tension,
+                spectralProfileActive);
             report = new HifiHnsepProcessingReport(true, true, "applied");
             return output;
         }
@@ -471,7 +530,8 @@ namespace OpenUtau.Core.HifiNeural {
             float[] originalHarmonic,
             HifiFrameParameterTrack parameterTrack,
             bool applyGeneratedFormantShift = false,
-            Func<double, int, double>? pitchAtSourceSample = null) {
+            Func<double, int, double>? pitchAtSourceSample = null,
+            HifiHnSpectralProfile? spectralProfile = null) {
             float[] processedHarmonic = applyGeneratedFormantShift
                 ? PrepareGeneratedHarmonicForRemix(originalHarmonic, parameterTrack, pitchAtSourceSample)
                 : PrepareHarmonicForRemix(originalHarmonic, parameterTrack);
@@ -479,7 +539,22 @@ namespace OpenUtau.Core.HifiNeural {
                 waveform,
                 originalHarmonic,
                 processedHarmonic,
-                parameterTrack);
+                parameterTrack,
+                spectralProfile);
+        }
+
+        static float[] RemixSeparatedWaveform(
+            float[] waveform,
+            float[] originalHarmonic,
+            HifiFrameParameterTrack parameterTrack,
+            HifiHnSpectralProfile? spectralProfile) {
+            return RemixSeparatedWaveform(
+                waveform,
+                originalHarmonic,
+                parameterTrack,
+                applyGeneratedFormantShift: false,
+                pitchAtSourceSample: null,
+                spectralProfile);
         }
 
         internal static float[] PrepareHarmonicForRemix(float[] cachedHarmonic, double tension) {
@@ -535,16 +610,46 @@ namespace OpenUtau.Core.HifiNeural {
             float[] originalHarmonic,
             float[] processedHarmonic,
             HifiFrameParameterTrack parameterTrack) {
+            return RemixHarmonicNoiseWithSourceEnergy(
+                sourceSlice,
+                originalHarmonic,
+                processedHarmonic,
+                parameterTrack,
+                spectralProfile: null);
+        }
+
+        internal static float[] RemixHarmonicNoiseWithSourceEnergy(
+            float[] sourceSlice,
+            float[] originalHarmonic,
+            float[] processedHarmonic,
+            HifiFrameParameterTrack parameterTrack,
+            HifiHnSpectralProfile? spectralProfile) {
+            var harmonicComponent = new float[sourceSlice.Length];
+            var noiseComponent = new float[sourceSlice.Length];
             var output = new float[sourceSlice.Length];
-            for (int i = 0; i < output.Length; i++) {
+            for (int i = 0; i < sourceSlice.Length; i++) {
                 double original = i < originalHarmonic.Length ? originalHarmonic[i] : 0;
                 double processed = i < processedHarmonic.Length ? processedHarmonic[i] : original;
                 double noise = sourceSlice[i] - original;
                 double noiseGain = parameterTrack.BreathNoiseGainAtSourceSample(i, sourceSlice.Length);
                 double harmonicGain = parameterTrack.VoicingGainAtSourceSample(i, sourceSlice.Length);
-                output[i] = (float)(noise * noiseGain + processed * harmonicGain);
+                noiseComponent[i] = (float)(noise * noiseGain);
+                harmonicComponent[i] = (float)(processed * harmonicGain);
+                output[i] = noiseComponent[i] + harmonicComponent[i];
             }
-            MatchRmsInPlace(output, sourceSlice);
+            if (spectralProfile?.HasAudibleEffect == true) {
+                double baselineGain = ResolveRmsGain(output, sourceSlice);
+                ApplyGainInPlace(output, baselineGain);
+                ApplyGainInPlace(harmonicComponent, baselineGain);
+                ApplyGainInPlace(noiseComponent, baselineGain);
+                output = HifiHnSpectralProcessor.Process(
+                    output,
+                    harmonicComponent,
+                    noiseComponent,
+                    spectralProfile);
+            } else {
+                MatchRmsInPlace(output, sourceSlice);
+            }
             LimitPeakInPlace(output);
             return output;
         }
@@ -1011,7 +1116,7 @@ namespace OpenUtau.Core.HifiNeural {
             return window;
         });
 
-        static void ForwardFft(Complex[] buffer, bool inverse) {
+        internal static void ForwardFft(Complex[] buffer, bool inverse) {
             int n = buffer.Length;
             for (int i = 1, j = 0; i < n; i++) {
                 int bit = n >> 1;
@@ -1070,12 +1175,22 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         static void MatchRmsInPlace(float[] samples, float[] reference) {
-            double targetRms = Rms(reference);
-            double currentRms = Rms(samples);
-            if (targetRms <= 1e-5 || currentRms <= 1e-5) {
+            double gain = ResolveRmsGain(samples, reference);
+            if (!double.IsFinite(gain) || Math.Abs(gain - 1.0) < 1e-4) {
                 return;
             }
-            double gain = Math.Clamp(targetRms / currentRms, 0.5, 2.0);
+            ApplyGainInPlace(samples, gain);
+        }
+
+        static double ResolveRmsGain(float[] samples, float[] reference) {
+            double targetRms = Rms(reference);
+            double currentRms = Rms(samples);
+            return targetRms > 1e-5 && currentRms > 1e-5
+                ? Math.Clamp(targetRms / currentRms, 0.5, 2.0)
+                : 1.0;
+        }
+
+        static void ApplyGainInPlace(float[] samples, double gain) {
             if (!double.IsFinite(gain) || Math.Abs(gain - 1.0) < 1e-4) {
                 return;
             }

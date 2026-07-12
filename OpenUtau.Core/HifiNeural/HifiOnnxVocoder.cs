@@ -19,6 +19,7 @@ namespace OpenUtau.Core.HifiNeural {
         public const int MelBins = 128;
 
         static readonly ConcurrentDictionary<string, Lazy<InferenceSession>> sessionCache = new();
+        static readonly ConcurrentDictionary<string, string> resolvedModelPathCache = new();
         // Cache immutable session input metadata (dimensions) keyed by session cache key.
         // Avoids re-querying InputMetadata and re-allocating dimension arrays on every inference.
         static readonly ConcurrentDictionary<string, int[][]> sessionDimsCache = new();
@@ -30,6 +31,8 @@ namespace OpenUtau.Core.HifiNeural {
         readonly int[] f0Dims;
 
         public string ModelPath => modelPath;
+        internal static bool UsesConfiguredDirectML => IsDirectMLRunner(ResolveSessionContext().Runner);
+        internal static string ConfiguredRunner => ResolveSessionContext().Runner;
 
         public HifiOnnxVocoder(string? modelPath = null) {
             this.modelPath = ResolveModelPath(modelPath);
@@ -61,19 +64,26 @@ namespace OpenUtau.Core.HifiNeural {
                 throw new ArgumentException($"F0 length {f0.Length} does not match mel frames {frames}.");
             }
 
-            var inputs = new List<NamedOnnxValue> {
-                NamedOnnxValue.CreateFromTensor("mel", CreateMelTensor(mel)),
-                NamedOnnxValue.CreateFromTensor("f0", CreateF0Tensor(f0)),
-            };
-            Onnx.VerifyInputNames(session, inputs);
-            using var outputs = HifiDmlInferenceGate.Run(
-                usesDirectML,
-                "vocoder",
-                context,
-                () => session.Run(inputs));
+            var inputs = HifiRenderProfiler.Time(HifiRenderStage.VocoderPack, () => {
+                var packed = new List<NamedOnnxValue> {
+                    NamedOnnxValue.CreateFromTensor("mel", CreateMelTensor(mel)),
+                    NamedOnnxValue.CreateFromTensor("f0", CreateF0Tensor(f0)),
+                };
+                Onnx.VerifyInputNames(session, packed);
+                return packed;
+            });
+            using var inferenceScope = HifiRenderConcurrency.EnterInference(usesDirectML);
+            using var outputs = HifiRenderProfiler.Time(
+                HifiRenderStage.VocoderInference,
+                () => HifiDmlInferenceGate.Run(
+                    usesDirectML,
+                    "vocoder",
+                    context,
+                    () => session.Run(inputs)));
             context.ThrowIfCancellationRequested();
-            var tensor = outputs.First().AsTensor<float>();
-            return tensor.ToArray();
+            return HifiRenderProfiler.Time(
+                HifiRenderStage.VocoderOutput,
+                () => outputs.First().AsTensor<float>().ToArray());
         }
 
         public float[] InferDummy(int frames = 8) {
@@ -165,14 +175,21 @@ namespace OpenUtau.Core.HifiNeural {
 
             var candidates = new List<string>();
             string baseDir = AppContext.BaseDirectory;
-            AddExplicitCandidate(candidates, Environment.GetEnvironmentVariable("HIFI_NEURAL_VOCODER_ONNX"));
-            foreach (var root in CandidateRoots(baseDir).Concat(CandidateRoots(Directory.GetCurrentDirectory())).Distinct()) {
+            string currentDir = Directory.GetCurrentDirectory();
+            string? environmentPath = Environment.GetEnvironmentVariable("HIFI_NEURAL_VOCODER_ONNX");
+            string resolutionKey = string.Concat(baseDir, "|", currentDir, "|", environmentPath ?? string.Empty);
+            if (resolvedModelPathCache.TryGetValue(resolutionKey, out var cachedPath) && File.Exists(cachedPath)) {
+                return cachedPath;
+            }
+            AddExplicitCandidate(candidates, environmentPath);
+            foreach (var root in CandidateRoots(baseDir).Concat(CandidateRoots(currentDir)).Distinct()) {
                 AddCandidates(candidates, root);
                 AddCandidates(candidates, Path.Combine(root, "pc_nsf_hifigan_44.1k_hop512_128bin_2025.02"));
             }
 
             var found = candidates.FirstOrDefault(File.Exists);
             if (found != null) {
+                resolvedModelPathCache[resolutionKey] = found;
                 return found;
             }
             string searched = string.Join(Environment.NewLine, candidates.Distinct());

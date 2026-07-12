@@ -82,6 +82,47 @@ namespace OpenUtau.Core {
         }
     }
 
+    public class SetNoteRendererSettingCommand : NoteCommand {
+        readonly string key;
+        readonly string? newValue;
+        readonly string?[] oldValues;
+
+        public override ValidateOptions ValidateOptions => new ValidateOptions {
+            SkipTiming = true,
+            SkipPhonemizer = true,
+            SkipPhoneme = true,
+            Part = Part,
+        };
+
+        public SetNoteRendererSettingCommand(
+            UVoicePart part,
+            IEnumerable<UNote> notes,
+            string key,
+            string? newValue) : base(part, notes) {
+            this.key = key;
+            this.newValue = newValue;
+            oldValues = Notes.Select(note => note.GetRendererSetting(key)).ToArray();
+        }
+
+        public override void Execute() {
+            lock (Part) {
+                foreach (var note in Notes) {
+                    note.SetRendererSetting(key, newValue);
+                }
+            }
+        }
+
+        public override void Unexecute() {
+            lock (Part) {
+                for (int i = 0; i < Notes.Length; i++) {
+                    Notes[i].SetRendererSetting(key, oldValues[i]);
+                }
+            }
+        }
+
+        public override string ToString() => "Change note renderer setting";
+    }
+
     public class MoveNoteCommand : NoteCommand {
         readonly int DeltaPos, DeltaNoteNum;
         readonly int NewPartDuration;

@@ -26,6 +26,8 @@ namespace OpenUtau.Core.HifiNeural {
         const int DefaultHop = 512;
         const int ParallelFrameThreshold = 16;
         static readonly ConcurrentDictionary<string, Lazy<InferenceSession>> sessionCache = new();
+        static readonly ConcurrentDictionary<string, Lazy<HifiHnsepOnnx>> modelCache = new();
+        static readonly ConcurrentDictionary<string, string> resolvedModelPathCache = new();
         static readonly ConcurrentDictionary<int, SemaphoreSlim> separationGates = new();
 
         readonly string modelPath;
@@ -55,9 +57,23 @@ namespace OpenUtau.Core.HifiNeural {
                 model = null;
                 return false;
             }
-            var (nfft, hop) = ResolveModelConfig(path);
             try {
-                model = new HifiHnsepOnnx(path, nfft, hop);
+                string fullPath = Path.GetFullPath(path);
+                var info = new FileInfo(fullPath);
+                string runner = ResolveHnsepRunner(fullPath);
+                int threads = ResolveWorkerThreadCountForRunner(runner);
+                string key = string.Concat(
+                    fullPath,
+                    "|", info.Length,
+                    "|", info.LastWriteTimeUtc.Ticks,
+                    "|runner=", runner,
+                    "|gpu=", Math.Max(0, Preferences.Default.OnnxGpu),
+                    "|threads=", threads);
+                var lazy = modelCache.GetOrAdd(key, _ => new Lazy<HifiHnsepOnnx>(() => {
+                    var (nfft, hop) = ResolveModelConfig(fullPath);
+                    return new HifiHnsepOnnx(fullPath, nfft, hop);
+                }, LazyThreadSafetyMode.ExecutionAndPublication));
+                model = lazy.Value;
                 diagnostic = string.Empty;
                 return true;
             } catch (Exception e) {
@@ -125,7 +141,10 @@ namespace OpenUtau.Core.HifiNeural {
             var padded = new float[leftPad + originalLength + rightPad];
             Array.Copy(samples, 0, padded, leftPad, originalLength);
 
-            var spec = Stft(padded);
+            Complex[,] spec;
+            using (HifiRenderProfiler.Measure(HifiRenderStage.HnsepStft)) {
+                spec = Stft(padded);
+            }
             context.ThrowIfCancellationRequested();
             int bins = spec.GetLength(0);
             int frames = spec.GetLength(1);
@@ -134,21 +153,27 @@ namespace OpenUtau.Core.HifiNeural {
             context.ThrowIfCancellationRequested();
 
             string inputName = session.InputMetadata.Keys.First();
-            using var outputs = HifiDmlInferenceGate.Run(
-                usesDirectML,
-                "hnsep",
-                context,
-                () => session.Run(new[] {
-                    NamedOnnxValue.CreateFromTensor(inputName, new DenseTensor<float>(inputData, new[] { 1, 2, bins, frames })),
-                }));
-            var output = outputs.First().AsTensor<float>().ToArray();
+            float[] output;
+            using (HifiRenderProfiler.Measure(HifiRenderStage.HnsepInference)) {
+                using var outputs = HifiDmlInferenceGate.Run(
+                    usesDirectML,
+                    "hnsep",
+                    context,
+                    () => session.Run(new[] {
+                        NamedOnnxValue.CreateFromTensor(inputName, new DenseTensor<float>(inputData, new[] { 1, 2, bins, frames })),
+                    }));
+                output = outputs.First().AsTensor<float>().ToArray();
+            }
             context.ThrowIfCancellationRequested();
 
             var predicted = new Complex[bins, frames];
             DecodeMaskOutput(output, spec, predicted, bins, frames);
             context.ThrowIfCancellationRequested();
 
-            var separatedPadded = Istft(predicted, padded.Length);
+            float[] separatedPadded;
+            using (HifiRenderProfiler.Measure(HifiRenderStage.HnsepIstft)) {
+                separatedPadded = Istft(predicted, padded.Length);
+            }
             context.ThrowIfCancellationRequested();
             var harmonic = new float[originalLength];
             Array.Copy(separatedPadded, leftPad, harmonic, 0, originalLength);
@@ -202,13 +227,27 @@ namespace OpenUtau.Core.HifiNeural {
 
         static bool TryResolveModelPath(out string path, out string diagnostic) {
             var candidates = new List<string>();
-            AddExplicitCandidate(candidates, Environment.GetEnvironmentVariable("HIFI_NEURAL_HNSEP_ONNX"));
+            string baseDir = AppContext.BaseDirectory;
+            string currentDir = Directory.GetCurrentDirectory();
+            string? environmentPath = Environment.GetEnvironmentVariable("HIFI_NEURAL_HNSEP_ONNX");
             bool preferDmlSafe = IsAcceleratedRunnerRequested();
-            foreach (var root in CandidateRoots(AppContext.BaseDirectory).Concat(CandidateRoots(Directory.GetCurrentDirectory())).Distinct()) {
+            string resolutionKey = string.Concat(
+                baseDir,
+                "|", currentDir,
+                "|", environmentPath ?? string.Empty,
+                "|dml=", preferDmlSafe);
+            if (resolvedModelPathCache.TryGetValue(resolutionKey, out var cachedPath) && File.Exists(cachedPath)) {
+                path = cachedPath;
+                diagnostic = string.Empty;
+                return true;
+            }
+            AddExplicitCandidate(candidates, environmentPath);
+            foreach (var root in CandidateRoots(baseDir).Concat(CandidateRoots(currentDir)).Distinct()) {
                 AddCandidates(candidates, root, preferDmlSafe);
             }
             path = candidates.FirstOrDefault(File.Exists) ?? string.Empty;
             if (!string.IsNullOrWhiteSpace(path)) {
+                resolvedModelPathCache[resolutionKey] = path;
                 diagnostic = string.Empty;
                 return true;
             }

@@ -18,12 +18,6 @@ namespace OpenUtau.Core.HifiNeural {
     public sealed class HifiNeuralPhraseRenderer : IRenderer {
         public const string RendererId = "HIFI-NEURA";
 
-        // Limit concurrent renders to avoid saturating CPU/memory while still allowing
-        // multi-phrase parallelism. Each render already fans out internally (mel STFT
-        // Parallel.For + ONNX intra-op threads), so a small gate avoids oversubscription.
-        static readonly SemaphoreSlim renderGate = new SemaphoreSlim(
-            Math.Clamp(Environment.ProcessorCount / 2, 1, 4));
-
         public USingerType SingerType => USingerType.Classic;
         public bool SupportsRenderPitch => false;
 
@@ -60,13 +54,25 @@ namespace OpenUtau.Core.HifiNeural {
             return Task.Run(() => {
                 var result = Layout(phrase);
                 var context = new HifiRenderContext(isPreRender, cancellation.Token);
+                var profiler = new HifiRenderProfiler(
+                    phrase.notes.Length,
+                    phrase.phones.Length,
+                    result.estimatedLengthMs);
+                using var profilerBinding = profiler.Bind();
+                bool usesDirectML = HifiOnnxVocoder.UsesConfiguredDirectML;
+                profiler.SetBackend(HifiOnnxVocoder.ConfiguredRunner);
+                var renderGate = HifiRenderConcurrency.PhraseGate(usesDirectML);
                 bool gateTaken = false;
+                string performanceStatus = "completed";
                 try {
-                    renderGate.Wait(cancellation.Token);
+                    using (HifiRenderProfiler.Measure(HifiRenderStage.QueueWait)) {
+                        renderGate.Wait(cancellation.Token);
+                    }
                     gateTaken = true;
                     string progressInfo = $"Track {trackNo + 1}: {this} notes={phrase.notes.Length} phones={phrase.phones.Length} duration={result.estimatedLengthMs:F1}ms sr={HifiMelExtractor.SampleRate}";
                     progress.Complete(0, progressInfo);
                     if (cancellation.IsCancellationRequested) {
+                        performanceStatus = "canceled";
                         result.samples = Array.Empty<float>();
                         return result;
                     }
@@ -79,8 +85,11 @@ namespace OpenUtau.Core.HifiNeural {
                         phrase.AddCacheFile(wavPath);
                     }
                     if (wavPath != null && File.Exists(wavPath)) {
-                        using var waveStream = Wave.OpenFile(wavPath);
-                        result.samples = Wave.GetSamples(waveStream.ToSampleProvider().ToMono(1, 0));
+                        using (HifiRenderProfiler.Measure(HifiRenderStage.CacheRead)) {
+                            using var waveStream = Wave.OpenFile(wavPath);
+                            result.samples = Wave.GetSamples(waveStream.ToSampleProvider().ToMono(1, 0));
+                        }
+                        performanceStatus = "cache_hit";
                     }
                     if (result.samples == null) {
                         result.samples = RenderInternal(phrase, result, context, wavPath, modelPath, modelDiagnostic);
@@ -91,12 +100,17 @@ namespace OpenUtau.Core.HifiNeural {
                     progress.Complete(Math.Max(1, phrase.phones.Length), progressInfo);
                     return result;
                 } catch (OperationCanceledException) when (cancellation.IsCancellationRequested) {
+                    performanceStatus = "canceled";
                     result.samples = Array.Empty<float>();
                     return result;
+                } catch {
+                    performanceStatus = "failed";
+                    throw;
                 } finally {
                     if (gateTaken) {
                         renderGate.Release();
                     }
+                    profiler.LogSummary(performanceStatus);
                 }
             });
         }
@@ -109,7 +123,11 @@ namespace OpenUtau.Core.HifiNeural {
             }
             Log.Information("HifiNeuralPhraseRenderer mel_domain_concat mode=overlap_only phones={Phones}", phrase.phones.Length);
             var featureBuilder = new HifiPhraseFeatureBuilder(HifiRenderConfig.CreateMelEnhancer());
-            var features = featureBuilder.Build(phrase, layout, context);
+            HifiPhraseFeatures features;
+            using (HifiRenderConcurrency.EnterFeatureBuild())
+            using (HifiRenderProfiler.Measure(HifiRenderStage.FeatureBuild)) {
+                features = featureBuilder.Build(phrase, layout, context);
+            }
             context.ThrowIfCancellationRequested();
             string debugKey = $"{phrase.hash:x16}";
             if (HifiRenderConfig.DebugExportEnabled) {
@@ -143,17 +161,27 @@ namespace OpenUtau.Core.HifiNeural {
             //    dynamics/mixing stage that follows.
             // 5. Edge guard: cosine fade-in/fade-out at phrase boundaries to suppress clicks.
             //    Runs after all DSP to ensure the fades see the final signal.
-            HifiPostVocoderLeveler.LevelInPlace(samples, features, HifiMelExtractor.SampleRate);
-            HifiGrowlProcessor.ApplyInPlace(samples, phrase, layout.positionMs - layout.leadingMs, HifiMelExtractor.SampleRate);
-            HifiAmplitudeCurveProcessor.ApplyInPlace(samples, phrase, features, layout.positionMs - layout.leadingMs, HifiMelExtractor.SampleRate);
-            HifiLoudnessNormalizer.NormalizeInPlace(samples, HifiMelExtractor.SampleRate);
-            ApplyPhraseEdgeGuard(samples, HifiMelExtractor.SampleRate);
+            using (HifiRenderProfiler.Measure(HifiRenderStage.PostLeveler)) {
+                HifiPostVocoderLeveler.LevelInPlace(samples, features, HifiMelExtractor.SampleRate);
+            }
+            using (HifiRenderProfiler.Measure(HifiRenderStage.PostGrowl)) {
+                HifiGrowlProcessor.ApplyInPlace(samples, phrase, layout.positionMs - layout.leadingMs, HifiMelExtractor.SampleRate);
+            }
+            using (HifiRenderProfiler.Measure(HifiRenderStage.PostAmplitude)) {
+                HifiAmplitudeCurveProcessor.ApplyInPlace(samples, phrase, features, layout.positionMs - layout.leadingMs, HifiMelExtractor.SampleRate);
+            }
+            using (HifiRenderProfiler.Measure(HifiRenderStage.PostNormalize)) {
+                HifiLoudnessNormalizer.NormalizeInPlace(samples, HifiMelExtractor.SampleRate);
+                ApplyPhraseEdgeGuard(samples, HifiMelExtractor.SampleRate);
+            }
             context.ThrowIfCancellationRequested();
             if (HifiRenderConfig.DebugExportEnabled) {
                 HifiClickDiagnostic.Export(debugKey, features, samples);
             }
             if (wavPath != null) {
-                SaveCache(wavPath, samples);
+                using (HifiRenderProfiler.Measure(HifiRenderStage.CacheWrite)) {
+                    SaveCache(wavPath, samples);
+                }
             }
             return samples;
         }
