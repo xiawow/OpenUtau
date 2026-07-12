@@ -67,6 +67,61 @@ namespace OpenUtau.Core.Test.Neutrino {
         }
 
         [Fact]
+        public void FrameMapAssignsUncoveredFramesToFinalPhone() {
+            Assert.Equal(
+                new long[] { 2 },
+                NeutrinoRenderer.BuildFramePhonemeMap(new[] { 0.001f, 0.001f }, 1));
+            Assert.Equal(
+                new long[] { 1, 2 },
+                NeutrinoRenderer.BuildFramePhonemeMap(new[] { 0.011f, 0.001f }, 2));
+        }
+
+        [Theory]
+        [InlineData("+")]
+        [InlineData("+~")]
+        [InlineData("+*")]
+        [InlineData("+anything")]
+        public void PlusPrefixedLyricsMatchOpenUtauExtensionSemantics(string lyric) {
+            Assert.True(NeutrinoInferenceUtil.IsExtensionLyric(lyric));
+        }
+
+        [Fact]
+        public void LegacyMinusExtensionRemainsSupported() {
+            Assert.True(NeutrinoInferenceUtil.IsExtensionLyric("-"));
+        }
+
+        [Theory]
+        [InlineData("")]
+        [InlineData("a")]
+        [InlineData("~+")]
+        public void NonExtensionLyricsRemainIndependent(string lyric) {
+            Assert.False(NeutrinoInferenceUtil.IsExtensionLyric(lyric));
+        }
+
+        [Fact]
+        public void FixedShapeModelOutputsRejectLengthMismatch() {
+            var output = new[] { 0.1f, 0.2f };
+            Assert.Same(output, NeutrinoInferenceUtil.RequireLength(output, 2, "test output"));
+
+            var error = Assert.Throws<InvalidDataException>(
+                () => NeutrinoInferenceUtil.RequireLength(output, 3, "test output"));
+            Assert.Equal("test output length mismatch: actual 2, expected 3.", error.Message);
+        }
+
+        [Fact]
+        public void TimingModelReturnsOneMoreBoundaryThanPhonemes() {
+            var boundaries = new[] { 0f, 0.1f, 0.2f };
+            Assert.Same(
+                boundaries,
+                NeutrinoInferenceUtil.RequireTimingBoundaryLength(boundaries, 2, "timing output"));
+
+            var error = Assert.Throws<InvalidDataException>(
+                () => NeutrinoInferenceUtil.RequireTimingBoundaryLength(
+                    new[] { 0f, 0.1f }, 2, "timing output"));
+            Assert.Equal("timing output length mismatch: actual 2, expected 3.", error.Message);
+        }
+
+        [Fact]
         public void NeutralHnsepParametersLeaveWaveformUntouched() {
             var waveform = new[] { 0.1f, -0.2f, 0.3f };
             var parameters = HifiFrameParameterTrack.Constant(

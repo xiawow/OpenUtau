@@ -316,14 +316,20 @@ namespace OpenUtau.Core.Neutrino {
                     new DenseTensor<long>(timing.FramePhonemeMap, new[] { 1, totalFrames })),
             };
 
-            var elementary = FitLength(singer.RunLegacyEmbedding(embeddingInputs), totalFrames * 256);
+            var elementary = NeutrinoInferenceUtil.RequireLength(
+                singer.RunLegacyEmbedding(embeddingInputs),
+                totalFrames * 256,
+                "NEUTRINO v2 e.bin embedding output");
             if (cancellation.IsCancellationRequested) return null;
 
             var acousticInputs = new List<NamedOnnxValue> {
                 NamedOnnxValue.CreateFromTensor("elementary_particle",
                     new DenseTensor<float>(elementary, new[] { 1, totalFrames, 256 })),
             };
-            var melSpectrogram = FitLength(singer.RunLegacyAcoustic(acousticInputs), totalFrames * numMelBins);
+            var melSpectrogram = NeutrinoInferenceUtil.RequireLength(
+                singer.RunLegacyAcoustic(acousticInputs),
+                totalFrames * numMelBins,
+                "NEUTRINO v2 d*.bin mel output");
             ClampMelspec(melSpectrogram);
             ApplyMelspecSilenceMask(timing, melSpectrogram);
             if (cancellation.IsCancellationRequested) return null;
@@ -372,7 +378,10 @@ namespace OpenUtau.Core.Neutrino {
                 NamedOnnxValue.CreateFromTensor("input",
                     new DenseTensor<float>(melSpectrogram, new[] { 1, totalFrames, numMelBins })),
             };
-            var f0 = FitLength(singer.RunLegacyWorldF0(worldF0Inputs), totalFrames);
+            var f0 = NeutrinoInferenceUtil.RequireLength(
+                singer.RunLegacyWorldF0(worldF0Inputs),
+                totalFrames,
+                "NEUTRINO v2 world_f0.bin F0 output");
             ClampF0(f0);
             return f0;
         }
@@ -568,8 +577,8 @@ namespace OpenUtau.Core.Neutrino {
             }
             var rawFeatures = BuildLegacyTimingFeatures(phrase, segments, start, length);
             var deltasMs = singer.RunLegacyTiming(rawFeatures, length);
-            if (deltasMs.Length < length) {
-                Log.Warning("NEUTRINO v2 timing output length mismatch: {Actual} < {Expected}", deltasMs.Length, length);
+            if (deltasMs.Length != length) {
+                Log.Warning("NEUTRINO v2 timing output length mismatch: actual {Actual}, expected {Expected}", deltasMs.Length, length);
                 return false;
             }
             if (!AreLegacyTimingDeltasUsable(deltasMs, length, out double maxAbsDelta)) {
@@ -695,8 +704,10 @@ namespace OpenUtau.Core.Neutrino {
                 features[numeric + 17] = LegacyTimingNoteLengthCentiseconds(phrase, currentNoteIndex, segment);
                 features[numeric + 18] = currentRest ? 0 : Math.Clamp((float)((segment.scoreStartSec - phraseStart) * 10.0), 0f, 75f);
                 features[numeric + 19] = currentRest ? 0 : Math.Clamp((float)((phraseEnd - segment.scoreStartSec) * 10.0), 0f, 75f);
-                features[numeric + 20] = hasCurrentNote && IsExtensionLyric(phrase.notes[currentNoteIndex].lyric) ? 1 : 0;
-                features[numeric + 21] = hasNextNote && IsExtensionLyric(phrase.notes[nextNoteIndex].lyric) ? 1 : 0;
+                features[numeric + 20] = hasCurrentNote
+                    && NeutrinoInferenceUtil.IsExtensionLyric(phrase.notes[currentNoteIndex].lyric) ? 1 : 0;
+                features[numeric + 21] = hasNextNote
+                    && NeutrinoInferenceUtil.IsExtensionLyric(phrase.notes[nextNoteIndex].lyric) ? 1 : 0;
                 features[numeric + 22] = LegacyTimingDeltaScale(phrase, prevNoteIndex, currentNoteIndex);
                 features[numeric + 23] = LegacyTimingDeltaScale(phrase, nextNoteIndex, currentNoteIndex);
                 features[numeric + 24] = LegacyTimingAbsScale(phrase, nextNoteIndex);
@@ -941,15 +952,6 @@ namespace OpenUtau.Core.Neutrino {
             return phrase.timeAxis.MsPosToTickPos(posMs) - phrase.position;
         }
 
-        float[] FitLength(float[] values, int length) {
-            if (values.Length == length) {
-                return values;
-            }
-            var fitted = new float[length];
-            Array.Copy(values, fitted, Math.Min(values.Length, length));
-            return fitted;
-        }
-
         void ClampF0(float[] f0) {
             for (int i = 0; i < f0.Length; i++) {
                 if (!float.IsFinite(f0[i]) || f0[i] < f0Min) {
@@ -1182,10 +1184,6 @@ namespace OpenUtau.Core.Neutrino {
             WaveFileWriter.CreateWaveFile16(path, new ExportAdapter(source).ToMono(1, 0));
         }
 
-        bool IsExtensionLyric(string lyric) {
-            return lyric == "+" || lyric == "-";
-        }
-
         static int GetLegacyPhonemeId(string phoneme) {
             phoneme = phoneme?.Trim();
             if (string.IsNullOrEmpty(phoneme)
@@ -1277,12 +1275,18 @@ namespace OpenUtau.Core.Neutrino {
                 NamedOnnxValue.CreateFromTensor("smuon",
                     new DenseTensor<long>(timing.FramePhonemeMap, new[] { 1, totalFrames })),
             };
-            var elementary = FitLength(singer.RunLegacyEmbedding(embeddingInputs), totalFrames * 256);
+            var elementary = NeutrinoInferenceUtil.RequireLength(
+                singer.RunLegacyEmbedding(embeddingInputs),
+                totalFrames * 256,
+                "NEUTRINO v2 e.bin embedding output");
             var acousticInputs = new List<NamedOnnxValue> {
                 NamedOnnxValue.CreateFromTensor("elementary_particle",
                     new DenseTensor<float>(elementary, new[] { 1, totalFrames, 256 })),
             };
-            var melSpectrogram = FitLength(singer.RunLegacyAcoustic(acousticInputs), totalFrames * numMelBins);
+            var melSpectrogram = NeutrinoInferenceUtil.RequireLength(
+                singer.RunLegacyAcoustic(acousticInputs),
+                totalFrames * numMelBins,
+                "NEUTRINO v2 d*.bin mel output");
             ClampMelspec(melSpectrogram);
             ApplyMelspecSilenceMask(timing, melSpectrogram);
             var f0 = RunWorldF0(singer, melSpectrogram, totalFrames);

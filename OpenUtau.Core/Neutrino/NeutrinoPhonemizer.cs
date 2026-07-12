@@ -136,7 +136,10 @@ namespace OpenUtau.Core.Neutrino {
                 NamedOnnxValue.CreateFromTensor("selectron",
                     new DenseTensor<long>(phonePositions.ToArray(), new[] { 1, numPhones })),
             };
-            var boundaryShifts = neutrinoSinger.RunTiming(timingInputs);
+            var boundaryShifts = NeutrinoInferenceUtil.RequireTimingBoundaryLength(
+                neutrinoSinger.RunTiming(timingInputs),
+                numPhones,
+                "NEUTRINO v3 t.bin timing output");
             var baseBoundaries = BuildBaseBoundaryTimes(scoreDurations.ToArray(), phonePositions.ToArray());
             var boundaries = ApplyTimingBoundaryShifts(baseBoundaries, boundaryShifts);
             double phraseStartMs = timeAxis.TickPosToMsPos(noteGroups[0][0].position);
@@ -195,7 +198,7 @@ namespace OpenUtau.Core.Neutrino {
             var boundaries = (double[])baseBoundaries.Clone();
             double frameSec = (double)hopSize / sampleRate;
             for (int i = 1; i < boundaries.Length - 1; i++) {
-                double shift = i < boundaryShifts.Length ? boundaryShifts[i] : 0;
+                double shift = boundaryShifts[i];
                 double shifted = baseBoundaries[i] + shift;
                 boundaries[i] = Math.Round(Math.Max(shifted, boundaries[i - 1] + frameSec) * 1000.0) / 1000.0;
             }

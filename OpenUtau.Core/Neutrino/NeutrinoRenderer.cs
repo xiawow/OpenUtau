@@ -252,9 +252,10 @@ namespace OpenUtau.Core.Neutrino {
                     new DenseTensor<float>(f0, new[] { 1, totalFrames })),
             };
 
-            float[] melSpectrogram;
-            melSpectrogram = singer.RunMelspec(melspecInputs);
-            melSpectrogram = FitLength(melSpectrogram, totalFrames * numMelBins);
+            float[] melSpectrogram = NeutrinoInferenceUtil.RequireLength(
+                singer.RunMelspec(melspecInputs),
+                totalFrames * numMelBins,
+                "NEUTRINO v3 s.bin mel output");
             ClampMelspec(melSpectrogram);
             ApplyMelspecSilenceMask(timing, melSpectrogram);
 
@@ -391,7 +392,10 @@ namespace OpenUtau.Core.Neutrino {
                     new DenseTensor<long>(phonePositions, new[] { 1, numPhones })),
             };
 
-            float[] boundaryShifts = singer.RunTiming(timingInputs);
+            float[] boundaryShifts = NeutrinoInferenceUtil.RequireTimingBoundaryLength(
+                singer.RunTiming(timingInputs),
+                numPhones,
+                "NEUTRINO v3 t.bin timing output");
             var baseBoundaries = BuildBaseBoundaryTimes(scoreDurations, phonePositions);
             var boundaries = ApplyTimingBoundaryShifts(baseBoundaries, boundaryShifts);
             ApplyManualBoundaryOverrides(boundaries, manualBoundaries);
@@ -435,7 +439,10 @@ namespace OpenUtau.Core.Neutrino {
             };
 
             var singer = phrase.singer as NeutrinoSinger;
-            var f0 = FitLength(singer.RunPitch(pitchInputs), timing.TotalFrames);
+            var f0 = NeutrinoInferenceUtil.RequireLength(
+                singer.RunPitch(pitchInputs),
+                timing.TotalFrames,
+                "NEUTRINO v3 p.bin F0 output");
             ApplyInverseStyleShiftToF0(f0, styleShiftCentsByFrame);
             ClampF0(f0);
             ApplyF0SilenceMask(timing, f0);
@@ -701,14 +708,12 @@ namespace OpenUtau.Core.Neutrino {
 
         double GetExtendedNoteDurationMs(RenderNote[] notes, int noteIndex) {
             double endMs = notes[noteIndex].endMs;
-            for (int i = noteIndex + 1; i < notes.Length && IsExtensionLyric(notes[i].lyric); i++) {
+            for (int i = noteIndex + 1;
+                i < notes.Length && NeutrinoInferenceUtil.IsExtensionLyric(notes[i].lyric);
+                i++) {
                 endMs = notes[i].endMs;
             }
             return Math.Max(1, endMs - notes[noteIndex].positionMs);
-        }
-
-        bool IsExtensionLyric(string lyric) {
-            return lyric == "+" || lyric == "-";
         }
 
         double[] BuildBaseBoundaryTimes(float[] scoreDurations, long[] phonePositions) {
@@ -730,7 +735,7 @@ namespace OpenUtau.Core.Neutrino {
             var boundaries = (double[])baseBoundaries.Clone();
             double frameSec = (double)hopSize / sampleRate;
             for (int i = 1; i < boundaries.Length - 1; i++) {
-                double shift = i < boundaryShifts.Length ? boundaryShifts[i] : 0;
+                double shift = boundaryShifts[i];
                 double shifted = baseBoundaries[i] + shift;
                 boundaries[i] = Math.Round(Math.Max(shifted, boundaries[i - 1] + frameSec) * 1000.0) / 1000.0;
             }
@@ -777,7 +782,7 @@ namespace OpenUtau.Core.Neutrino {
             return durations;
         }
 
-        long[] BuildFramePhonemeMap(float[] timingDurations, int totalFrames) {
+        internal static long[] BuildFramePhonemeMap(float[] timingDurations, int totalFrames) {
             var stau = new long[totalFrames];
             double frameSec = (double)hopSize / sampleRate;
             double time = 0;
@@ -789,24 +794,13 @@ namespace OpenUtau.Core.Neutrino {
                     stau[frame] = phone + 1;
                 }
             }
-            long lastPhone = timingDurations.Length > 0 ? 1 : 0;
+            long finalPhone = timingDurations.Length;
             for (int frame = 0; frame < totalFrames; frame++) {
                 if (stau[frame] == 0) {
-                    stau[frame] = lastPhone;
-                } else {
-                    lastPhone = stau[frame];
+                    stau[frame] = finalPhone;
                 }
             }
             return stau;
-        }
-
-        float[] FitLength(float[] values, int length) {
-            if (values.Length == length) {
-                return values;
-            }
-            var fitted = new float[length];
-            Array.Copy(values, fitted, Math.Min(values.Length, length));
-            return fitted;
         }
 
         void ClampF0(float[] f0) {
