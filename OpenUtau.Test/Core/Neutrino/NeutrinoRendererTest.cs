@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Text;
 using OpenUtau.Classic;
 using OpenUtau.Core.Format;
@@ -74,6 +75,117 @@ namespace OpenUtau.Core.Test.Neutrino {
             Assert.Equal(
                 new long[] { 1, 2 },
                 NeutrinoRenderer.BuildFramePhonemeMap(new[] { 0.011f, 0.001f }, 2));
+        }
+
+        [Fact]
+        public void InferenceChunksSplitAfterBreathAndAroundPauses() {
+            var chunks = NeutrinoInferenceUtil.BuildPhoneChunks(new long[] {
+                NeutrinoPhoneme.PAU,
+                NeutrinoPhoneme.PAU,
+                1,
+                NeutrinoPhoneme.BR,
+                2,
+                NeutrinoPhoneme.PAU,
+                4,
+            });
+
+            Assert.Equal(5, chunks.Length);
+            AssertChunk(chunks[0], 0, 2, false);
+            AssertChunk(chunks[1], 2, 2, true);
+            AssertChunk(chunks[2], 4, 1, true);
+            AssertChunk(chunks[3], 5, 1, false);
+            AssertChunk(chunks[4], 6, 1, true);
+        }
+
+        [Fact]
+        public void ConsecutiveBreathsStayInTheSameActiveChunk() {
+            var chunks = NeutrinoInferenceUtil.BuildPhoneChunks(new long[] {
+                1,
+                NeutrinoPhoneme.BR,
+                NeutrinoPhoneme.BR,
+                2,
+            });
+
+            Assert.Equal(2, chunks.Length);
+            AssertChunk(chunks[0], 0, 3, true);
+            AssertChunk(chunks[1], 3, 1, true);
+        }
+
+        [Fact]
+        public void BreathAfterPauseRemainsInTheInactiveChunk() {
+            var chunks = NeutrinoInferenceUtil.BuildPhoneChunks(new long[] {
+                NeutrinoPhoneme.PAU,
+                NeutrinoPhoneme.BR,
+                1,
+            });
+
+            Assert.Equal(2, chunks.Length);
+            AssertChunk(chunks[0], 0, 2, false);
+            AssertChunk(chunks[1], 2, 1, true);
+        }
+
+        [Fact]
+        public void FrameChunksUseGlobalRoundedBoundariesWithoutGaps() {
+            var phoneChunks = NeutrinoInferenceUtil.BuildPhoneChunks(new long[] {
+                1,
+                NeutrinoPhoneme.BR,
+                NeutrinoPhoneme.PAU,
+                2,
+            });
+            var frameChunks = NeutrinoInferenceUtil.BuildFrameChunks(
+                phoneChunks,
+                new[] { 0.0, 0.011, 0.024, 0.032, 0.051 },
+                totalFrames: 5,
+                frameSeconds: 0.01);
+
+            Assert.Equal(3, frameChunks.Length);
+            AssertFrameChunk(frameChunks[0], 0, 2, 0, 2, true);
+            AssertFrameChunk(frameChunks[1], 2, 1, 2, 1, false);
+            AssertFrameChunk(frameChunks[2], 3, 1, 3, 2, true);
+            Assert.Equal(5, frameChunks.Sum(chunk => chunk.FrameCount));
+        }
+
+        [Fact]
+        public void ChunkedTimingKeepsNextActiveChunkInitialShift() {
+            var chunks = NeutrinoInferenceUtil.BuildPhoneChunks(new long[] {
+                1,
+                NeutrinoPhoneme.PAU,
+                2,
+            });
+
+            var boundaries = NeutrinoInferenceUtil.BuildTimingBoundaries(
+                new[] { 0.3f, 0.2f, 0.4f },
+                new long[] { 0, 0, 0 },
+                chunks,
+                frameSeconds: 0.01,
+                chunk => chunk.PhoneStart switch {
+                    0 => new[] { 0f, 123f },
+                    2 => new[] { -0.05f, 123f },
+                    _ => throw new InvalidOperationException(),
+                });
+
+            Assert.Equal(0.0, boundaries[0], 3);
+            Assert.Equal(0.3, boundaries[1], 3);
+            Assert.Equal(0.45, boundaries[2], 3);
+            Assert.Equal(0.9, boundaries[3], 3);
+        }
+
+        [Fact]
+        public void ChunkedTimingDoesNotRepeatOneNoteDuration() {
+            var chunks = NeutrinoInferenceUtil.BuildPhoneChunks(new long[] {
+                1,
+                NeutrinoPhoneme.PAU,
+                2,
+            });
+
+            var boundaries = NeutrinoInferenceUtil.BuildTimingBoundaries(
+                new[] { 0.5f, 0.5f, 0.5f },
+                new long[] { 0, 1, 2 },
+                chunks,
+                frameSeconds: 0.01,
+                chunk => new float[chunk.PhoneCount + 1]);
+
+            Assert.Equal(0.5, boundaries[^1], 3);
         }
 
         [Theory]
@@ -159,6 +271,32 @@ namespace OpenUtau.Core.Test.Neutrino {
             Assert.Equal(harmonic.Length, shifted.Length);
             Assert.All(shifted, sample => Assert.True(float.IsFinite(sample)));
             Assert.NotEqual(harmonic, shifted);
+        }
+
+        static void AssertChunk(
+            NeutrinoPhoneChunk chunk,
+            int phoneStart,
+            int phoneCount,
+            bool isActive) {
+
+            Assert.Equal(phoneStart, chunk.PhoneStart);
+            Assert.Equal(phoneCount, chunk.PhoneCount);
+            Assert.Equal(isActive, chunk.IsActive);
+        }
+
+        static void AssertFrameChunk(
+            NeutrinoFrameChunk chunk,
+            int phoneStart,
+            int phoneCount,
+            int frameStart,
+            int frameCount,
+            bool isActive) {
+
+            Assert.Equal(phoneStart, chunk.PhoneStart);
+            Assert.Equal(phoneCount, chunk.PhoneCount);
+            Assert.Equal(frameStart, chunk.FrameStart);
+            Assert.Equal(frameCount, chunk.FrameCount);
+            Assert.Equal(isActive, chunk.IsActive);
         }
     }
 }
