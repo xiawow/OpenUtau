@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Runtime.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
+using OpenUtau.App.ViewModels;
 using OpenUtau.Classic;
 using OpenUtau.Core.HifiNeural;
 using OpenUtau.Core.Render;
@@ -311,6 +312,98 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
+        public void HnSpectralProfilePreservesVariableControlPoints() {
+            var profile = new HifiHnSpectralProfile {
+                FrequenciesHz = new double[] { 80, 180, 420, 1000, 2600, 6800, 15000 },
+                BalanceDb = new double[] { 1, -1, 2, -2, 3, -3, 4 },
+            };
+
+            var restored = HifiHnSpectralProfile.Deserialize(profile.Serialize());
+
+            Assert.Equal(7, restored.FrequenciesHz.Length);
+            Assert.Equal(profile.FrequenciesHz, restored.FrequenciesHz);
+            Assert.Equal(profile.BalanceDb, restored.BalanceDb);
+        }
+
+        [Fact]
+        public void HnSpectralProfileKeepsControlPointCountWithinSafeLimits() {
+            var tooFew = new HifiHnSpectralProfile {
+                FrequenciesHz = new double[] { 400 },
+                BalanceDb = new double[] { 2 },
+            }.Normalize();
+            var tooMany = new HifiHnSpectralProfile {
+                FrequenciesHz = Enumerable.Range(0, 24).Select(i => 50.0 + i * 700).ToArray(),
+                BalanceDb = Enumerable.Range(0, 24).Select(i => i % 2 == 0 ? 2.0 : -2.0).ToArray(),
+            }.Normalize();
+
+            Assert.Equal(HifiHnSpectralProfile.MinBandCount, tooFew.FrequenciesHz.Length);
+            Assert.Equal(HifiHnSpectralProfile.MinBandCount, tooFew.BalanceDb.Length);
+            Assert.Equal(HifiHnSpectralProfile.MaxBandCount, tooMany.FrequenciesHz.Length);
+            Assert.Equal(HifiHnSpectralProfile.MaxBandCount, tooMany.BalanceDb.Length);
+        }
+
+        [Fact]
+        public void HnSpectralDesignerAddsCopiesAndSafelyDeletesControlPoints() {
+            var viewModel = new HifiHnSpectralDesignerViewModel(new HifiHnSpectralProfile(), 1);
+
+            int added = viewModel.AddBand(700, 2.5);
+            Assert.True(added >= 0);
+            Assert.Equal(6, viewModel.Bands.Count);
+            Assert.Equal(2.5, viewModel.Bands[added].BalanceDb);
+            Assert.True(viewModel.Bands.Zip(viewModel.Bands.Skip(1),
+                (left, right) => left.FrequencyHz < right.FrequencyHz).All(value => value));
+
+            viewModel.UndoBandEdit();
+            Assert.Equal(5, viewModel.Bands.Count);
+            viewModel.RedoBandEdit();
+            Assert.Equal(6, viewModel.Bands.Count);
+
+            int selected = viewModel.SelectedBandIndex;
+            double originalFrequency = viewModel.Bands[selected].FrequencyHz;
+            double originalBalance = viewModel.Bands[selected].BalanceDb;
+            viewModel.BeginBandEdit();
+            viewModel.Bands[selected].FrequencyHz = originalFrequency + 20;
+            viewModel.Bands[selected].BalanceDb = originalBalance - 1;
+            viewModel.CommitBandEdit();
+            viewModel.UndoBandEdit();
+            Assert.Equal(originalFrequency, viewModel.Bands[selected].FrequencyHz);
+            Assert.Equal(originalBalance, viewModel.Bands[selected].BalanceDb);
+            viewModel.RedoBandEdit();
+
+            viewModel.CopySelectedBand();
+            viewModel.PasteBand();
+            Assert.Equal(7, viewModel.Bands.Count);
+
+            while (viewModel.Bands.Count > HifiHnSpectralProfile.MinBandCount) {
+                viewModel.SelectedBandIndex = 0;
+                viewModel.DeleteSelectedBand();
+            }
+            viewModel.DeleteSelectedBand();
+
+            Assert.Equal(HifiHnSpectralProfile.MinBandCount, viewModel.Bands.Count);
+            Assert.False(viewModel.CanDeleteSelectedBand);
+            Assert.Equal(HifiHnSpectralProfile.MinBandCount, viewModel.BuildProfile().FrequenciesHz.Length);
+        }
+
+        [Fact]
+        public void HnSpectralDesignerDynamicsPanelTogglesExpandedSize() {
+            var viewModel = new HifiHnSpectralDesignerViewModel(new HifiHnSpectralProfile(), 1);
+
+            Assert.False(viewModel.DynamicsPanelExpanded);
+            Assert.Equal(0, viewModel.DynamicsPanelHeight);
+            Assert.Equal(0, viewModel.DynamicsPanelOpacity);
+
+            viewModel.ToggleDynamicsPanel();
+
+            Assert.True(viewModel.DynamicsPanelExpanded);
+            Assert.Equal(124, viewModel.DynamicsPanelHeight);
+            Assert.Equal(1, viewModel.DynamicsPanelOpacity);
+
+            viewModel.ToggleDynamicsPanel();
+            Assert.False(viewModel.DynamicsPanelExpanded);
+        }
+
+        [Fact]
         public void NoteRendererSettingCommandRestoresEachPreviousValue() {
             var part = new UVoicePart();
             var first = UNote.Create();
@@ -384,6 +477,28 @@ namespace OpenUtau.Core.Test.HifiNeural {
             Assert.Contains(Enumerable.Range(0, 1000), i => Math.Abs(result[i] - baseline[i]) > 1e-5);
             Assert.Contains(Enumerable.Range(length - 1000, 1000), i => Math.Abs(result[i] - baseline[i]) > 1e-5);
             Assert.True(Math.Abs(Rms(result) - Rms(baseline)) > 1e-4);
+        }
+
+        [Fact]
+        public void HnSpectralProcessorAcceptsAddedControlPoints() {
+            const int length = 8192;
+            var harmonic = Enumerable.Range(0, length)
+                .Select(i => (float)(0.2 * Math.Sin(2 * Math.PI * 300 * i / HifiMelExtractor.SampleRate)))
+                .ToArray();
+            var noise = Enumerable.Range(0, length)
+                .Select(i => (float)(0.04 * Math.Sin(2 * Math.PI * 8000 * i / HifiMelExtractor.SampleRate)))
+                .ToArray();
+            var baseline = harmonic.Zip(noise, (left, right) => left + right).ToArray();
+            var profile = new HifiHnSpectralProfile {
+                FrequenciesHz = new double[] { 80, 180, 420, 1000, 2600, 6800, 15000 },
+                BalanceDb = new double[] { 2, 2, 1, 0, -1, -2, -2 },
+            };
+
+            float[] result = HifiHnSpectralProcessor.Process(baseline, harmonic, noise, profile);
+
+            Assert.Equal(length, result.Length);
+            Assert.All(result, value => Assert.True(float.IsFinite(value)));
+            Assert.Contains(Enumerable.Range(0, length), i => Math.Abs(result[i] - baseline[i]) > 1e-5);
         }
 
         [Fact]

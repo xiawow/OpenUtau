@@ -846,7 +846,7 @@ General
   <system:String x:Key="hifi.hn.enabled">Enabled</system:String>
   <system:String x:Key="hifi.hn.close">Close</system:String>
   <system:String x:Key="hifi.hn.balance">Frequency balance</system:String>
-  <system:String x:Key="hifi.hn.balance.tip">Click a point to select it. Drag left or right for frequency, and up or down for harmonic / noise balance.</system:String>
+  <system:String x:Key="hifi.hn.balance.tip">Drag points to shape. Double-click the curve to add; right-click a point for edit actions.</system:String>
   <system:String x:Key="hifi.hn.point">Control point {0}</system:String>
   <system:String x:Key="hifi.hn.current.point">Selected point</system:String>
   <system:String x:Key="hifi.hn.frequency">Frequency</system:String>

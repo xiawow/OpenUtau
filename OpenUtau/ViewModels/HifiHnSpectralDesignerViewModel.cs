@@ -1,34 +1,61 @@
 using System;
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
+using System.ComponentModel;
+using System.Linq;
 using OpenUtau.Core.HifiNeural;
 using ReactiveUI;
 using ReactiveUI.Fody.Helpers;
 
 namespace OpenUtau.App.ViewModels {
+    public sealed class HifiHnBandViewModel : ReactiveObject {
+        double frequencyHz;
+        double balanceDb;
+
+        public double FrequencyHz {
+            get => frequencyHz;
+            set => this.RaiseAndSetIfChanged(
+                ref frequencyHz,
+                double.IsFinite(value)
+                    ? Math.Clamp(value, HifiHnSpectralProfile.MinFrequencyHz, HifiHnSpectralProfile.MaxFrequencyHz)
+                    : HifiHnSpectralProfile.MinFrequencyHz);
+        }
+
+        public double BalanceDb {
+            get => balanceDb;
+            set => this.RaiseAndSetIfChanged(
+                ref balanceDb,
+                double.IsFinite(value)
+                    ? Math.Clamp(value, -HifiHnSpectralProfile.MaxBalanceDb, HifiHnSpectralProfile.MaxBalanceDb)
+                    : 0);
+        }
+
+        public HifiHnBandViewModel(double frequencyHz, double balanceDb) {
+            this.frequencyHz = double.IsFinite(frequencyHz)
+                ? Math.Clamp(frequencyHz, HifiHnSpectralProfile.MinFrequencyHz, HifiHnSpectralProfile.MaxFrequencyHz)
+                : HifiHnSpectralProfile.MinFrequencyHz;
+            this.balanceDb = double.IsFinite(balanceDb)
+                ? Math.Clamp(balanceDb, -HifiHnSpectralProfile.MaxBalanceDb, HifiHnSpectralProfile.MaxBalanceDb)
+                : 0;
+        }
+    }
+
     public sealed class HifiHnSpectralDesignerViewModel : ViewModelBase {
+        readonly record struct BandClipboard(double FrequencyHz, double BalanceDb);
+        sealed record BandSnapshot(double[] FrequenciesHz, double[] BalanceDb, int SelectedIndex);
+        const int MaxHistoryEntries = 64;
+        static BandClipboard? clipboard;
+
         readonly int noteCount;
+        readonly System.Collections.Generic.List<BandSnapshot> undoHistory = new();
+        readonly System.Collections.Generic.List<BandSnapshot> redoHistory = new();
+        bool updatingBands;
+        int bandEditDepth;
+        BandSnapshot? pendingBandEdit;
+        int selectedBandIndex = -1;
+        bool dynamicsPanelExpanded;
 
         [Reactive] public bool Enabled { get; set; }
-        double bodyDb;
-        double warmthDb;
-        double presenceDb;
-        double clarityDb;
-        double airDb;
-        public double BodyDb { get => bodyDb; set => SetBalanceValue(0, value); }
-        public double WarmthDb { get => warmthDb; set => SetBalanceValue(1, value); }
-        public double PresenceDb { get => presenceDb; set => SetBalanceValue(2, value); }
-        public double ClarityDb { get => clarityDb; set => SetBalanceValue(3, value); }
-        public double AirDb { get => airDb; set => SetBalanceValue(4, value); }
-        double bodyHz = HifiHnSpectralProfile.DefaultFrequenciesHz[0];
-        double warmthHz = HifiHnSpectralProfile.DefaultFrequenciesHz[1];
-        double presenceHz = HifiHnSpectralProfile.DefaultFrequenciesHz[2];
-        double clarityHz = HifiHnSpectralProfile.DefaultFrequenciesHz[3];
-        double airHz = HifiHnSpectralProfile.DefaultFrequenciesHz[4];
-        public double BodyHz { get => bodyHz; set => SetFrequency(0, value); }
-        public double WarmthHz { get => warmthHz; set => SetFrequency(1, value); }
-        public double PresenceHz { get => presenceHz; set => SetFrequency(2, value); }
-        public double ClarityHz { get => clarityHz; set => SetFrequency(3, value); }
-        public double AirHz { get => airHz; set => SetFrequency(4, value); }
         [Reactive] public bool DynamicsEnabled { get; set; }
         [Reactive] public int DynamicsTargetIndex { get; set; }
         [Reactive] public double ThresholdDb { get; set; }
@@ -36,58 +63,49 @@ namespace OpenUtau.App.ViewModels {
         [Reactive] public double AttackMs { get; set; }
         [Reactive] public double ReleaseMs { get; set; }
         [Reactive] public double MaxReductionDb { get; set; }
-        int selectedBandIndex = -1;
-        bool dynamicsPanelExpanded;
+
+        public ObservableCollection<HifiHnBandViewModel> Bands { get; } = new();
 
         public int SelectedBandIndex {
             get => selectedBandIndex;
-            set => this.RaiseAndSetIfChanged(
-                ref selectedBandIndex,
-                Math.Clamp(value, -1, HifiHnSpectralProfile.BandCount - 1));
+            set {
+                int maximum = Bands.Count - 1;
+                int clamped = maximum < 0 ? -1 : Math.Clamp(value, -1, maximum);
+                if (selectedBandIndex == clamped) {
+                    return;
+                }
+                this.RaiseAndSetIfChanged(ref selectedBandIndex, clamped);
+                RaiseSelectedBandProperties();
+            }
         }
-        public bool HasSelectedBand => SelectedBandIndex >= 0;
+
+        public bool HasSelectedBand => SelectedBandIndex >= 0 && SelectedBandIndex < Bands.Count;
+        public bool CanDeleteSelectedBand => HasSelectedBand && Bands.Count > HifiHnSpectralProfile.MinBandCount;
+        public bool CanPasteBand => clipboard.HasValue && Bands.Count < HifiHnSpectralProfile.MaxBandCount;
+        public bool CanUndoBandEdit => undoHistory.Count > 0;
+        public bool CanRedoBandEdit => redoHistory.Count > 0;
         public double SelectedBandOpacity => HasSelectedBand ? 1.0 : 0.0;
         public string SelectedBandTitle => HasSelectedBand
             ? string.Format(ThemeManager.GetString("hifi.hn.point"), SelectedBandIndex + 1)
             : string.Empty;
         public double SelectedFrequencyHz {
-            get => SelectedBandIndex switch {
-                0 => BodyHz,
-                1 => WarmthHz,
-                2 => PresenceHz,
-                3 => ClarityHz,
-                4 => AirHz,
-                _ => 0,
-            };
+            get => HasSelectedBand ? Bands[SelectedBandIndex].FrequencyHz : 0;
             set {
-                switch (SelectedBandIndex) {
-                    case 0: BodyHz = value; break;
-                    case 1: WarmthHz = value; break;
-                    case 2: PresenceHz = value; break;
-                    case 3: ClarityHz = value; break;
-                    case 4: AirHz = value; break;
+                if (HasSelectedBand) {
+                    RunBandEdit(() =>
+                        Bands[SelectedBandIndex].FrequencyHz = ClampFrequency(SelectedBandIndex, value));
                 }
             }
         }
         public double SelectedBalanceDb {
-            get => SelectedBandIndex switch {
-                0 => BodyDb,
-                1 => WarmthDb,
-                2 => PresenceDb,
-                3 => ClarityDb,
-                4 => AirDb,
-                _ => 0,
-            };
+            get => HasSelectedBand ? Bands[SelectedBandIndex].BalanceDb : 0;
             set {
-                switch (SelectedBandIndex) {
-                    case 0: BodyDb = value; break;
-                    case 1: WarmthDb = value; break;
-                    case 2: PresenceDb = value; break;
-                    case 3: ClarityDb = value; break;
-                    case 4: AirDb = value; break;
+                if (HasSelectedBand) {
+                    RunBandEdit(() => Bands[SelectedBandIndex].BalanceDb = value);
                 }
             }
         }
+
         public bool DynamicsPanelExpanded {
             get => dynamicsPanelExpanded;
             set {
@@ -102,7 +120,7 @@ namespace OpenUtau.App.ViewModels {
         }
         public double DynamicsPanelHeight => DynamicsPanelExpanded ? 124.0 : 0.0;
         public double DynamicsPanelOpacity => DynamicsPanelExpanded ? 1.0 : 0.0;
-        public string DynamicsPanelChevron => DynamicsPanelExpanded ? "▲" : "▼";
+        public string DynamicsPanelChevron => DynamicsPanelExpanded ? "\u25B2" : "\u25BC";
 
         public string SelectionText => string.Format(
             ThemeManager.GetString("hifi.hn.selected"),
@@ -114,11 +132,7 @@ namespace OpenUtau.App.ViewModels {
 
         public HifiHnSpectralDesignerViewModel(HifiHnSpectralProfile profile, int noteCount) {
             this.noteCount = Math.Max(1, noteCount);
-            PropertyChanged += (_, args) => {
-                if (IsSelectedBandDependency(args.PropertyName)) {
-                    RaiseSelectedBandProperties();
-                }
-            };
+            Bands.CollectionChanged += OnBandsChanged;
             DynamicsTargets = new ObservableCollection<string> {
                 ThemeManager.GetString("hifi.hn.target.harmonic"),
                 ThemeManager.GetString("hifi.hn.target.noise"),
@@ -131,13 +145,12 @@ namespace OpenUtau.App.ViewModels {
 
         public void SelectPreviousBand() {
             SelectedBandIndex = SelectedBandIndex <= 0
-                ? HifiHnSpectralProfile.BandCount - 1
+                ? Bands.Count - 1
                 : SelectedBandIndex - 1;
         }
 
         public void SelectNextBand() {
-            SelectedBandIndex = SelectedBandIndex < 0
-                || SelectedBandIndex >= HifiHnSpectralProfile.BandCount - 1
+            SelectedBandIndex = SelectedBandIndex < 0 || SelectedBandIndex >= Bands.Count - 1
                 ? 0
                 : SelectedBandIndex + 1;
         }
@@ -150,11 +163,133 @@ namespace OpenUtau.App.ViewModels {
             DynamicsPanelExpanded = !DynamicsPanelExpanded;
         }
 
+        public int AddBand(double frequencyHz, double balanceDb) {
+            return RunBandEdit(() => AddBandCore(frequencyHz, balanceDb));
+        }
+
+        int AddBandCore(double frequencyHz, double balanceDb) {
+            if (Bands.Count >= HifiHnSpectralProfile.MaxBandCount) {
+                return -1;
+            }
+            frequencyHz = double.IsFinite(frequencyHz)
+                ? Math.Clamp(frequencyHz, HifiHnSpectralProfile.MinFrequencyHz, HifiHnSpectralProfile.MaxFrequencyHz)
+                : HifiHnSpectralProfile.MinFrequencyHz;
+            int bestIndex = -1;
+            double bestFrequency = frequencyHz;
+            double bestDistance = double.MaxValue;
+            for (int index = 0; index <= Bands.Count; index++) {
+                double minimum = index == 0
+                    ? HifiHnSpectralProfile.MinFrequencyHz
+                    : Bands[index - 1].FrequencyHz * HifiHnSpectralProfile.MinFrequencyRatio;
+                double maximum = index == Bands.Count
+                    ? HifiHnSpectralProfile.MaxFrequencyHz
+                    : Bands[index].FrequencyHz / HifiHnSpectralProfile.MinFrequencyRatio;
+                if (minimum > maximum) {
+                    continue;
+                }
+                double candidate = Math.Clamp(frequencyHz, minimum, maximum);
+                double distance = Math.Abs(Math.Log(candidate) - Math.Log(frequencyHz));
+                if (distance < bestDistance) {
+                    bestIndex = index;
+                    bestFrequency = candidate;
+                    bestDistance = distance;
+                }
+            }
+            if (bestIndex < 0) {
+                return -1;
+            }
+            Bands.Insert(bestIndex, new HifiHnBandViewModel(bestFrequency, balanceDb));
+            SelectedBandIndex = bestIndex;
+            return bestIndex;
+        }
+
+        public void DeleteSelectedBand() {
+            if (!CanDeleteSelectedBand) {
+                return;
+            }
+            RunBandEdit(() => {
+                int removedIndex = SelectedBandIndex;
+                Bands.RemoveAt(removedIndex);
+                SelectedBandIndex = Math.Min(removedIndex, Bands.Count - 1);
+            });
+        }
+
+        public void CopySelectedBand() {
+            if (HasSelectedBand) {
+                var band = Bands[SelectedBandIndex];
+                clipboard = new BandClipboard(band.FrequencyHz, band.BalanceDb);
+            }
+        }
+
+        public void CutSelectedBand() {
+            if (!CanDeleteSelectedBand) {
+                return;
+            }
+            CopySelectedBand();
+            DeleteSelectedBand();
+        }
+
+        public void PasteBand() {
+            if (!CanPasteBand || !clipboard.HasValue) {
+                return;
+            }
+            BandClipboard value = clipboard.Value;
+            double frequency = CanInsertAtFrequency(value.FrequencyHz)
+                ? value.FrequencyHz
+                : FrequencyNearSelectedBand();
+            AddBand(frequency, value.BalanceDb);
+        }
+
+        public void BeginBandEdit() {
+            if (bandEditDepth++ == 0) {
+                pendingBandEdit = CaptureBandSnapshot();
+            }
+        }
+
+        public void CommitBandEdit() {
+            if (bandEditDepth <= 0) {
+                return;
+            }
+            bandEditDepth--;
+            if (bandEditDepth > 0) {
+                return;
+            }
+            BandSnapshot? before = pendingBandEdit;
+            pendingBandEdit = null;
+            if (before != null && !BandSnapshotsEqual(before, CaptureBandSnapshot())) {
+                PushHistory(undoHistory, before);
+                redoHistory.Clear();
+                RaiseHistoryProperties();
+            }
+        }
+
+        public void UndoBandEdit() {
+            FinishPendingBandEdit();
+            if (undoHistory.Count == 0) {
+                return;
+            }
+            BandSnapshot target = PopHistory(undoHistory);
+            PushHistory(redoHistory, CaptureBandSnapshot());
+            RestoreBandSnapshot(target);
+            RaiseHistoryProperties();
+        }
+
+        public void RedoBandEdit() {
+            FinishPendingBandEdit();
+            if (redoHistory.Count == 0) {
+                return;
+            }
+            BandSnapshot target = PopHistory(redoHistory);
+            PushHistory(undoHistory, CaptureBandSnapshot());
+            RestoreBandSnapshot(target);
+            RaiseHistoryProperties();
+        }
+
         public HifiHnSpectralProfile BuildProfile() {
             return new HifiHnSpectralProfile {
                 Enabled = Enabled,
-                BalanceDb = new[] { BodyDb, WarmthDb, PresenceDb, ClarityDb, AirDb },
-                FrequenciesHz = new[] { BodyHz, WarmthHz, PresenceHz, ClarityHz, AirHz },
+                BalanceDb = Bands.Select(band => band.BalanceDb).ToArray(),
+                FrequenciesHz = Bands.Select(band => band.FrequencyHz).ToArray(),
                 DynamicsEnabled = DynamicsEnabled,
                 DynamicsTarget = Enum.IsDefined(typeof(HifiHnDynamicsTarget), DynamicsTargetIndex)
                     ? (HifiHnDynamicsTarget)DynamicsTargetIndex
@@ -170,8 +305,19 @@ namespace OpenUtau.App.ViewModels {
         void Load(HifiHnSpectralProfile profile) {
             profile = profile.Clone().Normalize();
             Enabled = profile.Enabled;
-            SetBalance(profile.BalanceDb);
-            SetFrequencies(profile.FrequenciesHz);
+            updatingBands = true;
+            try {
+                foreach (var band in Bands) {
+                    band.PropertyChanged -= OnBandPropertyChanged;
+                }
+                Bands.Clear();
+                for (int i = 0; i < profile.FrequenciesHz.Length; i++) {
+                    Bands.Add(new HifiHnBandViewModel(profile.FrequenciesHz[i], profile.BalanceDb[i]));
+                }
+            } finally {
+                updatingBands = false;
+            }
+            SelectedBandIndex = -1;
             DynamicsEnabled = profile.DynamicsEnabled;
             DynamicsTargetIndex = (int)profile.DynamicsTarget;
             ThresholdDb = profile.ThresholdDb;
@@ -179,91 +325,185 @@ namespace OpenUtau.App.ViewModels {
             AttackMs = profile.AttackMs;
             ReleaseMs = profile.ReleaseMs;
             MaxReductionDb = profile.MaxReductionDb;
+            undoHistory.Clear();
+            redoHistory.Clear();
+            pendingBandEdit = null;
+            bandEditDepth = 0;
+            RaiseSelectedBandProperties();
+            RaiseHistoryProperties();
         }
 
-        void SetBalance(double[] values) {
-            BodyDb = values.Length > 0 ? values[0] : 0;
-            WarmthDb = values.Length > 1 ? values[1] : 0;
-            PresenceDb = values.Length > 2 ? values[2] : 0;
-            ClarityDb = values.Length > 3 ? values[3] : 0;
-            AirDb = values.Length > 4 ? values[4] : 0;
-        }
-
-        void SetBalanceValue(int band, double value) {
-            double requested = value;
-            value = double.IsFinite(value)
-                ? Math.Clamp(value, -HifiHnSpectralProfile.MaxBalanceDb, HifiHnSpectralProfile.MaxBalanceDb)
-                : 0;
-            switch (band) {
-                case 0: this.RaiseAndSetIfChanged(ref bodyDb, value, nameof(BodyDb)); break;
-                case 1: this.RaiseAndSetIfChanged(ref warmthDb, value, nameof(WarmthDb)); break;
-                case 2: this.RaiseAndSetIfChanged(ref presenceDb, value, nameof(PresenceDb)); break;
-                case 3: this.RaiseAndSetIfChanged(ref clarityDb, value, nameof(ClarityDb)); break;
-                case 4: this.RaiseAndSetIfChanged(ref airDb, value, nameof(AirDb)); break;
+        void OnBandsChanged(object? sender, NotifyCollectionChangedEventArgs e) {
+            if (e.OldItems != null) {
+                foreach (HifiHnBandViewModel band in e.OldItems) {
+                    band.PropertyChanged -= OnBandPropertyChanged;
+                }
             }
-            if (!double.IsFinite(requested) || Math.Abs(requested - value) > 0.001) {
-                this.RaisePropertyChanged(band switch {
-                    0 => nameof(BodyDb),
-                    1 => nameof(WarmthDb),
-                    2 => nameof(PresenceDb),
-                    3 => nameof(ClarityDb),
-                    _ => nameof(AirDb),
-                });
+            if (e.NewItems != null) {
+                foreach (HifiHnBandViewModel band in e.NewItems) {
+                    band.PropertyChanged += OnBandPropertyChanged;
+                }
+            }
+            if (!updatingBands && SelectedBandIndex >= Bands.Count) {
+                SelectedBandIndex = Bands.Count - 1;
+            }
+            RaiseSelectedBandProperties();
+        }
+
+        void OnBandPropertyChanged(object? sender, PropertyChangedEventArgs e) {
+            if (sender is not HifiHnBandViewModel band) {
+                return;
+            }
+            int index = Bands.IndexOf(band);
+            if (index < 0) {
+                return;
+            }
+            if (!updatingBands && e.PropertyName == nameof(HifiHnBandViewModel.FrequencyHz)) {
+                double clamped = ClampFrequency(index, band.FrequencyHz);
+                if (Math.Abs(clamped - band.FrequencyHz) > 0.001) {
+                    updatingBands = true;
+                    try {
+                        band.FrequencyHz = clamped;
+                    } finally {
+                        updatingBands = false;
+                    }
+                }
+            }
+            if (index == SelectedBandIndex) {
+                RaiseSelectedBandProperties();
             }
         }
 
-        void SetFrequencies(double[] values) {
-            var defaults = HifiHnSpectralProfile.DefaultFrequenciesHz;
-            bodyHz = values.Length > 0 ? values[0] : defaults[0];
-            warmthHz = values.Length > 1 ? values[1] : defaults[1];
-            presenceHz = values.Length > 2 ? values[2] : defaults[2];
-            clarityHz = values.Length > 3 ? values[3] : defaults[3];
-            airHz = values.Length > 4 ? values[4] : defaults[4];
-            this.RaisePropertyChanged(nameof(BodyHz));
-            this.RaisePropertyChanged(nameof(WarmthHz));
-            this.RaisePropertyChanged(nameof(PresenceHz));
-            this.RaisePropertyChanged(nameof(ClarityHz));
-            this.RaisePropertyChanged(nameof(AirHz));
-        }
-
-        void SetFrequency(int band, double value) {
-            double requested = value;
-            var frequencies = new[] { bodyHz, warmthHz, presenceHz, clarityHz, airHz };
-            double minimum = band == 0
+        double ClampFrequency(int index, double value) {
+            double minimum = index == 0
                 ? HifiHnSpectralProfile.MinFrequencyHz
-                : frequencies[band - 1] * HifiHnSpectralProfile.MinFrequencyRatio;
-            double maximum = band == HifiHnSpectralProfile.BandCount - 1
+                : Bands[index - 1].FrequencyHz * HifiHnSpectralProfile.MinFrequencyRatio;
+            double maximum = index == Bands.Count - 1
                 ? HifiHnSpectralProfile.MaxFrequencyHz
-                : frequencies[band + 1] / HifiHnSpectralProfile.MinFrequencyRatio;
-            value = double.IsFinite(value)
-                ? Math.Clamp(value, minimum, maximum)
-                : HifiHnSpectralProfile.DefaultFrequenciesHz[band];
-            switch (band) {
-                case 0: this.RaiseAndSetIfChanged(ref bodyHz, value, nameof(BodyHz)); break;
-                case 1: this.RaiseAndSetIfChanged(ref warmthHz, value, nameof(WarmthHz)); break;
-                case 2: this.RaiseAndSetIfChanged(ref presenceHz, value, nameof(PresenceHz)); break;
-                case 3: this.RaiseAndSetIfChanged(ref clarityHz, value, nameof(ClarityHz)); break;
-                case 4: this.RaiseAndSetIfChanged(ref airHz, value, nameof(AirHz)); break;
+                : Bands[index + 1].FrequencyHz / HifiHnSpectralProfile.MinFrequencyRatio;
+            value = double.IsFinite(value) ? value : Bands[index].FrequencyHz;
+            return Math.Clamp(value, minimum, maximum);
+        }
+
+        bool CanInsertAtFrequency(double frequencyHz) {
+            int index = 0;
+            while (index < Bands.Count && Bands[index].FrequencyHz < frequencyHz) {
+                index++;
             }
-            if (!double.IsFinite(requested) || Math.Abs(requested - value) > 0.01) {
-                this.RaisePropertyChanged(band switch {
-                    0 => nameof(BodyHz),
-                    1 => nameof(WarmthHz),
-                    2 => nameof(PresenceHz),
-                    3 => nameof(ClarityHz),
-                    _ => nameof(AirHz),
-                });
+            double minimum = index == 0
+                ? HifiHnSpectralProfile.MinFrequencyHz
+                : Bands[index - 1].FrequencyHz * HifiHnSpectralProfile.MinFrequencyRatio;
+            double maximum = index == Bands.Count
+                ? HifiHnSpectralProfile.MaxFrequencyHz
+                : Bands[index].FrequencyHz / HifiHnSpectralProfile.MinFrequencyRatio;
+            return frequencyHz >= minimum && frequencyHz <= maximum;
+        }
+
+        double FrequencyNearSelectedBand() {
+            if (!HasSelectedBand) {
+                return clipboard?.FrequencyHz ?? HifiHnSpectralProfile.DefaultFrequenciesHz[0];
+            }
+            double selected = Bands[SelectedBandIndex].FrequencyHz;
+            if (SelectedBandIndex < Bands.Count - 1) {
+                return Math.Sqrt(selected * Bands[SelectedBandIndex + 1].FrequencyHz);
+            }
+            if (SelectedBandIndex > 0) {
+                return Math.Sqrt(Bands[SelectedBandIndex - 1].FrequencyHz * selected);
+            }
+            return Math.Clamp(
+                selected * 1.5,
+                HifiHnSpectralProfile.MinFrequencyHz,
+                HifiHnSpectralProfile.MaxFrequencyHz);
+        }
+
+        void RunBandEdit(Action action) {
+            bool ownsTransaction = bandEditDepth == 0;
+            if (ownsTransaction) {
+                BeginBandEdit();
+            }
+            try {
+                action();
+            } finally {
+                if (ownsTransaction) {
+                    CommitBandEdit();
+                }
             }
         }
 
-        static bool IsSelectedBandDependency(string? propertyName) {
-            return propertyName is nameof(SelectedBandIndex)
-                or nameof(BodyDb) or nameof(WarmthDb) or nameof(PresenceDb) or nameof(ClarityDb) or nameof(AirDb)
-                or nameof(BodyHz) or nameof(WarmthHz) or nameof(PresenceHz) or nameof(ClarityHz) or nameof(AirHz);
+        T RunBandEdit<T>(Func<T> action) {
+            bool ownsTransaction = bandEditDepth == 0;
+            if (ownsTransaction) {
+                BeginBandEdit();
+            }
+            try {
+                return action();
+            } finally {
+                if (ownsTransaction) {
+                    CommitBandEdit();
+                }
+            }
+        }
+
+        void FinishPendingBandEdit() {
+            if (bandEditDepth <= 0) {
+                return;
+            }
+            bandEditDepth = 1;
+            CommitBandEdit();
+        }
+
+        BandSnapshot CaptureBandSnapshot() {
+            return new BandSnapshot(
+                Bands.Select(band => band.FrequencyHz).ToArray(),
+                Bands.Select(band => band.BalanceDb).ToArray(),
+                SelectedBandIndex);
+        }
+
+        void RestoreBandSnapshot(BandSnapshot snapshot) {
+            updatingBands = true;
+            try {
+                foreach (var band in Bands) {
+                    band.PropertyChanged -= OnBandPropertyChanged;
+                }
+                Bands.Clear();
+                for (int i = 0; i < snapshot.FrequenciesHz.Length; i++) {
+                    Bands.Add(new HifiHnBandViewModel(snapshot.FrequenciesHz[i], snapshot.BalanceDb[i]));
+                }
+            } finally {
+                updatingBands = false;
+            }
+            SelectedBandIndex = Math.Clamp(snapshot.SelectedIndex, -1, Bands.Count - 1);
+            RaiseSelectedBandProperties();
+        }
+
+        static bool BandSnapshotsEqual(BandSnapshot left, BandSnapshot right) {
+            return left.FrequenciesHz.SequenceEqual(right.FrequenciesHz)
+                && left.BalanceDb.SequenceEqual(right.BalanceDb);
+        }
+
+        static BandSnapshot PopHistory(System.Collections.Generic.List<BandSnapshot> history) {
+            int index = history.Count - 1;
+            BandSnapshot value = history[index];
+            history.RemoveAt(index);
+            return value;
+        }
+
+        static void PushHistory(System.Collections.Generic.List<BandSnapshot> history, BandSnapshot snapshot) {
+            history.Add(snapshot);
+            if (history.Count > MaxHistoryEntries) {
+                history.RemoveAt(0);
+            }
+        }
+
+        void RaiseHistoryProperties() {
+            this.RaisePropertyChanged(nameof(CanUndoBandEdit));
+            this.RaisePropertyChanged(nameof(CanRedoBandEdit));
         }
 
         void RaiseSelectedBandProperties() {
             this.RaisePropertyChanged(nameof(HasSelectedBand));
+            this.RaisePropertyChanged(nameof(CanDeleteSelectedBand));
+            this.RaisePropertyChanged(nameof(CanPasteBand));
             this.RaisePropertyChanged(nameof(SelectedBandOpacity));
             this.RaisePropertyChanged(nameof(SelectedBandTitle));
             this.RaisePropertyChanged(nameof(SelectedFrequencyHz));

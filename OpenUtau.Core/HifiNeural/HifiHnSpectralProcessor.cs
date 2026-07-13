@@ -61,9 +61,10 @@ namespace OpenUtau.Core.HifiNeural {
             var output = new double[requiredLength];
             var windowSum = new double[requiredLength];
             var fft = new Complex[Nfft];
-            var bandPower = new double[HifiHnSpectralProfile.BandCount];
-            var bandReductionDb = new double[HifiHnSpectralProfile.BandCount];
-            var smoothedReductionDb = new double[HifiHnSpectralProfile.BandCount];
+            int bandCount = profile.FrequenciesHz.Length;
+            var bandPower = new double[bandCount];
+            var bandReductionDb = new double[bandCount];
+            var smoothedReductionDb = new double[bandCount];
             double analysisScale = Math.Max(1.0, WindowSum() * 0.5);
             double attack = SmoothingCoefficient(profile.AttackMs);
             double release = SmoothingCoefficient(profile.ReleaseMs);

@@ -15,6 +15,8 @@ namespace OpenUtau.Core.HifiNeural {
     public sealed class HifiHnSpectralProfile {
         public const string RendererSettingKey = "hifi-neura.hn-spectral.v1";
         public const int BandCount = 5;
+        public const int MinBandCount = 2;
+        public const int MaxBandCount = 16;
         public const double MaxBalanceDb = 9.0;
         public const double MinFrequencyHz = 40.0;
         public const double MaxFrequencyHz = 20000.0;
@@ -60,8 +62,13 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         void NormalizeBands() {
-            var values = new double[BandCount];
-            var frequencies = (double[])DefaultFrequenciesHz.Clone();
+            int requestedCount = Math.Max(BalanceDb?.Length ?? 0, FrequenciesHz?.Length ?? 0);
+            int count = requestedCount == 0
+                ? BandCount
+                : Math.Clamp(requestedCount, MinBandCount, MaxBandCount);
+            var values = new double[count];
+            var fallbackFrequencies = BuildDefaultFrequencies(count);
+            var frequencies = (double[])fallbackFrequencies.Clone();
             if (BalanceDb != null) {
                 Array.Copy(BalanceDb, values, Math.Min(BalanceDb.Length, values.Length));
             }
@@ -69,9 +76,9 @@ namespace OpenUtau.Core.HifiNeural {
                 Array.Copy(FrequenciesHz, frequencies, Math.Min(FrequenciesHz.Length, frequencies.Length));
             }
 
-            var bands = Enumerable.Range(0, BandCount)
+            var bands = Enumerable.Range(0, count)
                 .Select(i => (
-                    Frequency: FiniteClamp(frequencies[i], MinFrequencyHz, MaxFrequencyHz, DefaultFrequenciesHz[i]),
+                    Frequency: FiniteClamp(frequencies[i], MinFrequencyHz, MaxFrequencyHz, fallbackFrequencies[i]),
                     Balance: FiniteClamp(values[i], -MaxBalanceDb, MaxBalanceDb, 0)))
                 .OrderBy(band => band.Frequency)
                 .ToArray();
@@ -86,6 +93,20 @@ namespace OpenUtau.Core.HifiNeural {
             }
             FrequenciesHz = frequencies;
             BalanceDb = values;
+        }
+
+        static double[] BuildDefaultFrequencies(int count) {
+            if (count == BandCount) {
+                return (double[])DefaultFrequenciesHz.Clone();
+            }
+            var frequencies = new double[count];
+            double logStart = Math.Log(DefaultFrequenciesHz[0]);
+            double logEnd = Math.Log(DefaultFrequenciesHz[^1]);
+            for (int i = 0; i < count; i++) {
+                double t = i / (double)(count - 1);
+                frequencies[i] = Math.Exp(logStart + (logEnd - logStart) * t);
+            }
+            return frequencies;
         }
 
         public string Serialize() {

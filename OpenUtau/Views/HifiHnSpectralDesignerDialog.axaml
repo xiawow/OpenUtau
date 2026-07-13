@@ -42,16 +42,7 @@
               BorderThickness="1" BorderBrush="{DynamicResource SystemControlForegroundBaseMediumBrush}">
         <Grid>
           <c:HifiHnBalanceGraph
-              BodyDb="{Binding BodyDb, Mode=TwoWay}"
-              WarmthDb="{Binding WarmthDb, Mode=TwoWay}"
-              PresenceDb="{Binding PresenceDb, Mode=TwoWay}"
-              ClarityDb="{Binding ClarityDb, Mode=TwoWay}"
-              AirDb="{Binding AirDb, Mode=TwoWay}"
-              BodyHz="{Binding BodyHz, Mode=TwoWay}"
-              WarmthHz="{Binding WarmthHz, Mode=TwoWay}"
-              PresenceHz="{Binding PresenceHz, Mode=TwoWay}"
-              ClarityHz="{Binding ClarityHz, Mode=TwoWay}"
-              AirHz="{Binding AirHz, Mode=TwoWay}"
+              Bands="{Binding Bands}"
               SelectedBandIndex="{Binding SelectedBandIndex, Mode=TwoWay}"
               IsEnabled="{Binding Enabled}"
               PlotBackground="{DynamicResource SystemControlBackgroundAltHighBrush}"
@@ -102,18 +93,18 @@
                     BorderBrush="{DynamicResource SystemControlForegroundBaseMediumBrush}"
                     Background="{DynamicResource SystemControlBackgroundAltHighBrush}">
               <Grid ColumnDefinitions="Auto,Auto">
-                <Grid Grid.Column="0">
-                  <StackPanel Margin="10,0" Orientation="Horizontal" Spacing="7"
-                              VerticalAlignment="Center" IsHitTestVisible="False">
+                <Button x:Name="DynamicsPanelToggle" Grid.Column="0"
+                        Height="36" Padding="10,0" BorderThickness="0"
+                        HorizontalContentAlignment="Left" VerticalContentAlignment="Center"
+                        Background="Transparent" Click="OnToggleDynamics"
+                        ToolTip.Tip="{DynamicResource hifi.hn.dynamics.tip}">
+                  <StackPanel Orientation="Horizontal" Spacing="7" IsHitTestVisible="False">
                     <TextBlock FontWeight="SemiBold" VerticalAlignment="Center"
                                Text="{DynamicResource hifi.hn.dynamics}"/>
                     <TextBlock Width="12" HorizontalAlignment="Center" FontSize="9"
                                VerticalAlignment="Center" Text="{Binding DynamicsPanelChevron}"/>
                   </StackPanel>
-                  <Button Click="OnToggleDynamics" Padding="0" BorderThickness="0"
-                          Background="Transparent"
-                          ToolTip.Tip="{DynamicResource hifi.hn.dynamics.tip}"/>
-                </Grid>
+                </Button>
                 <StackPanel Grid.Column="1" Margin="4,0,9,0" Orientation="Horizontal"
                             Spacing="6" VerticalAlignment="Center">
                   <TextBlock Classes="hint" VerticalAlignment="Center" Text="{DynamicResource hifi.hn.enabled}"/>
@@ -127,7 +118,7 @@
             </Border>
           </StackPanel>
 
-          <Border Margin="72,52,12,0" MaxWidth="680"
+          <Border x:Name="DynamicsPanel" Margin="72,52,12,0" MaxWidth="680"
                   HorizontalAlignment="Right" VerticalAlignment="Top"
                   Height="{Binding DynamicsPanelHeight}"
                   Opacity="{Binding DynamicsPanelOpacity}"

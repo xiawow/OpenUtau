@@ -30,7 +30,39 @@ namespace OpenUtau.App.Views {
             if (e.Key == Key.Escape) {
                 e.Handled = true;
                 Close();
-            } else {
+                return;
+            }
+            if (FocusManager?.GetFocusedElement() is TextBox) {
+                base.OnKeyDown(e);
+                return;
+            }
+
+            bool shortcut = e.KeyModifiers.HasFlag(KeyModifiers.Control)
+                || e.KeyModifiers.HasFlag(KeyModifiers.Meta);
+            bool shift = e.KeyModifiers.HasFlag(KeyModifiers.Shift);
+            if (shortcut && e.Key == Key.C && ViewModel.HasSelectedBand) {
+                ViewModel.CopySelectedBand();
+                e.Handled = true;
+            } else if (shortcut && e.Key == Key.X && ViewModel.CanDeleteSelectedBand) {
+                ViewModel.CutSelectedBand();
+                e.Handled = true;
+            } else if (shortcut && e.Key == Key.V && ViewModel.CanPasteBand) {
+                ViewModel.PasteBand();
+                e.Handled = true;
+            } else if (shortcut && e.Key == Key.Z && shift && ViewModel.CanRedoBandEdit) {
+                ViewModel.RedoBandEdit();
+                e.Handled = true;
+            } else if (shortcut && e.Key == Key.Z && ViewModel.CanUndoBandEdit) {
+                ViewModel.UndoBandEdit();
+                e.Handled = true;
+            } else if (shortcut && e.Key == Key.Y && ViewModel.CanRedoBandEdit) {
+                ViewModel.RedoBandEdit();
+                e.Handled = true;
+            } else if (!shortcut && e.Key == Key.Delete && ViewModel.CanDeleteSelectedBand) {
+                ViewModel.DeleteSelectedBand();
+                e.Handled = true;
+            }
+            if (!e.Handled) {
                 base.OnKeyDown(e);
             }
         }

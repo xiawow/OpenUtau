@@ -676,7 +676,7 @@ Curve Type
   <system:String x:Key="hifi.hn.enabled">启用</system:String>
   <system:String x:Key="hifi.hn.close">关闭</system:String>
   <system:String x:Key="hifi.hn.balance">频段平衡</system:String>
-  <system:String x:Key="hifi.hn.balance.tip">点击圆点选中，左右拖动调整频率，上下拖动调整谐波和气噪比例。</system:String>
+  <system:String x:Key="hifi.hn.balance.tip">拖动控制点塑形；双击曲线添加，右键控制点可复制、粘贴或删除。</system:String>
   <system:String x:Key="hifi.hn.point">控制点 {0}</system:String>
   <system:String x:Key="hifi.hn.current.point">当前选中的频点</system:String>
   <system:String x:Key="hifi.hn.frequency">频率</system:String>
