@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text;
 using OpenUtau.Api;
+using OpenUtau.Core.Ustx;
 using Pinyin;
 
 namespace OpenUtau.Core.Neutrino {
@@ -112,6 +113,17 @@ namespace OpenUtau.Core.Neutrino {
             "y", "w",
         };
 
+        static readonly Dictionary<string, string> PalatalizedInitials =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) {
+                {"b", "by"},
+                {"p", "py"},
+                {"m", "my"},
+                {"d", "dy"},
+                {"t", "ty"},
+                {"n", "ny"},
+                {"l", "ry"},
+            };
+
         static readonly char[] TokenSeparators = {
             ' ', '\t', '\r', '\n',
             '\'', '\u2019', '-', '_',
@@ -121,6 +133,52 @@ namespace OpenUtau.Core.Neutrino {
 
         static readonly HashSet<string> NeutrinoPhonemeNames =
             new HashSet<string>(NeutrinoPhoneme.AllPhonemes, StringComparer.OrdinalIgnoreCase);
+
+        public override void SetUp(Note[][] notes, UProject project, UTrack track) {
+            if (notes != null && notes.Length > 0) {
+                RomanizeHanziNoteRuns(notes);
+            }
+            base.SetUp(notes, project, track);
+        }
+
+        static void RomanizeHanziNoteRuns(Note[][] notes) {
+            var run = new List<Note[]>();
+            int previousEnd = int.MinValue;
+            foreach (var group in notes) {
+                bool isContextHanzi = group.Length > 0
+                    && string.IsNullOrWhiteSpace(group[0].phoneticHint)
+                    && IsSingleHanzi(group[0].lyric);
+                int start = group.Length > 0 ? group[0].position : int.MaxValue;
+                if (!isContextHanzi || (run.Count > 0 && start > previousEnd)) {
+                    FlushHanziNoteRun(run);
+                }
+                if (!isContextHanzi) {
+                    previousEnd = int.MinValue;
+                    continue;
+                }
+
+                run.Add(group);
+                var last = group[^1];
+                previousEnd = Math.Max(previousEnd, last.position + last.duration);
+            }
+            FlushHanziNoteRun(run);
+        }
+
+        static bool IsSingleHanzi(string lyric) {
+            if (string.IsNullOrWhiteSpace(lyric)) {
+                return false;
+            }
+            var elements = EnumerateTextElements(lyric.Trim()).ToArray();
+            return elements.Length == 1 && Pinyin.Pinyin.Instance.IsHanzi(elements[0]);
+        }
+
+        static void FlushHanziNoteRun(List<Note[]> run) {
+            if (run.Count == 0) {
+                return;
+            }
+            BaseChinesePhonemizer.RomanizeNotes(run.ToArray());
+            run.Clear();
+        }
 
         protected override string[] LyricToPhonemes(string lyric) {
             return ChineseLyricToNeutrinoPhonemes(lyric);
@@ -148,6 +206,10 @@ namespace OpenUtau.Core.Neutrino {
                 adjusted[i].position = positions[i];
             }
             return adjusted;
+        }
+
+        protected override Phoneme[] PostProcessTimedPhonemePositions(Phoneme[] phonemes, Note[] notes) {
+            return phonemes;
         }
 
         internal static string[] ChineseLyricToNeutrinoPhonemes(string lyric) {
@@ -211,6 +273,25 @@ namespace OpenUtau.Core.Neutrino {
             }
             if (!Initials.TryGetValue(initial, out var initialPhonemes)) {
                 return Array.Empty<string>();
+            }
+            return CombineInitialAndFinal(initial, initialPhonemes, finalPhonemes);
+        }
+
+        static string[] CombineInitialAndFinal(
+            string initial,
+            string[] initialPhonemes,
+            string[] finalPhonemes) {
+
+            if (finalPhonemes.Length == 0 || finalPhonemes[0] != "y") {
+                return initialPhonemes.Concat(finalPhonemes).ToArray();
+            }
+
+            var finalWithoutGlide = finalPhonemes.Skip(1);
+            if (initial == "j" || initial == "q" || initial == "x") {
+                return initialPhonemes.Concat(finalWithoutGlide).ToArray();
+            }
+            if (PalatalizedInitials.TryGetValue(initial, out var palatalized)) {
+                return new[] { palatalized }.Concat(finalWithoutGlide).ToArray();
             }
             return initialPhonemes.Concat(finalPhonemes).ToArray();
         }

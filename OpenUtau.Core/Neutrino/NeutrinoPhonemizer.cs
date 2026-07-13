@@ -146,7 +146,7 @@ namespace OpenUtau.Core.Neutrino {
 
             foreach (var pair in groupedPhonemes) {
                 if (pair.Value.Count > 0) {
-                    timedPhonemes[pair.Key] = PostProcessPhonemePositions(
+                    timedPhonemes[pair.Key] = PostProcessTimedPhonemePositions(
                         pair.Value.ToArray(),
                         groupsByPosition[pair.Key]);
                 }
@@ -159,6 +159,10 @@ namespace OpenUtau.Core.Neutrino {
 
         protected virtual Phoneme[] PostProcessPhonemePositions(Phoneme[] phonemes, Note[] notes) {
             return phonemes;
+        }
+
+        protected virtual Phoneme[] PostProcessTimedPhonemePositions(Phoneme[] phonemes, Note[] notes) {
+            return PostProcessPhonemePositions(phonemes, notes);
         }
 
         double GetGroupDurationMs(Note[] notes) {
