@@ -71,8 +71,8 @@ namespace OpenUtau.Core.Neutrino {
             };
         }
 
-        List<List<Note[]>> SplitPhrases(Note[][] noteGroups) {
-            var phrases = new List<List<Note[]>>();
+        List<TimedPhrase> SplitPhrases(Note[][] noteGroups) {
+            var phrases = new List<TimedPhrase>();
             List<Note[]> phrase = null;
             int previousEnd = int.MinValue;
             foreach (var group in noteGroups.Where(group => group.Length > 0)) {
@@ -80,7 +80,8 @@ namespace OpenUtau.Core.Neutrino {
                 int end = group[^1].position + group[^1].duration;
                 if (phrase == null || start > previousEnd) {
                     phrase = new List<Note[]>();
-                    phrases.Add(phrase);
+                    int contextStart = previousEnd == int.MinValue ? 0 : previousEnd;
+                    phrases.Add(new TimedPhrase(phrase, Math.Min(start, contextStart)));
                 }
                 phrase.Add(group);
                 previousEnd = Math.Max(previousEnd, end);
@@ -88,7 +89,8 @@ namespace OpenUtau.Core.Neutrino {
             return phrases;
         }
 
-        void BuildTimedPhonemes(List<Note[]> noteGroups) {
+        void BuildTimedPhonemes(TimedPhrase phrase) {
+            var noteGroups = phrase.NoteGroups;
             var phonemeIds = new List<long>();
             var scorePitchesHz = new List<float>();
             var scoreDurations = new List<float>();
@@ -126,12 +128,17 @@ namespace OpenUtau.Core.Neutrino {
                 return;
             }
 
+            int phraseStartTick = noteGroups[0][0].position;
+            double leadingContextSeconds = GetLeadingContextSeconds(
+                phraseStartTick,
+                phrase.ContextStartTick);
             var boundaries = BuildChunkedTimingBoundaries(
                 phonemeIds.ToArray(),
                 scorePitchesHz.ToArray(),
                 scoreDurations.ToArray(),
-                phonePositions.ToArray());
-            double phraseStartMs = timeAxis.TickPosToMsPos(noteGroups[0][0].position);
+                phonePositions.ToArray(),
+                leadingContextSeconds);
+            double phraseStartMs = timeAxis.TickPosToMsPos(phraseStartTick);
 
             for (int i = 0; i < phoneRefs.Count; i++) {
                 var phoneRef = phoneRefs[i];
@@ -176,7 +183,8 @@ namespace OpenUtau.Core.Neutrino {
             long[] phonemeIds,
             float[] scorePitchesHz,
             float[] scoreDurations,
-            long[] phonePositions) {
+            long[] phonePositions,
+            double leadingContextSeconds) {
 
             var chunks = NeutrinoInferenceUtil.BuildPhoneChunks(phonemeIds);
             double frameSeconds = (double)hopSize / sampleRate;
@@ -208,7 +216,27 @@ namespace OpenUtau.Core.Neutrino {
                         neutrinoSinger.RunTiming(timingInputs),
                         chunk.PhoneCount,
                         "NEUTRINO v3 t.bin timing output");
-                });
+                },
+                leadingContextSeconds);
+        }
+
+        double GetLeadingContextSeconds(int phraseStartTick, int contextStartTick) {
+            contextStartTick = Math.Max(
+                phraseStartTick - NeutrinoRenderer.headTicks,
+                Math.Min(phraseStartTick, contextStartTick));
+            double phraseStartMs = timeAxis.TickPosToMsPos(phraseStartTick);
+            double contextStartMs = timeAxis.TickPosToMsPos(contextStartTick);
+            return Math.Max(0, (phraseStartMs - contextStartMs) / 1000.0);
+        }
+
+        readonly struct TimedPhrase {
+            public List<Note[]> NoteGroups { get; }
+            public int ContextStartTick { get; }
+
+            public TimedPhrase(List<Note[]> noteGroups, int contextStartTick) {
+                NoteGroups = noteGroups;
+                ContextStartTick = contextStartTick;
+            }
         }
 
         struct TimedPhoneRef {

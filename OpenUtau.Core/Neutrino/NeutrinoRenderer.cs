@@ -24,7 +24,7 @@ namespace OpenUtau.Core.Neutrino {
         const int hopSize = 480;
         const int pitchInterval = 5;
         const int numMelBins = 100;
-        const int cacheVersion = 14;
+        const int cacheVersion = 15;
         const int postEffectCacheVersion = 2;
         const int pitchCacheMagic = 0x4E465032; // NFP2
         const int edgeSilenceSamples = 240;
@@ -67,6 +67,7 @@ namespace OpenUtau.Core.Neutrino {
             public float[] TimingDurations { get; }
             public long[] FramePhonemeMap { get; }
             public int TotalFrames { get; }
+            public double StartOffsetSeconds { get; }
             public NeutrinoFrameChunk[] Chunks { get; }
 
             public NeutrinoTimingContext(
@@ -77,6 +78,7 @@ namespace OpenUtau.Core.Neutrino {
                 float[] timingDurations,
                 long[] framePhonemeMap,
                 int totalFrames,
+                double startOffsetSeconds,
                 NeutrinoFrameChunk[] chunks) {
 
                 PhonemeIds = phonemeIds;
@@ -86,6 +88,7 @@ namespace OpenUtau.Core.Neutrino {
                 TimingDurations = timingDurations;
                 FramePhonemeMap = framePhonemeMap;
                 TotalFrames = totalFrames;
+                StartOffsetSeconds = startOffsetSeconds;
                 Chunks = chunks;
             }
         }
@@ -255,7 +258,8 @@ namespace OpenUtau.Core.Neutrino {
             }
 
             var layout = Layout(phrase);
-            int headSamples = (int)(layout.leadingMs / 1000.0 * sampleRate);
+            double waveformOffsetMs = layout.leadingMs + timing.StartOffsetSeconds * 1000.0;
+            int headSamples = Math.Max(0, (int)(waveformOffsetMs / 1000.0 * sampleRate));
             int tailSamples = Math.Max(0,
                 (int)(layout.estimatedLengthMs / 1000.0 * sampleRate) - headSamples - waveform.Length);
 
@@ -288,6 +292,7 @@ namespace OpenUtau.Core.Neutrino {
                 timingDurations,
                 BuildFramePhonemeMap(timingDurations, chunk.FrameCount),
                 chunk.FrameCount,
+                0,
                 Array.Empty<NeutrinoFrameChunk>());
         }
 
@@ -425,11 +430,14 @@ namespace OpenUtau.Core.Neutrino {
                     Array.Empty<float>(),
                     Array.Empty<long>(),
                     0,
+                    0,
                     Array.Empty<NeutrinoFrameChunk>());
             }
 
             var phoneChunks = NeutrinoInferenceUtil.BuildPhoneChunks(phonemeIds);
             double frameSeconds = (double)hopSize / sampleRate;
+            double scoreOriginMs = GetScoreOriginMs(phrase);
+            double leadingContextSeconds = GetLeadingContextSeconds(phrase);
             var boundaries = NeutrinoInferenceUtil.BuildTimingBoundaries(
                 scoreDurations,
                 phonePositions,
@@ -458,9 +466,16 @@ namespace OpenUtau.Core.Neutrino {
                         singer.RunTiming(timingInputs),
                         chunk.PhoneCount,
                         "NEUTRINO v3 t.bin timing output");
-                });
+                },
+                leadingContextSeconds);
 
-            ApplyManualBoundaryOverrides(boundaries, manualBoundaries);
+            ApplyManualBoundaryOverrides(
+                boundaries,
+                manualBoundaries,
+                leadingContextSeconds);
+            double boundaryStartSeconds = NeutrinoInferenceUtil.NormalizeBoundaryStart(boundaries);
+            double startOffsetSeconds =
+                (scoreOriginMs - phrase.positionMs) / 1000.0 + boundaryStartSeconds;
             var timingDurations = BuildTimingDurations(boundaries);
             int totalFrames = Math.Max(1, (int)Math.Round(boundaries[^1] * sampleRate / hopSize));
             var framePhonemeMap = BuildFramePhonemeMap(timingDurations, totalFrames);
@@ -478,6 +493,7 @@ namespace OpenUtau.Core.Neutrino {
                 timingDurations,
                 framePhonemeMap,
                 totalFrames,
+                startOffsetSeconds,
                 frameChunks);
         }
 
@@ -536,7 +552,7 @@ namespace OpenUtau.Core.Neutrino {
             }
             var result = new float[timing.TotalFrames];
             for (int frame = 0; frame < result.Length; frame++) {
-                result[frame] = GetFrameToneShiftCents(phrase, frame);
+                result[frame] = GetFrameToneShiftCents(phrase, timing, frame);
             }
             return result;
         }
@@ -606,7 +622,7 @@ namespace OpenUtau.Core.Neutrino {
                     continue;
                 }
 
-                int pitchIndex = GetFramePitchIndex(phrase, frame);
+                int pitchIndex = GetFramePitchIndex(phrase, timing, frame);
                 f0[frame] = (float)MusicMath.ToneToFreq(phrase.pitches[pitchIndex] * 0.01);
             }
             return f0;
@@ -620,29 +636,37 @@ namespace OpenUtau.Core.Neutrino {
             return Math.Clamp((int)timing.FramePhonemeMap[mapIndex] - 1, 0, timing.PhonemeIds.Length - 1);
         }
 
-        int GetFramePitchIndex(RenderPhrase phrase, int frame) {
-            int ticks = GetFramePitchTick(phrase, frame);
+        int GetFramePitchIndex(RenderPhrase phrase, NeutrinoTimingContext timing, int frame) {
+            int ticks = GetFramePitchTick(phrase, timing, frame);
             return Math.Clamp((int)(ticks / (double)pitchInterval), 0, phrase.pitches.Length - 1);
         }
 
-        float GetFrameToneShiftCents(RenderPhrase phrase, int frame) {
+        float GetFrameToneShiftCents(
+            RenderPhrase phrase,
+            NeutrinoTimingContext timing,
+            int frame) {
+
             if (phrase.toneShift == null || phrase.toneShift.Length == 0) {
                 return 0;
             }
-            int ticks = GetFramePitchTick(phrase, frame);
+            int ticks = GetFramePitchTick(phrase, timing, frame);
             int index = Math.Clamp((int)(ticks / (double)pitchInterval), 0, phrase.toneShift.Length - 1);
             return phrase.toneShift[index];
         }
 
-        int GetFramePitchTick(RenderPhrase phrase, int frame) {
+        int GetFramePitchTick(RenderPhrase phrase, NeutrinoTimingContext timing, int frame) {
             double frameMs = 1000.0 * hopSize / sampleRate;
-            double posMs = phrase.positionMs - phrase.leadingMs + frame * frameMs;
+            double posMs = phrase.positionMs - phrase.leadingMs
+                + timing.StartOffsetSeconds * 1000.0
+                + frame * frameMs;
             return phrase.timeAxis.MsPosToTickPos(posMs) - (phrase.position - phrase.leading);
         }
 
-        int GetFrameResultTick(RenderPhrase phrase, int frame) {
+        int GetFrameResultTick(RenderPhrase phrase, NeutrinoTimingContext timing, int frame) {
             double frameMs = 1000.0 * hopSize / sampleRate;
-            double posMs = phrase.positionMs - phrase.leadingMs + frame * frameMs;
+            double posMs = phrase.positionMs - phrase.leadingMs
+                + timing.StartOffsetSeconds * 1000.0
+                + frame * frameMs;
             return phrase.timeAxis.MsPosToTickPos(posMs) - phrase.position;
         }
 
@@ -741,6 +765,7 @@ namespace OpenUtau.Core.Neutrino {
             var manualBoundaries = new List<double?>();
             int lastNoteIndex = -1;
             int positionInNote = 0;
+            double scoreOriginMs = GetScoreOriginMs(phrase);
 
             foreach (var phone in phrase.phones) {
                 var phoneStrs = NeutrinoPhoneme.RenderPhoneToPhonemes(phone.phoneme);
@@ -763,7 +788,7 @@ namespace OpenUtau.Core.Neutrino {
                     scoreDurations.Add(noteDurationSec);
                     phonePositions.Add(positionInNote++);
                     manualBoundaries.Add(phone.positionOverridden && i == 0
-                        ? Math.Max(0, (phone.positionMs - phrase.positionMs) / 1000.0)
+                        ? (phone.positionMs - scoreOriginMs) / 1000.0
                         : null);
                 }
             }
@@ -787,6 +812,31 @@ namespace OpenUtau.Core.Neutrino {
             );
         }
 
+        int GetFirstPhoneNoteIndex(RenderPhrase phrase) {
+            if (phrase.phones.Length == 0 || phrase.notes.Length == 0) {
+                return 0;
+            }
+            return Math.Clamp(phrase.phones[0].noteIndex, 0, phrase.notes.Length - 1);
+        }
+
+        double GetScoreOriginMs(RenderPhrase phrase) {
+            if (phrase.notes.Length == 0) {
+                return phrase.positionMs;
+            }
+            return phrase.notes[GetFirstPhoneNoteIndex(phrase)].positionMs;
+        }
+
+        double GetLeadingContextSeconds(RenderPhrase phrase) {
+            if (phrase.notes.Length == 0) {
+                return 0;
+            }
+            var firstNote = phrase.notes[GetFirstPhoneNoteIndex(phrase)];
+            int scoreOriginTick = phrase.position + firstNote.position;
+            double contextStartMs = phrase.timeAxis.TickPosToMsPos(scoreOriginTick - headTicks);
+            double maximumContextMs = Math.Max(0, firstNote.positionMs - contextStartMs);
+            return Math.Min(maximumContextMs, phrase.availableLeadingMs) / 1000.0;
+        }
+
         double GetExtendedNoteDurationMs(RenderNote[] notes, int noteIndex) {
             double endMs = notes[noteIndex].endMs;
             for (int i = noteIndex + 1;
@@ -797,19 +847,25 @@ namespace OpenUtau.Core.Neutrino {
             return Math.Max(1, endMs - notes[noteIndex].positionMs);
         }
 
-        void ApplyManualBoundaryOverrides(double[] boundaries, double?[] manualBoundaries) {
+        internal static void ApplyManualBoundaryOverrides(
+            double[] boundaries,
+            double?[] manualBoundaries,
+            double leadingContextSeconds) {
+
             if (manualBoundaries == null || manualBoundaries.Length == 0) {
                 return;
             }
 
             double frameSec = (double)hopSize / sampleRate;
             int count = Math.Min(boundaries.Length - 1, manualBoundaries.Length - 1);
-            for (int i = 1; i < count; i++) {
+            for (int i = 0; i < count; i++) {
                 if (!manualBoundaries[i].HasValue) {
                     continue;
                 }
 
-                double min = boundaries[i - 1] + frameSec;
+                double min = i == 0
+                    ? Math.Min(0, -Math.Max(0, leadingContextSeconds) + frameSec)
+                    : boundaries[i - 1] + frameSec;
                 double max = boundaries[i + 1] - frameSec;
                 if (max < min) {
                     max = min;
@@ -920,7 +976,7 @@ namespace OpenUtau.Core.Neutrino {
             };
 
             for (int frame = 0; frame < f0.Length; frame++) {
-                result.ticks[frame] = GetFrameResultTick(phrase, frame);
+                result.ticks[frame] = GetFrameResultTick(phrase, timing, frame);
                 int phoneIndex = GetFramePhoneIndex(timing, frame);
                 bool voiced = phoneIndex >= 0
                     && timing.PhonemeIds[phoneIndex] != NeutrinoPhoneme.PAU

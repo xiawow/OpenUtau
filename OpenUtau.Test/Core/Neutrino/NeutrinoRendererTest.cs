@@ -171,6 +171,105 @@ namespace OpenUtau.Core.Test.Neutrino {
         }
 
         [Fact]
+        public void LeadingContextKeepsFirstActiveChunkInitialShift() {
+            var chunks = NeutrinoInferenceUtil.BuildPhoneChunks(new long[] { 2, 24 });
+
+            var boundaries = NeutrinoInferenceUtil.BuildTimingBoundaries(
+                new[] { 0.5f, 0.5f },
+                new long[] { 0, 1 },
+                chunks,
+                frameSeconds: 0.01,
+                chunk => new[] { -0.07f, 0.01f, 123f },
+                leadingContextSeconds: 0.5);
+
+            Assert.Equal(-0.07, boundaries[0], 3);
+            Assert.Equal(0.01, boundaries[1], 3);
+            Assert.Equal(0.5, boundaries[2], 3);
+            Assert.Equal(0.08, boundaries[1] - boundaries[0], 3);
+
+            double start = NeutrinoInferenceUtil.NormalizeBoundaryStart(boundaries);
+            Assert.Equal(-0.07, start, 3);
+            Assert.Equal(0.0, boundaries[0], 3);
+            Assert.Equal(0.08, boundaries[1], 3);
+            Assert.Equal(0.57, boundaries[2], 3);
+        }
+
+        [Fact]
+        public void LeadingContextClampsFirstPhoneInsideVirtualPause() {
+            var chunks = NeutrinoInferenceUtil.BuildPhoneChunks(new long[] { 2, 24 });
+
+            var boundaries = NeutrinoInferenceUtil.BuildTimingBoundaries(
+                new[] { 0.5f, 0.5f },
+                new long[] { 0, 1 },
+                chunks,
+                frameSeconds: 0.01,
+                chunk => new[] { -1f, 0.01f, 123f },
+                leadingContextSeconds: 0.5);
+
+            Assert.Equal(-0.49, boundaries[0], 3);
+            Assert.Equal(0.01, boundaries[1], 3);
+        }
+
+        [Fact]
+        public void ShortLeadingContextCannotOverlapPreviousPhrase() {
+            var chunks = NeutrinoInferenceUtil.BuildPhoneChunks(new long[] { 2, 24 });
+
+            var boundaries = NeutrinoInferenceUtil.BuildTimingBoundaries(
+                new[] { 0.5f, 0.5f },
+                new long[] { 0, 1 },
+                chunks,
+                frameSeconds: 0.01,
+                chunk => new[] { -0.07f, 0.01f, 123f },
+                leadingContextSeconds: 0.03);
+
+            Assert.Equal(-0.02, boundaries[0], 3);
+            Assert.Equal(0.01, boundaries[1], 3);
+        }
+
+        [Fact]
+        public void ZeroLeadingContextKeepsFirstPhoneAtScoreStart() {
+            var chunks = NeutrinoInferenceUtil.BuildPhoneChunks(new long[] { 2, 24 });
+
+            var boundaries = NeutrinoInferenceUtil.BuildTimingBoundaries(
+                new[] { 0.5f, 0.5f },
+                new long[] { 0, 1 },
+                chunks,
+                frameSeconds: 0.01,
+                chunk => new[] { -0.07f, 0.01f, 123f },
+                leadingContextSeconds: 0);
+
+            Assert.Equal(0, boundaries[0], 3);
+            Assert.Equal(0.01, boundaries[1], 3);
+        }
+
+        [Fact]
+        public void ManualFirstBoundaryCanExtendConsonantIntoLeadingContext() {
+            var boundaries = new[] { -0.057, 0.003, 0.5 };
+
+            NeutrinoRenderer.ApplyManualBoundaryOverrides(
+                boundaries,
+                new double?[] { -0.1, null, null },
+                leadingContextSeconds: 0.5);
+
+            Assert.Equal(-0.1, boundaries[0], 3);
+            Assert.Equal(0.003, boundaries[1], 3);
+            Assert.Equal(0.103, boundaries[1] - boundaries[0], 3);
+        }
+
+        [Fact]
+        public void ManualFirstBoundaryCannotExceedLeadingContext() {
+            var boundaries = new[] { -0.02, 0.01, 0.5 };
+
+            NeutrinoRenderer.ApplyManualBoundaryOverrides(
+                boundaries,
+                new double?[] { -0.1, null, null },
+                leadingContextSeconds: 0.03);
+
+            Assert.Equal(-0.02, boundaries[0], 3);
+            Assert.Equal(0.01, boundaries[1], 3);
+        }
+
+        [Fact]
         public void ChunkedTimingDoesNotRepeatOneNoteDuration() {
             var chunks = NeutrinoInferenceUtil.BuildPhoneChunks(new long[] {
                 1,
