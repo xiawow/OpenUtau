@@ -79,6 +79,7 @@ namespace OpenUtau.Core.Render {
         public readonly int toneShift;
         public readonly int hifiSustainMode;
         public readonly HifiHnSpectralProfile hifiHnSpectralProfile;
+        public readonly bool hifiHnSpectralProfileIsPostEffect;
 
         public readonly UOto oto;
         public readonly ulong hash;
@@ -147,14 +148,16 @@ namespace OpenUtau.Core.Render {
             } else {
                 hifiSustainMode = OpenUtau.Core.HifiNeural.HifiSustainModes.Auto;
             }
-            bool isHifiNeura = string.Equals(
-                    track.RendererSettings.renderer,
-                    HifiNeuralPhraseRenderer.RendererId,
-                    StringComparison.OrdinalIgnoreCase)
-                || track.RendererSettings.Renderer is HifiNeuralPhraseRenderer;
-            hifiHnSpectralProfile = isHifiNeura
+            bool isHifiNeura = Renderers.IsHifiNeuralRenderer(
+                track.RendererSettings.renderer,
+                track.RendererSettings.Renderer);
+            bool supportsHnSpectralDesigner = Renderers.SupportsHnSpectralDesigner(
+                track.RendererSettings.renderer,
+                track.RendererSettings.Renderer);
+            hifiHnSpectralProfile = supportsHnSpectralDesigner
                 ? HifiHnSpectralProfile.FromNote(note)
                 : new HifiHnSpectralProfile { Enabled = false };
+            hifiHnSpectralProfileIsPostEffect = supportsHnSpectralDesigner && !isHifiNeura;
 
             oto = phoneme.oto;
             hash = Hash();
@@ -180,7 +183,8 @@ namespace OpenUtau.Core.Render {
                     writer.Write(modulation);
                     writer.Write(direct);
                     writer.Write(hifiSustainMode);
-                    if (hifiHnSpectralProfile.HasAudibleEffect) {
+                    if (!hifiHnSpectralProfileIsPostEffect
+                        && hifiHnSpectralProfile.HasAudibleEffect) {
                         writer.Write(HifiHnSpectralProfile.RendererSettingKey);
                         writer.Write(hifiHnSpectralProfile.CacheKey());
                     }
@@ -633,6 +637,20 @@ namespace OpenUtau.Core.Render {
                                 foreach(var v in curve.Item2) {
                                     writer.Write(v);
                                 }
+                            }
+                        }
+                        if (!excludedPostEffects.Contains(HifiHnSpectralProfile.RendererSettingKey)) {
+                            int lastProfileNoteIndex = -1;
+                            foreach (var phone in phones) {
+                                if (!phone.hifiHnSpectralProfileIsPostEffect
+                                    || !phone.hifiHnSpectralProfile.HasAudibleEffect
+                                    || phone.noteIndex == lastProfileNoteIndex) {
+                                    continue;
+                                }
+                                lastProfileNoteIndex = phone.noteIndex;
+                                writer.Write(HifiHnSpectralProfile.RendererSettingKey);
+                                writer.Write(phone.noteIndex);
+                                writer.Write(phone.hifiHnSpectralProfile.CacheKey());
                             }
                         }
                     }

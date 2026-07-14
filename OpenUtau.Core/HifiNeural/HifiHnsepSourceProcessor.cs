@@ -362,7 +362,25 @@ namespace OpenUtau.Core.HifiNeural {
             string? separationCacheKey,
             Func<double, int, double>? pitchAtSourceSample,
             out HifiHnsepProcessingReport report) {
-            if ((!parameterTrack.NeedsHnsep && !parameterTrack.HasGender) || waveform.Length == 0) {
+            return ApplyGeneratedWaveform(
+                waveform,
+                parameterTrack,
+                separationCacheKey,
+                pitchAtSourceSample,
+                spectralProfileTrack: null,
+                out report);
+        }
+
+        public static float[] ApplyGeneratedWaveform(
+            float[] waveform,
+            HifiFrameParameterTrack parameterTrack,
+            string? separationCacheKey,
+            Func<double, int, double>? pitchAtSourceSample,
+            HifiHnSpectralProfileTrack? spectralProfileTrack,
+            out HifiHnsepProcessingReport report) {
+            bool spectralProfileActive = spectralProfileTrack?.HasAudibleEffect == true;
+            if ((!parameterTrack.NeedsHnsep && !parameterTrack.HasGender && !spectralProfileActive)
+                || waveform.Length == 0) {
                 report = new HifiHnsepProcessingReport(false, false, "neutral_parameters_or_empty_waveform");
                 return waveform;
             }
@@ -405,7 +423,8 @@ namespace OpenUtau.Core.HifiNeural {
                     separated.Harmonic,
                     parameterTrack,
                     applyGeneratedFormantShift: true,
-                    pitchAtSourceSample: pitchAtSourceSample);
+                    pitchAtSourceSample: pitchAtSourceSample,
+                    spectralProfileTrack: spectralProfileActive ? spectralProfileTrack : null);
             } catch (Exception e) {
                 report = new HifiHnsepProcessingReport(true, false, "separation_failed");
                 Log.Warning(e, "HNSEP waveform separation failed");
@@ -531,10 +550,19 @@ namespace OpenUtau.Core.HifiNeural {
             HifiFrameParameterTrack parameterTrack,
             bool applyGeneratedFormantShift = false,
             Func<double, int, double>? pitchAtSourceSample = null,
-            HifiHnSpectralProfile? spectralProfile = null) {
+            HifiHnSpectralProfile? spectralProfile = null,
+            HifiHnSpectralProfileTrack? spectralProfileTrack = null) {
             float[] processedHarmonic = applyGeneratedFormantShift
                 ? PrepareGeneratedHarmonicForRemix(originalHarmonic, parameterTrack, pitchAtSourceSample)
                 : PrepareHarmonicForRemix(originalHarmonic, parameterTrack);
+            if (spectralProfileTrack?.HasAudibleEffect == true) {
+                return RemixHarmonicNoiseWithSourceEnergy(
+                    waveform,
+                    originalHarmonic,
+                    processedHarmonic,
+                    parameterTrack,
+                    spectralProfileTrack);
+            }
             return RemixHarmonicNoiseWithSourceEnergy(
                 waveform,
                 originalHarmonic,
@@ -624,6 +652,22 @@ namespace OpenUtau.Core.HifiNeural {
             float[] processedHarmonic,
             HifiFrameParameterTrack parameterTrack,
             HifiHnSpectralProfile? spectralProfile) {
+            return RemixHarmonicNoiseWithSourceEnergy(
+                sourceSlice,
+                originalHarmonic,
+                processedHarmonic,
+                parameterTrack,
+                spectralProfile?.HasAudibleEffect == true
+                    ? HifiHnSpectralProfileTrack.Constant(spectralProfile)
+                    : null);
+        }
+
+        internal static float[] RemixHarmonicNoiseWithSourceEnergy(
+            float[] sourceSlice,
+            float[] originalHarmonic,
+            float[] processedHarmonic,
+            HifiFrameParameterTrack parameterTrack,
+            HifiHnSpectralProfileTrack? spectralProfileTrack) {
             var harmonicComponent = new float[sourceSlice.Length];
             var noiseComponent = new float[sourceSlice.Length];
             var output = new float[sourceSlice.Length];
@@ -637,7 +681,7 @@ namespace OpenUtau.Core.HifiNeural {
                 harmonicComponent[i] = (float)(processed * harmonicGain);
                 output[i] = noiseComponent[i] + harmonicComponent[i];
             }
-            if (spectralProfile?.HasAudibleEffect == true) {
+            if (spectralProfileTrack?.HasAudibleEffect == true) {
                 double baselineGain = ResolveRmsGain(output, sourceSlice);
                 ApplyGainInPlace(output, baselineGain);
                 ApplyGainInPlace(harmonicComponent, baselineGain);
@@ -646,7 +690,7 @@ namespace OpenUtau.Core.HifiNeural {
                     output,
                     harmonicComponent,
                     noiseComponent,
-                    spectralProfile);
+                    spectralProfileTrack);
             } else {
                 MatchRmsInPlace(output, sourceSlice);
             }

@@ -16,6 +16,7 @@ using OpenUtau.App.Views;
 using OpenUtau.Core;
 using OpenUtau.Core.Editing;
 using OpenUtau.Core.HifiNeural;
+using OpenUtau.Core.Render;
 using OpenUtau.Core.Ustx;
 using OpenUtau.Core.Util;
 using OpenUtau.ViewModels;
@@ -922,7 +923,7 @@ namespace OpenUtau.App.Controls {
                             Command = ReactiveCommand.Create(() => ViewModel.NotesViewModel.PasteSelectedParams(RootWindow)),
                             InputGesture = new KeyGesture(Key.V, KeyModifiers.Alt),
                         });
-                        if (IsHifiNeuraTrack()) {
+                        if (SupportsHnSpectralDesignerTrack()) {
                             ViewModel.NotesContextMenuItems.Add(new MenuItemViewModel() {
                                 Header = ThemeManager.GetString("context.note.hifi.hn"),
                                 Command = ReactiveCommand.Create(
@@ -1116,7 +1117,7 @@ namespace OpenUtau.App.Controls {
             }
         }
 
-        bool IsHifiNeuraTrack() {
+        bool SupportsHnSpectralDesignerTrack() {
             var notesViewModel = ViewModel.NotesViewModel;
             if (notesViewModel.Project == null || notesViewModel.Part == null) {
                 return false;
@@ -1126,8 +1127,7 @@ namespace OpenUtau.App.Controls {
                 return false;
             }
             var settings = notesViewModel.Project.tracks[trackNo].RendererSettings;
-            return string.Equals(settings.renderer, HifiNeuralPhraseRenderer.RendererId, StringComparison.OrdinalIgnoreCase)
-                || settings.Renderer is HifiNeuralPhraseRenderer;
+            return Renderers.SupportsHnSpectralDesigner(settings.renderer, settings.Renderer);
         }
 
         void OpenHifiHnSpectralDesigner(UNote? clickedNote) {

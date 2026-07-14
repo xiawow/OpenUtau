@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Numerics;
 
 namespace OpenUtau.Core.HifiNeural {
@@ -14,29 +15,33 @@ namespace OpenUtau.Core.HifiNeural {
             float[] harmonic,
             float[] noise,
             HifiHnSpectralProfile profile) {
-            if (!profile.HasAudibleEffect
+            if (!profile.HasAudibleEffect) {
+                return baseline;
+            }
+            return Process(
+                baseline,
+                harmonic,
+                noise,
+                HifiHnSpectralProfileTrack.Constant(profile));
+        }
+
+        public static float[] Process(
+            float[] baseline,
+            float[] harmonic,
+            float[] noise,
+            HifiHnSpectralProfileTrack profileTrack) {
+            if (!profileTrack.HasAudibleEffect
                 || baseline.Length == 0
                 || harmonic.Length != baseline.Length
                 || noise.Length != baseline.Length) {
                 return baseline;
             }
-            profile = profile.Clone().Normalize();
-            int[] bandByBin = BuildBandMap(profile.FrequenciesHz);
 
-            bool balanceActive = false;
-            for (int i = 0; i < profile.BalanceDb.Length; i++) {
-                balanceActive |= Math.Abs(profile.BalanceDb[i]) >= 0.01;
-            }
-            bool harmonicDynamics = profile.DynamicsEnabled
-                && profile.DynamicsTarget is HifiHnDynamicsTarget.Harmonic or HifiHnDynamicsTarget.Both;
-            bool noiseDynamics = profile.DynamicsEnabled
-                && profile.DynamicsTarget is HifiHnDynamicsTarget.Noise or HifiHnDynamicsTarget.Both;
-
-            float[] shapedHarmonic = balanceActive || harmonicDynamics
-                ? FilterComponent(harmonic, profile, bandByBin, harmonicComponent: true, harmonicDynamics)
+            float[] shapedHarmonic = profileTrack.NeedsHarmonicProcessing
+                ? FilterComponent(harmonic, profileTrack, harmonicComponent: true)
                 : harmonic;
-            float[] shapedNoise = balanceActive || noiseDynamics
-                ? FilterComponent(noise, profile, bandByBin, harmonicComponent: false, noiseDynamics)
+            float[] shapedNoise = profileTrack.NeedsNoiseProcessing
+                ? FilterComponent(noise, profileTrack, harmonicComponent: false)
                 : noise;
 
             var shaped = new float[baseline.Length];
@@ -48,10 +53,8 @@ namespace OpenUtau.Core.HifiNeural {
 
         static float[] FilterComponent(
             float[] input,
-            HifiHnSpectralProfile profile,
-            int[] bandByBin,
-            bool harmonicComponent,
-            bool applyDynamics) {
+            HifiHnSpectralProfileTrack profileTrack,
+            bool harmonicComponent) {
             int centerPad = Nfft / 2;
             int paddedLength = centerPad * 2 + Math.Max(1, input.Length);
             int frames = Math.Max(1, (int)Math.Ceiling(Math.Max(0, paddedLength - Nfft) / (double)Hop) + 1);
@@ -61,13 +64,8 @@ namespace OpenUtau.Core.HifiNeural {
             var output = new double[requiredLength];
             var windowSum = new double[requiredLength];
             var fft = new Complex[Nfft];
-            int bandCount = profile.FrequenciesHz.Length;
-            var bandPower = new double[bandCount];
-            var bandReductionDb = new double[bandCount];
-            var smoothedReductionDb = new double[bandCount];
             double analysisScale = Math.Max(1.0, WindowSum() * 0.5);
-            double attack = SmoothingCoefficient(profile.AttackMs);
-            double release = SmoothingCoefficient(profile.ReleaseMs);
+            var runtimes = new Dictionary<HifiHnSpectralProfile, ProfileRuntime>();
 
             for (int frame = 0; frame < frames; frame++) {
                 int start = frame * Hop;
@@ -77,43 +75,61 @@ namespace OpenUtau.Core.HifiNeural {
                 }
                 HifiHnsepSourceProcessor.ForwardFft(fft, inverse: false);
 
-                if (applyDynamics) {
-                    Array.Clear(bandPower, 0, bandPower.Length);
-                    for (int bin = 1; bin < Bins; bin++) {
-                        double magnitude = fft[bin].Magnitude;
-                        bandPower[bandByBin[bin]] += magnitude * magnitude;
+                var profile = profileTrack.ProfileAtSourceSample(frame * Hop);
+                if (profile != null) {
+                    if (!runtimes.TryGetValue(profile, out var runtime)) {
+                        runtime = new ProfileRuntime(profile);
+                        runtimes[profile] = runtime;
                     }
-                    for (int band = 0; band < bandPower.Length; band++) {
-                        double level = Math.Sqrt(bandPower[band]) / analysisScale;
-                        double levelDb = 20.0 * Math.Log10(Math.Max(level, Floor));
-                        double reduction = 0;
-                        if (levelDb > profile.ThresholdDb) {
-                            reduction = (profile.ThresholdDb
-                                + (levelDb - profile.ThresholdDb) / profile.Ratio)
-                                - levelDb;
+                    bool applyDynamics = harmonicComponent
+                        ? runtime.HarmonicDynamics
+                        : runtime.NoiseDynamics;
+                    if (applyDynamics) {
+                        runtime.BeginFrame(frame);
+                        Array.Clear(runtime.BandPower, 0, runtime.BandPower.Length);
+                        for (int bin = 1; bin < Bins; bin++) {
+                            double magnitude = fft[bin].Magnitude;
+                            runtime.BandPower[runtime.BandByBin[bin]] += magnitude * magnitude;
                         }
-                        reduction = Math.Clamp(reduction, -profile.MaxReductionDb, 0);
-                        double coefficient = reduction < smoothedReductionDb[band] ? attack : release;
-                        smoothedReductionDb[band] = coefficient * smoothedReductionDb[band]
-                            + (1.0 - coefficient) * reduction;
-                        bandReductionDb[band] = smoothedReductionDb[band];
+                        for (int band = 0; band < runtime.BandPower.Length; band++) {
+                            double level = Math.Sqrt(runtime.BandPower[band]) / analysisScale;
+                            double levelDb = 20.0 * Math.Log10(Math.Max(level, Floor));
+                            double reduction = 0;
+                            if (levelDb > profile.ThresholdDb) {
+                                reduction = (profile.ThresholdDb
+                                    + (levelDb - profile.ThresholdDb) / profile.Ratio)
+                                    - levelDb;
+                            }
+                            reduction = Math.Clamp(reduction, -profile.MaxReductionDb, 0);
+                            double coefficient = reduction < runtime.SmoothedReductionDb[band]
+                                ? runtime.Attack
+                                : runtime.Release;
+                            runtime.SmoothedReductionDb[band] = coefficient * runtime.SmoothedReductionDb[band]
+                                + (1.0 - coefficient) * reduction;
+                            runtime.BandReductionDb[band] = runtime.SmoothedReductionDb[band];
+                        }
                     }
-                } else {
-                    Array.Clear(bandReductionDb, 0, bandReductionDb.Length);
-                }
 
-                for (int bin = 0; bin < Bins; bin++) {
-                    double frequency = bin * HifiMelExtractor.SampleRate / (double)Nfft;
-                    double balanceDb = InterpolateBands(
-                        profile.BalanceDb,
-                        profile.FrequenciesHz,
-                        frequency);
-                    double componentDb = harmonicComponent ? balanceDb * 0.5 : -balanceDb * 0.5;
-                    double dynamicsDb = applyDynamics
-                        ? InterpolateBands(bandReductionDb, profile.FrequenciesHz, frequency)
+                    for (int bin = 1; bin < Bins; bin++) {
+                        double frequency = bin * HifiMelExtractor.SampleRate / (double)Nfft;
+                        double balanceDb = runtime.BalanceActive
+                            ? InterpolateBands(profile.BalanceDb, profile.FrequenciesHz, frequency)
+                            : 0;
+                        double componentDb = harmonicComponent ? balanceDb * 0.5 : -balanceDb * 0.5;
+                        double dynamicsDb = applyDynamics
+                            ? InterpolateBands(runtime.BandReductionDb, profile.FrequenciesHz, frequency)
+                            : 0;
+                        double gain = Math.Pow(10.0, (componentDb + dynamicsDb) / 20.0);
+                        fft[bin] *= gain;
+                    }
+                    double dcBalanceDb = runtime.BalanceActive
+                        ? InterpolateBands(profile.BalanceDb, profile.FrequenciesHz, 0)
                         : 0;
-                    double gain = Math.Pow(10.0, (componentDb + dynamicsDb) / 20.0);
-                    fft[bin] *= gain;
+                    double dcComponentDb = harmonicComponent ? dcBalanceDb * 0.5 : -dcBalanceDb * 0.5;
+                    double dcDynamicsDb = applyDynamics
+                        ? InterpolateBands(runtime.BandReductionDb, profile.FrequenciesHz, 0)
+                        : 0;
+                    fft[0] *= Math.Pow(10.0, (dcComponentDb + dcDynamicsDb) / 20.0);
                 }
                 for (int bin = 1; bin < Bins - 1; bin++) {
                     fft[Nfft - bin] = Complex.Conjugate(fft[bin]);
@@ -136,6 +152,41 @@ namespace OpenUtau.Core.HifiNeural {
                 result[i] = FiniteOrZero(value);
             }
             return result;
+        }
+
+        sealed class ProfileRuntime {
+            public int[] BandByBin { get; }
+            public double[] BandPower { get; }
+            public double[] BandReductionDb { get; }
+            public double[] SmoothedReductionDb { get; }
+            public bool BalanceActive { get; }
+            public bool HarmonicDynamics { get; }
+            public bool NoiseDynamics { get; }
+            public double Attack { get; }
+            public double Release { get; }
+            int lastFrame = -2;
+
+            public ProfileRuntime(HifiHnSpectralProfile profile) {
+                BandByBin = BuildBandMap(profile.FrequenciesHz);
+                BandPower = new double[profile.FrequenciesHz.Length];
+                BandReductionDb = new double[profile.FrequenciesHz.Length];
+                SmoothedReductionDb = new double[profile.FrequenciesHz.Length];
+                BalanceActive = Array.Exists(profile.BalanceDb, value => Math.Abs(value) >= 0.01);
+                HarmonicDynamics = profile.DynamicsEnabled
+                    && profile.DynamicsTarget is HifiHnDynamicsTarget.Harmonic or HifiHnDynamicsTarget.Both;
+                NoiseDynamics = profile.DynamicsEnabled
+                    && profile.DynamicsTarget is HifiHnDynamicsTarget.Noise or HifiHnDynamicsTarget.Both;
+                Attack = SmoothingCoefficient(profile.AttackMs);
+                Release = SmoothingCoefficient(profile.ReleaseMs);
+            }
+
+            public void BeginFrame(int frame) {
+                if (frame != lastFrame + 1) {
+                    Array.Clear(SmoothedReductionDb, 0, SmoothedReductionDb.Length);
+                    Array.Clear(BandReductionDb, 0, BandReductionDb.Length);
+                }
+                lastFrame = frame;
+            }
         }
 
         static double InterpolateBands(double[] values, double[] frequencies, double frequency) {

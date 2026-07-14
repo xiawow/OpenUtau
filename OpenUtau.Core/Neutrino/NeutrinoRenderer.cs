@@ -163,7 +163,8 @@ namespace OpenUtau.Core.Neutrino {
                         Format.Ustx.BREC,
                         Format.Ustx.SHFC,
                         Format.Ustx.TENC,
-                        Format.Ustx.VOIC);
+                        Format.Ustx.VOIC,
+                        HifiHnSpectralProfile.RendererSettingKey);
                     ulong processedHash = phrase.GetHashExcludingPostEffects(Format.Ustx.DYN, Format.Ustx.SHFC);
                     bool hasHnsepControls = HasHnsepParameterControls(phrase);
                     string hnsepKey = hasHnsepControls
@@ -355,7 +356,9 @@ namespace OpenUtau.Core.Neutrino {
             return HasNonDefaultValue(phrase.gender, 0)
                 || HasNonDefaultValue(phrase.breathiness, 0)
                 || HasNonDefaultValue(phrase.tension, 0)
-                || HasNonDefaultValue(phrase.voicing, 100);
+                || HasNonDefaultValue(phrase.voicing, 100)
+                || phrase.phones.Any(phone => phone.hifiHnSpectralProfileIsPostEffect
+                    && phone.hifiHnSpectralProfile.HasAudibleEffect);
         }
 
         static bool HasNonDefaultValue(float[] values, float defaultValue) {
@@ -388,7 +391,13 @@ namespace OpenUtau.Core.Neutrino {
                 phraseStartMs,
                 startFrame: 0,
                 frameCount);
-            if (!parameterTrack.NeedsHnsep && !parameterTrack.HasGender) {
+            var spectralProfileTrack = HifiHnSpectralProfileTrack.ForPhrase(
+                phrase,
+                phraseStartMs,
+                frameCount);
+            if (!parameterTrack.NeedsHnsep
+                && !parameterTrack.HasGender
+                && !spectralProfileTrack.HasAudibleEffect) {
                 return waveform;
             }
 
@@ -400,16 +409,18 @@ namespace OpenUtau.Core.Neutrino {
                 parameterTrack,
                 separationCacheKey,
                 pitchAtSourceSample,
+                spectralProfileTrack,
                 out var report);
             if (report.Applied) {
                 return processed;
             } else {
                 Log.Warning(
-                    "NEUTRINO HNSEP parameters skipped genc={Genc:F2} brec={Brec:F2} voic={Voic:F2} tenc={Tenc:F2} reason={Reason}",
+                    "NEUTRINO HNSEP parameters skipped genc={Genc:F2} brec={Brec:F2} voic={Voic:F2} tenc={Tenc:F2} spectral_profile={SpectralProfile} reason={Reason}",
                     parameterTrack.Average.Gender,
                     parameterTrack.Average.Breathiness,
                     parameterTrack.Average.Voicing,
                     parameterTrack.Average.Tension,
+                    spectralProfileTrack.HasAudibleEffect,
                     report.Reason);
                 return waveform;
             }

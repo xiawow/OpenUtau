@@ -36,6 +36,19 @@ namespace OpenUtau.Core.Test.Neutrino {
         }
 
         [Fact]
+        public void SpectralDesignerSupportsBothNeutrinoRenderers() {
+            Assert.True(Renderers.SupportsHnSpectralDesigner(
+                Renderers.NEUTRINO,
+                new NeutrinoRenderer()));
+            Assert.True(Renderers.SupportsHnSpectralDesigner(
+                Renderers.NEUTRINO_V2,
+                new NeutrinoLegacyV2Renderer()));
+            Assert.False(Renderers.SupportsHnSpectralDesigner(
+                Renderers.CLASSIC,
+                Renderers.CreateRenderer(Renderers.CLASSIC)));
+        }
+
+        [Fact]
         public void LegacyV2SingerDefaultsToLegacyV2Renderer() {
             string dir = Path.Combine(Path.GetTempPath(), $"neutrino-v2-renderer-{Guid.NewGuid():N}");
             try {
@@ -350,6 +363,40 @@ namespace OpenUtau.Core.Test.Neutrino {
         }
 
         [Fact]
+        public void FrameAwareSpectralProfileOnlyShapesAssignedFrames() {
+            const int frameCount = 32;
+            const int hop = HifiOnnxVocoder.HopSize;
+            var profile = new HifiHnSpectralProfile {
+                BalanceDb = Enumerable.Repeat(HifiHnSpectralProfile.MaxBalanceDb, 5).ToArray(),
+            };
+            var profiles = new HifiHnSpectralProfile?[frameCount];
+            for (int frame = 12; frame < 24; frame++) {
+                profiles[frame] = profile;
+            }
+            var profileTrack = new HifiHnSpectralProfileTrack(profiles);
+            var harmonic = new float[frameCount * hop];
+            for (int i = 0; i < harmonic.Length; i++) {
+                harmonic[i] = (float)(0.2 * Math.Sin(2 * Math.PI * 220 * i / 44100.0));
+            }
+            var noise = new float[harmonic.Length];
+
+            var shaped = HifiHnSpectralProcessor.Process(
+                harmonic,
+                harmonic,
+                noise,
+                profileTrack);
+
+            double neutralBefore = SegmentRms(shaped, 3 * hop, 8 * hop);
+            double active = SegmentRms(shaped, 15 * hop, 21 * hop);
+            double neutralAfter = SegmentRms(shaped, 27 * hop, 31 * hop);
+            double source = SegmentRms(harmonic, 3 * hop, 8 * hop);
+            Assert.InRange(neutralBefore / source, 0.98, 1.02);
+            Assert.InRange(neutralAfter / source, 0.98, 1.02);
+            Assert.True(active > neutralBefore * 2.0);
+            Assert.All(shaped, sample => Assert.True(float.IsFinite(sample)));
+        }
+
+        [Fact]
         public void GeneratedWaveformGencUsesPitchGuidedHarmonicPreparation() {
             const int sampleRate = 44100;
             var harmonic = new float[sampleRate / 2];
@@ -396,6 +443,15 @@ namespace OpenUtau.Core.Test.Neutrino {
             Assert.Equal(frameStart, chunk.FrameStart);
             Assert.Equal(frameCount, chunk.FrameCount);
             Assert.Equal(isActive, chunk.IsActive);
+        }
+
+        static double SegmentRms(float[] samples, int start, int end) {
+            double sum = 0;
+            int count = Math.Max(1, end - start);
+            for (int i = start; i < end; i++) {
+                sum += samples[i] * samples[i];
+            }
+            return Math.Sqrt(sum / count);
         }
     }
 }

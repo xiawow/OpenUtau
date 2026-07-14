@@ -99,6 +99,24 @@ namespace OpenUtau.Core.Render {
             return null;
         }
 
+        public static bool IsHifiNeuralRenderer(string? rendererId, IRenderer? renderer) {
+            return string.Equals(rendererId, HIFI_NEURAL_PHRASE, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(rendererId, HIFI_NEURAL_PHRASE_LEGACY, StringComparison.OrdinalIgnoreCase)
+                || renderer is HifiNeural.HifiNeuralPhraseRenderer;
+        }
+
+        public static bool IsNeutrinoRenderer(string? rendererId, IRenderer? renderer) {
+            return string.Equals(rendererId, NEUTRINO, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(rendererId, NEUTRINO_V2, StringComparison.OrdinalIgnoreCase)
+                || renderer is Neutrino.NeutrinoRenderer
+                || renderer is Neutrino.NeutrinoLegacyV2Renderer;
+        }
+
+        public static bool SupportsHnSpectralDesigner(string? rendererId, IRenderer? renderer) {
+            return IsHifiNeuralRenderer(rendererId, renderer)
+                || IsNeutrinoRenderer(rendererId, renderer);
+        }
+
         readonly static ConcurrentDictionary<string, object> cacheLockMap
             = new ConcurrentDictionary<string, object>();
 
