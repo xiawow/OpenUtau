@@ -159,6 +159,28 @@
             <TextBlock Text="{DynamicResource prefs.paths.loaddeepfolders}" HorizontalAlignment="Left"/>
             <ToggleSwitch IsChecked="{Binding LoadDeepFolders}"/>
           </Grid>
+          <TextBlock Text="CUDA" Margin="0,10,0,0"/>
+          <Grid ColumnDefinitions="*,10,Auto" Margin="4,0,0,0" HorizontalAlignment="Stretch">
+            <TextBlock TextWrapping="Wrap" FontSize="11" Text="{Binding CudaPath}"/>
+            <Button Content="{DynamicResource button.open}" Grid.Column="2" Click="OpenCudaFolder"/>
+          </Grid>
+          <Grid HorizontalAlignment="Stretch" ColumnDefinitions="*,10,*">
+            <Button Grid.Column="0" Content="{DynamicResource button.reset}"
+                    HorizontalAlignment="Stretch" Click="ResetCudaPath"/>
+            <Button Grid.Column="2" Content="{DynamicResource button.select}"
+                    HorizontalAlignment="Stretch" Click="SelectCudaPath"/>
+          </Grid>
+          <TextBlock Text="cuDNN" Margin="0,10,0,0"/>
+          <Grid ColumnDefinitions="*,10,Auto" Margin="4,0,0,0" HorizontalAlignment="Stretch">
+            <TextBlock TextWrapping="Wrap" FontSize="11" Text="{Binding CudnnPath}"/>
+            <Button Content="{DynamicResource button.open}" Grid.Column="2" Click="OpenCudnnFolder"/>
+          </Grid>
+          <Grid HorizontalAlignment="Stretch" ColumnDefinitions="*,10,*">
+            <Button Grid.Column="0" Content="{DynamicResource button.reset}"
+                    HorizontalAlignment="Stretch" Click="ResetCudnnPath"/>
+            <Button Grid.Column="2" Content="{DynamicResource button.select}"
+                    HorizontalAlignment="Stretch" Click="SelectCudnnPath"/>
+          </Grid>
         </StackPanel>
 
         <!-- Editing -->
@@ -210,6 +232,12 @@
             <TextBlock Text="HifiNeural debug export" HorizontalAlignment="Left"/>
             <ToggleSwitch IsChecked="{Binding HifiNeuralDebugExportEnabled}"/>
           </Grid>
+          <TextBlock Text="{DynamicResource prefs.rendering.neutrinolegacyquality}" Margin="0,10,0,0"/>
+          <ComboBox SelectedIndex="{Binding NeutrinoLegacyV2RenderQuality}">
+            <ComboBoxItem Content="{DynamicResource prefs.rendering.neutrinolegacyquality.performance}"/>
+            <ComboBoxItem Content="{DynamicResource prefs.rendering.neutrinolegacyquality.balanced}"/>
+            <ComboBoxItem Content="{DynamicResource prefs.rendering.neutrinolegacyquality.quality}"/>
+          </ComboBox>
           <StackPanel IsVisible="{Binding ShowOnnxGpu}">
             <TextBlock Text="{DynamicResource prefs.rendering.onnxgpu}" Margin="0,10,0,0"/>
             <ComboBox ItemsSource="{Binding OnnxGpuOptions}" SelectedItem="{Binding OnnxGpu}"/>

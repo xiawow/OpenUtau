@@ -103,7 +103,7 @@ namespace OpenUtau.Classic {
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
             bool hasInfo = files.Any(file => file.Equals("model/info.toml", StringComparison.OrdinalIgnoreCase)
                 || file.EndsWith("/model/info.toml", StringComparison.OrdinalIgnoreCase));
-            if (hasInfo || HasNeutrinoModelFiles(files)) {
+            if (hasInfo || HasNeutrinoModelFiles(files) || HasLegacyNeutrinoV2ModelFiles(files)) {
                 return "neutrino";
             }
             return requestedSingerType;
@@ -118,6 +118,25 @@ namespace OpenUtau.Classic {
                 if (files.Contains(Prefix("p.bin"))
                     && files.Contains(Prefix("s.bin"))
                     && files.Contains(Prefix("v.bin"))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        static bool HasLegacyNeutrinoV2ModelFiles(HashSet<string> files) {
+            foreach (var embedding in files.Where(file => file.Equals("e.bin", StringComparison.OrdinalIgnoreCase)
+                || file.EndsWith("/e.bin", StringComparison.OrdinalIgnoreCase))) {
+                int separator = embedding.LastIndexOf('/');
+                string directory = separator >= 0 ? embedding.Substring(0, separator) : string.Empty;
+                string Prefix(string name) => string.IsNullOrEmpty(directory) ? name : $"{directory}/{name}";
+                if (files.Contains(Prefix("t.bin"))
+                    && (files.Contains(Prefix("ds.bin"))
+                        || files.Contains(Prefix("da.bin"))
+                        || files.Contains(Prefix("de.bin")))
+                    && (files.Contains(Prefix("vs.bin"))
+                        || files.Contains(Prefix("va.bin"))
+                        || files.Contains(Prefix("ve.bin")))) {
                     return true;
                 }
             }

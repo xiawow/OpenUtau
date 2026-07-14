@@ -24,7 +24,7 @@ namespace OpenUtau.Core.Neutrino {
         const int hopSize = 480;
         const int pitchInterval = 5;
         const int numMelBins = 100;
-        const int cacheVersion = 12;
+        const int cacheVersion = 14;
         const int postEffectCacheVersion = 2;
         const int pitchCacheMagic = 0x4E465032; // NFP2
         const int edgeSilenceSamples = 240;
@@ -67,6 +67,7 @@ namespace OpenUtau.Core.Neutrino {
             public float[] TimingDurations { get; }
             public long[] FramePhonemeMap { get; }
             public int TotalFrames { get; }
+            public NeutrinoFrameChunk[] Chunks { get; }
 
             public NeutrinoTimingContext(
                 long[] phonemeIds,
@@ -75,7 +76,8 @@ namespace OpenUtau.Core.Neutrino {
                 long[] phonePositions,
                 float[] timingDurations,
                 long[] framePhonemeMap,
-                int totalFrames) {
+                int totalFrames,
+                NeutrinoFrameChunk[] chunks) {
 
                 PhonemeIds = phonemeIds;
                 ScorePitchesHz = scorePitchesHz;
@@ -84,6 +86,7 @@ namespace OpenUtau.Core.Neutrino {
                 TimingDurations = timingDurations;
                 FramePhonemeMap = framePhonemeMap;
                 TotalFrames = totalFrames;
+                Chunks = chunks;
             }
         }
 
@@ -231,51 +234,25 @@ namespace OpenUtau.Core.Neutrino {
 
             if (cancellation.IsCancellationRequested) return null;
 
-            int numPhones = timing.PhonemeIds.Length;
-            int totalFrames = timing.TotalFrames;
             var singer = phrase.singer as NeutrinoSinger;
-            var melspecInputs = new List<NamedOnnxValue> {
-                NamedOnnxValue.CreateFromTensor("electron",
-                    new DenseTensor<long>(timing.PhonemeIds, new[] { 1, numPhones })),
-                NamedOnnxValue.CreateFromTensor("muon",
-                    new DenseTensor<float>(timing.TimingDurations, new[] { 1, numPhones })),
-                NamedOnnxValue.CreateFromTensor("tau",
-                    new DenseTensor<float>(timing.ScorePitchesHz, new[] { 1, numPhones })),
-                NamedOnnxValue.CreateFromTensor("selectron",
-                    new DenseTensor<float>(timing.ScoreDurations, new[] { 1, numPhones })),
-                NamedOnnxValue.CreateFromTensor("smuon",
-                    new DenseTensor<long>(timing.PhonePositions, new[] { 1, numPhones })),
-                NamedOnnxValue.CreateFromTensor("stau",
-                    new DenseTensor<long>(timing.FramePhonemeMap, new[] { 1, totalFrames })),
-                NamedOnnxValue.CreateFromTensor("photon",
-                    new DenseTensor<float>(f0, new[] { 1, totalFrames })),
-            };
-
-            float[] melSpectrogram;
-            melSpectrogram = singer.RunMelspec(melspecInputs);
-            melSpectrogram = FitLength(melSpectrogram, totalFrames * numMelBins);
-            ClampMelspec(melSpectrogram);
-
-            if (cancellation.IsCancellationRequested) return null;
-
-            int vocoderFrames = totalFrames;
-            var vocoderInput = new float[vocoderFrames * (numMelBins + 1)];
-            for (int frame = 0; frame < vocoderFrames; frame++) {
-                for (int bin = 0; bin < numMelBins; bin++) {
-                    vocoderInput[frame * (numMelBins + 1) + bin] =
-                        melSpectrogram[frame * numMelBins + bin];
+            var waveform = new float[timing.TotalFrames * hopSize];
+            foreach (var chunk in timing.Chunks) {
+                if (!chunk.IsActive || chunk.FrameCount <= 0) {
+                    continue;
                 }
-                vocoderInput[frame * (numMelBins + 1) + numMelBins] = f0[frame];
+                if (cancellation.IsCancellationRequested) return null;
+
+                var chunkTiming = BuildChunkTimingContext(timing, chunk);
+                var chunkF0 = NeutrinoInferenceUtil.Slice(f0, chunk.FrameStart, chunk.FrameCount);
+                var chunkWaveform = RunAcousticChunk(singer, chunkTiming, chunkF0, cancellation);
+                if (chunkWaveform == null) return null;
+                Array.Copy(
+                    chunkWaveform,
+                    0,
+                    waveform,
+                    chunk.FrameStart * hopSize,
+                    chunkWaveform.Length);
             }
-
-            var vocoderInputs = new List<NamedOnnxValue> {
-                NamedOnnxValue.CreateFromTensor("input",
-                    new DenseTensor<float>(vocoderInput, new[] { 1, vocoderFrames, numMelBins + 1 })),
-            };
-
-            float[] waveform;
-            waveform = singer.RunVocoder(vocoderInputs);
-            PostProcessWaveform(waveform);
 
             var layout = Layout(phrase);
             int headSamples = (int)(layout.leadingMs / 1000.0 * sampleRate);
@@ -295,6 +272,78 @@ namespace OpenUtau.Core.Neutrino {
             return new NeutrinoRawRender(
                 result,
                 new NeutrinoPitchTrack(headSamples, waveform.Length, f0));
+        }
+
+        NeutrinoTimingContext BuildChunkTimingContext(
+            NeutrinoTimingContext timing,
+            NeutrinoFrameChunk chunk) {
+
+            var timingDurations = NeutrinoInferenceUtil.Slice(
+                timing.TimingDurations, chunk.PhoneStart, chunk.PhoneCount);
+            return new NeutrinoTimingContext(
+                NeutrinoInferenceUtil.Slice(timing.PhonemeIds, chunk.PhoneStart, chunk.PhoneCount),
+                NeutrinoInferenceUtil.Slice(timing.ScorePitchesHz, chunk.PhoneStart, chunk.PhoneCount),
+                NeutrinoInferenceUtil.Slice(timing.ScoreDurations, chunk.PhoneStart, chunk.PhoneCount),
+                NeutrinoInferenceUtil.Slice(timing.PhonePositions, chunk.PhoneStart, chunk.PhoneCount),
+                timingDurations,
+                BuildFramePhonemeMap(timingDurations, chunk.FrameCount),
+                chunk.FrameCount,
+                Array.Empty<NeutrinoFrameChunk>());
+        }
+
+        float[] RunAcousticChunk(
+            NeutrinoSinger singer,
+            NeutrinoTimingContext timing,
+            float[] f0,
+            CancellationTokenSource cancellation) {
+
+            int numPhones = timing.PhonemeIds.Length;
+            int totalFrames = timing.TotalFrames;
+            var melspecInputs = new List<NamedOnnxValue> {
+                NamedOnnxValue.CreateFromTensor("electron",
+                    new DenseTensor<long>(timing.PhonemeIds, new[] { 1, numPhones })),
+                NamedOnnxValue.CreateFromTensor("muon",
+                    new DenseTensor<float>(timing.TimingDurations, new[] { 1, numPhones })),
+                NamedOnnxValue.CreateFromTensor("tau",
+                    new DenseTensor<float>(timing.ScorePitchesHz, new[] { 1, numPhones })),
+                NamedOnnxValue.CreateFromTensor("selectron",
+                    new DenseTensor<float>(timing.ScoreDurations, new[] { 1, numPhones })),
+                NamedOnnxValue.CreateFromTensor("smuon",
+                    new DenseTensor<long>(timing.PhonePositions, new[] { 1, numPhones })),
+                NamedOnnxValue.CreateFromTensor("stau",
+                    new DenseTensor<long>(timing.FramePhonemeMap, new[] { 1, totalFrames })),
+                NamedOnnxValue.CreateFromTensor("photon",
+                    new DenseTensor<float>(f0, new[] { 1, totalFrames })),
+            };
+
+            float[] melSpectrogram = NeutrinoInferenceUtil.RequireLength(
+                singer.RunMelspec(melspecInputs),
+                totalFrames * numMelBins,
+                "NEUTRINO v3 s.bin mel output");
+            ClampMelspec(melSpectrogram);
+
+            if (cancellation.IsCancellationRequested) return null;
+
+            var vocoderInput = new float[totalFrames * (numMelBins + 1)];
+            for (int frame = 0; frame < totalFrames; frame++) {
+                for (int bin = 0; bin < numMelBins; bin++) {
+                    vocoderInput[frame * (numMelBins + 1) + bin] =
+                        melSpectrogram[frame * numMelBins + bin];
+                }
+                vocoderInput[frame * (numMelBins + 1) + numMelBins] = f0[frame];
+            }
+
+            var vocoderInputs = new List<NamedOnnxValue> {
+                NamedOnnxValue.CreateFromTensor("input",
+                    new DenseTensor<float>(vocoderInput, new[] { 1, totalFrames, numMelBins + 1 })),
+            };
+            var waveform = NeutrinoInferenceUtil.RequireLength(
+                singer.RunVocoder(vocoderInputs),
+                totalFrames * hopSize,
+                "NEUTRINO v3 v.bin waveform output");
+            if (cancellation.IsCancellationRequested) return null;
+            PostProcessWaveform(waveform);
+            return waveform;
         }
 
         static bool HasHnsepParameterControls(RenderPhrase phrase) {
@@ -375,27 +424,51 @@ namespace OpenUtau.Core.Neutrino {
                     phonePositions,
                     Array.Empty<float>(),
                     Array.Empty<long>(),
-                    0);
+                    0,
+                    Array.Empty<NeutrinoFrameChunk>());
             }
 
-            var timingInputs = new List<NamedOnnxValue> {
-                NamedOnnxValue.CreateFromTensor("electron",
-                    new DenseTensor<long>(phonemeIds, new[] { 1, numPhones })),
-                NamedOnnxValue.CreateFromTensor("muon",
-                    new DenseTensor<float>(scorePitchesHz, new[] { 1, numPhones })),
-                NamedOnnxValue.CreateFromTensor("tau",
-                    new DenseTensor<float>(scoreDurations, new[] { 1, numPhones })),
-                NamedOnnxValue.CreateFromTensor("selectron",
-                    new DenseTensor<long>(phonePositions, new[] { 1, numPhones })),
-            };
+            var phoneChunks = NeutrinoInferenceUtil.BuildPhoneChunks(phonemeIds);
+            double frameSeconds = (double)hopSize / sampleRate;
+            var boundaries = NeutrinoInferenceUtil.BuildTimingBoundaries(
+                scoreDurations,
+                phonePositions,
+                phoneChunks,
+                frameSeconds,
+                chunk => {
+                    var chunkPitches = NeutrinoInferenceUtil.Slice(
+                        scorePitchesHz, chunk.PhoneStart, chunk.PhoneCount);
+                    var chunkScoreDurations = NeutrinoInferenceUtil.Slice(
+                        scoreDurations, chunk.PhoneStart, chunk.PhoneCount);
+                    var chunkPhonePositions = NeutrinoInferenceUtil.Slice(
+                        phonePositions, chunk.PhoneStart, chunk.PhoneCount);
+                    var chunkPhonemeIds = NeutrinoInferenceUtil.Slice(
+                        phonemeIds, chunk.PhoneStart, chunk.PhoneCount);
+                    var timingInputs = new List<NamedOnnxValue> {
+                        NamedOnnxValue.CreateFromTensor("electron",
+                            new DenseTensor<long>(chunkPhonemeIds, new[] { 1, chunk.PhoneCount })),
+                        NamedOnnxValue.CreateFromTensor("muon",
+                            new DenseTensor<float>(chunkPitches, new[] { 1, chunk.PhoneCount })),
+                        NamedOnnxValue.CreateFromTensor("tau",
+                            new DenseTensor<float>(chunkScoreDurations, new[] { 1, chunk.PhoneCount })),
+                        NamedOnnxValue.CreateFromTensor("selectron",
+                            new DenseTensor<long>(chunkPhonePositions, new[] { 1, chunk.PhoneCount })),
+                    };
+                    return NeutrinoInferenceUtil.RequireTimingBoundaryLength(
+                        singer.RunTiming(timingInputs),
+                        chunk.PhoneCount,
+                        "NEUTRINO v3 t.bin timing output");
+                });
 
-            float[] boundaryShifts = singer.RunTiming(timingInputs);
-            var baseBoundaries = BuildBaseBoundaryTimes(scoreDurations, phonePositions);
-            var boundaries = ApplyTimingBoundaryShifts(baseBoundaries, boundaryShifts);
             ApplyManualBoundaryOverrides(boundaries, manualBoundaries);
             var timingDurations = BuildTimingDurations(boundaries);
             int totalFrames = Math.Max(1, (int)Math.Round(boundaries[^1] * sampleRate / hopSize));
             var framePhonemeMap = BuildFramePhonemeMap(timingDurations, totalFrames);
+            var frameChunks = NeutrinoInferenceUtil.BuildFrameChunks(
+                phoneChunks,
+                boundaries,
+                totalFrames,
+                (double)hopSize / sampleRate);
 
             return new NeutrinoTimingContext(
                 phonemeIds,
@@ -404,7 +477,8 @@ namespace OpenUtau.Core.Neutrino {
                 phonePositions,
                 timingDurations,
                 framePhonemeMap,
-                totalFrames);
+                totalFrames,
+                frameChunks);
         }
 
         float[] RunPredictedF0(RenderPhrase phrase, NeutrinoTimingContext timing) {
@@ -412,30 +486,47 @@ namespace OpenUtau.Core.Neutrino {
                 return Array.Empty<float>();
             }
 
-            int numPhones = timing.PhonemeIds.Length;
             var styleShiftCentsByFrame = BuildStyleShiftCentsByFrame(phrase, timing);
-            var scorePitchesHz = ApplyStyleShiftToScorePitches(
-                timing.ScorePitchesHz,
-                BuildPhoneStyleShiftCents(timing, styleShiftCentsByFrame));
-            var pitchInputs = new List<NamedOnnxValue> {
-                NamedOnnxValue.CreateFromTensor("electron",
-                    new DenseTensor<long>(timing.PhonemeIds, new[] { 1, numPhones })),
-                NamedOnnxValue.CreateFromTensor("muon",
-                    new DenseTensor<float>(timing.TimingDurations, new[] { 1, numPhones })),
-                NamedOnnxValue.CreateFromTensor("tau",
-                    new DenseTensor<float>(scorePitchesHz, new[] { 1, numPhones })),
-                NamedOnnxValue.CreateFromTensor("selectron",
-                    new DenseTensor<float>(timing.ScoreDurations, new[] { 1, numPhones })),
-                NamedOnnxValue.CreateFromTensor("smuon",
-                    new DenseTensor<long>(timing.PhonePositions, new[] { 1, numPhones })),
-                NamedOnnxValue.CreateFromTensor("stau",
-                    new DenseTensor<long>(timing.FramePhonemeMap, new[] { 1, timing.TotalFrames })),
-            };
-
             var singer = phrase.singer as NeutrinoSinger;
-            var f0 = FitLength(singer.RunPitch(pitchInputs), timing.TotalFrames);
-            ApplyInverseStyleShiftToF0(f0, styleShiftCentsByFrame);
-            ClampF0(f0);
+            var f0 = new float[timing.TotalFrames];
+            foreach (var chunk in timing.Chunks) {
+                if (!chunk.IsActive || chunk.FrameCount <= 0) {
+                    continue;
+                }
+
+                var chunkTiming = BuildChunkTimingContext(timing, chunk);
+                var chunkStyleShift = styleShiftCentsByFrame.Length == 0
+                    ? Array.Empty<float>()
+                    : NeutrinoInferenceUtil.Slice(
+                        styleShiftCentsByFrame, chunk.FrameStart, chunk.FrameCount);
+                var scorePitchesHz = ApplyStyleShiftToScorePitches(
+                    chunkTiming.ScorePitchesHz,
+                    BuildPhoneStyleShiftCents(chunkTiming, chunkStyleShift));
+                int numPhones = chunkTiming.PhonemeIds.Length;
+                var pitchInputs = new List<NamedOnnxValue> {
+                    NamedOnnxValue.CreateFromTensor("electron",
+                        new DenseTensor<long>(chunkTiming.PhonemeIds, new[] { 1, numPhones })),
+                    NamedOnnxValue.CreateFromTensor("muon",
+                        new DenseTensor<float>(chunkTiming.TimingDurations, new[] { 1, numPhones })),
+                    NamedOnnxValue.CreateFromTensor("tau",
+                        new DenseTensor<float>(scorePitchesHz, new[] { 1, numPhones })),
+                    NamedOnnxValue.CreateFromTensor("selectron",
+                        new DenseTensor<float>(chunkTiming.ScoreDurations, new[] { 1, numPhones })),
+                    NamedOnnxValue.CreateFromTensor("smuon",
+                        new DenseTensor<long>(chunkTiming.PhonePositions, new[] { 1, numPhones })),
+                    NamedOnnxValue.CreateFromTensor("stau",
+                        new DenseTensor<long>(
+                            chunkTiming.FramePhonemeMap,
+                            new[] { 1, chunkTiming.TotalFrames })),
+                };
+                var chunkF0 = NeutrinoInferenceUtil.RequireLength(
+                    singer.RunPitch(pitchInputs),
+                    chunkTiming.TotalFrames,
+                    "NEUTRINO v3 p.bin F0 output");
+                ApplyInverseStyleShiftToF0(chunkF0, chunkStyleShift);
+                ClampF0(chunkF0);
+                Array.Copy(chunkF0, 0, f0, chunk.FrameStart, chunkF0.Length);
+            }
             return f0;
         }
 
@@ -652,7 +743,7 @@ namespace OpenUtau.Core.Neutrino {
             int positionInNote = 0;
 
             foreach (var phone in phrase.phones) {
-                var phoneStrs = NeutrinoPhoneme.KanaToPhonemes(phone.phoneme);
+                var phoneStrs = NeutrinoPhoneme.RenderPhoneToPhonemes(phone.phoneme);
                 int noteIndex = Math.Clamp(phone.noteIndex, 0, phrase.notes.Length - 1);
                 if (noteIndex != lastNoteIndex) {
                     positionInNote = 0;
@@ -698,45 +789,12 @@ namespace OpenUtau.Core.Neutrino {
 
         double GetExtendedNoteDurationMs(RenderNote[] notes, int noteIndex) {
             double endMs = notes[noteIndex].endMs;
-            for (int i = noteIndex + 1; i < notes.Length && IsExtensionLyric(notes[i].lyric); i++) {
+            for (int i = noteIndex + 1;
+                i < notes.Length && NeutrinoInferenceUtil.IsExtensionLyric(notes[i].lyric);
+                i++) {
                 endMs = notes[i].endMs;
             }
             return Math.Max(1, endMs - notes[noteIndex].positionMs);
-        }
-
-        bool IsExtensionLyric(string lyric) {
-            return lyric == "+" || lyric == "-";
-        }
-
-        double[] BuildBaseBoundaryTimes(float[] scoreDurations, long[] phonePositions) {
-            int numPhones = scoreDurations.Length;
-            var boundaries = new double[numPhones + 1];
-            double time = 0;
-            for (int i = 0; i < numPhones; i++) {
-                boundaries[i] = time;
-                long nextPosition = i + 1 < numPhones ? phonePositions[i + 1] : -1;
-                if (i == numPhones - 1 || nextPosition <= phonePositions[i]) {
-                    time += scoreDurations[i];
-                }
-            }
-            boundaries[numPhones] = time;
-            return boundaries;
-        }
-
-        double[] ApplyTimingBoundaryShifts(double[] baseBoundaries, float[] boundaryShifts) {
-            var boundaries = (double[])baseBoundaries.Clone();
-            double frameSec = (double)hopSize / sampleRate;
-            for (int i = 1; i < boundaries.Length - 1; i++) {
-                double shift = i < boundaryShifts.Length ? boundaryShifts[i] : 0;
-                double shifted = baseBoundaries[i] + shift;
-                boundaries[i] = Math.Round(Math.Max(shifted, boundaries[i - 1] + frameSec) * 1000.0) / 1000.0;
-            }
-            for (int i = 1; i < boundaries.Length; i++) {
-                if (boundaries[i] <= boundaries[i - 1]) {
-                    boundaries[i] = Math.Round((boundaries[i - 1] + frameSec) * 1000.0) / 1000.0;
-                }
-            }
-            return boundaries;
         }
 
         void ApplyManualBoundaryOverrides(double[] boundaries, double?[] manualBoundaries) {
@@ -774,7 +832,7 @@ namespace OpenUtau.Core.Neutrino {
             return durations;
         }
 
-        long[] BuildFramePhonemeMap(float[] timingDurations, int totalFrames) {
+        internal static long[] BuildFramePhonemeMap(float[] timingDurations, int totalFrames) {
             var stau = new long[totalFrames];
             double frameSec = (double)hopSize / sampleRate;
             double time = 0;
@@ -786,27 +844,18 @@ namespace OpenUtau.Core.Neutrino {
                     stau[frame] = phone + 1;
                 }
             }
-            long lastPhone = timingDurations.Length;
+            long finalPhone = timingDurations.Length;
             for (int frame = 0; frame < totalFrames; frame++) {
                 if (stau[frame] == 0) {
-                    stau[frame] = lastPhone;
+                    stau[frame] = finalPhone;
                 }
             }
             return stau;
         }
 
-        float[] FitLength(float[] values, int length) {
-            if (values.Length == length) {
-                return values;
-            }
-            var fitted = new float[length];
-            Array.Copy(values, fitted, Math.Min(values.Length, length));
-            return fitted;
-        }
-
         void ClampF0(float[] f0) {
             for (int i = 0; i < f0.Length; i++) {
-                if (f0[i] < f0Min) {
+                if (!float.IsFinite(f0[i]) || f0[i] < f0Min) {
                     f0[i] = 0;
                 } else if (f0[i] > f0Max) {
                     f0[i] = f0Max;
@@ -816,7 +865,9 @@ namespace OpenUtau.Core.Neutrino {
 
         void ClampMelspec(float[] melSpectrogram) {
             for (int i = 0; i < melSpectrogram.Length; i++) {
-                if (melSpectrogram[i] < melspecMin) {
+                if (!float.IsFinite(melSpectrogram[i])) {
+                    melSpectrogram[i] = melspecMin;
+                } else if (melSpectrogram[i] < melspecMin) {
                     melSpectrogram[i] = melspecMin;
                 } else if (melSpectrogram[i] > melspecMax) {
                     melSpectrogram[i] = melspecMax;
@@ -849,6 +900,7 @@ namespace OpenUtau.Core.Neutrino {
 
             for (int i = 0; i < waveform.Length; i++) {
                 float value = waveform[i] * wavScale;
+                if (!float.IsFinite(value)) value = 0;
                 if (value > wavClamp) value = wavClamp;
                 if (value < -wavClamp) value = -wavClamp;
                 waveform[i] = value;

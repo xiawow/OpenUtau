@@ -256,7 +256,7 @@ namespace OpenUtau.App.ViewModels {
                     var settings = new URenderSettings();
                     if (selectedSinger.Found) {
                         settings = new URenderSettings {
-                            renderer = Core.Render.Renderers.GetDefaultRenderer(selectedSinger.SingerType),
+                            renderer = Core.Render.Renderers.GetDefaultRenderer(selectedSinger),
                         };
                     }
                     DocManager.Inst.ExecuteCmd(new TrackChangeRenderSettingCommand(DocManager.Inst.Project, targetTrack, settings));

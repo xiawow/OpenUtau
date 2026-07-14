@@ -21,6 +21,7 @@ namespace OpenUtau.Core.HifiNeural {
     public sealed class HifiHnsepOnnx {
         public const string RunnerCpu = "CPU";
         public const string RunnerDirectML = "DirectML";
+        public const string RunnerCuda = OnnxRuntimeLibraryLoader.RunnerCuda;
 
         const int DefaultNfft = 2048;
         const int DefaultHop = 512;
@@ -98,14 +99,23 @@ namespace OpenUtau.Core.HifiNeural {
 
         public static List<string> RunnerOptions() {
             var options = new List<string> { RunnerCpu };
-            if (Onnx.getRunnerOptions().Contains(RunnerDirectML)) {
+            if (!OnnxRuntimeLibraryLoader.IsCudaRuntimeConfigured
+                && Onnx.getRunnerOptions().Contains(RunnerDirectML)) {
                 options.Add(RunnerDirectML);
+            }
+            if (OnnxRuntimeLibraryLoader.IsCudaRuntimeAvailable()) {
+                options.Add(RunnerCuda);
             }
             return options;
         }
 
         public static string NormalizeRunner(string? runner) {
+            if (string.Equals(runner, RunnerCuda, StringComparison.OrdinalIgnoreCase)
+                    && OnnxRuntimeLibraryLoader.IsCudaRuntimeAvailable()) {
+                return RunnerCuda;
+            }
             if (string.Equals(runner, RunnerDirectML, StringComparison.OrdinalIgnoreCase)
+                    && !OnnxRuntimeLibraryLoader.IsCudaRuntimeConfigured
                     && Onnx.getRunnerOptions().Contains(RunnerDirectML)) {
                 return RunnerDirectML;
             }
@@ -230,7 +240,7 @@ namespace OpenUtau.Core.HifiNeural {
             string baseDir = AppContext.BaseDirectory;
             string currentDir = Directory.GetCurrentDirectory();
             string? environmentPath = Environment.GetEnvironmentVariable("HIFI_NEURAL_HNSEP_ONNX");
-            bool preferDmlSafe = IsAcceleratedRunnerRequested();
+            bool preferDmlSafe = IsDirectMlRunnerRequested();
             string resolutionKey = string.Concat(
                 baseDir,
                 "|", currentDir,
@@ -461,25 +471,23 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         static string ResolveHnsepRunner(string fullPath) {
-            if (!IsDmlSafeModelPath(fullPath)) {
-                return RunnerCpu;
-            }
             string runner = Environment.GetEnvironmentVariable("HIFI_NEURAL_HNSEP_RUNNER");
             if (string.IsNullOrWhiteSpace(runner)) {
                 runner = Preferences.Default.HifiNeuralHnsepRunner;
             }
-            return NormalizeRunner(runner);
+            runner = NormalizeRunner(runner);
+            if (runner == RunnerDirectML && !IsDmlSafeModelPath(fullPath)) {
+                return RunnerCpu;
+            }
+            return runner;
         }
 
-        static bool IsAcceleratedRunnerRequested() {
+        static bool IsDirectMlRunnerRequested() {
             return NormalizeRunner(Environment.GetEnvironmentVariable("HIFI_NEURAL_HNSEP_RUNNER")
-                ?? Preferences.Default.HifiNeuralHnsepRunner) != RunnerCpu;
+                ?? Preferences.Default.HifiNeuralHnsepRunner) == RunnerDirectML;
         }
 
         static InferenceSession CreateAcceleratedSession(string fullPath, string runner) {
-            if (!string.Equals(runner, RunnerDirectML, StringComparison.OrdinalIgnoreCase)) {
-                throw new NotSupportedException($"Unsupported HNSEP runner: {runner}");
-            }
             var options = new SessionOptions {
                 GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
                 EnableMemoryPattern = false,
@@ -487,7 +495,13 @@ namespace OpenUtau.Core.HifiNeural {
                 InterOpNumThreads = 1,
                 IntraOpNumThreads = 1,
             };
-            options.AppendExecutionProvider_DML(Math.Max(0, Preferences.Default.OnnxGpu));
+            if (string.Equals(runner, RunnerDirectML, StringComparison.OrdinalIgnoreCase)) {
+                options.AppendExecutionProvider_DML(Math.Max(0, Preferences.Default.OnnxGpu));
+            } else if (string.Equals(runner, RunnerCuda, StringComparison.OrdinalIgnoreCase)) {
+                options.AppendExecutionProvider_CUDA(Math.Max(0, Preferences.Default.OnnxGpu));
+            } else {
+                throw new NotSupportedException($"Unsupported HNSEP runner: {runner}");
+            }
             return new InferenceSession(fullPath, options);
         }
 

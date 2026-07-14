@@ -31,6 +31,9 @@ namespace OpenUtau.Core.Neutrino {
             if (neutrinoSinger == null || notes == null || notes.Length == 0 || timeAxis == null) {
                 return;
             }
+            if (neutrinoSinger.IsLegacyV2) {
+                return;
+            }
             try {
                 neutrinoSinger.EnsureTimingSession();
                 foreach (var phrase in SplitPhrases(notes)) {
@@ -54,16 +57,17 @@ namespace OpenUtau.Core.Neutrino {
             var lyric = string.IsNullOrWhiteSpace(notes[0].phoneticHint)
                 ? notes[0].lyric ?? "R"
                 : notes[0].phoneticHint;
-            var phonemes = NeutrinoPhoneme.KanaToPhonemes(lyric);
+            var phonemes = LyricToPhonemes(lyric);
             var positions = DistributePhonemes(phonemes, notes);
+            var resultPhonemes = phonemes
+                .Select((phoneme, index) => new Phoneme {
+                    index = index,
+                    phoneme = phoneme,
+                    position = positions[index],
+                })
+                .ToArray();
             return new Result {
-                phonemes = phonemes
-                    .Select((phoneme, index) => new Phoneme {
-                        index = index,
-                        phoneme = phoneme,
-                        position = positions[index],
-                    })
-                    .ToArray(),
+                phonemes = PostProcessPhonemePositions(resultPhonemes, notes),
             };
         }
 
@@ -90,13 +94,14 @@ namespace OpenUtau.Core.Neutrino {
             var scoreDurations = new List<float>();
             var phonePositions = new List<long>();
             var phoneRefs = new List<TimedPhoneRef>();
-            var groupedPhonemes = noteGroups.ToDictionary(group => group[0].position, _ => new List<Phoneme>());
+            var groupsByPosition = noteGroups.ToDictionary(group => group[0].position);
+            var groupedPhonemes = groupsByPosition.ToDictionary(pair => pair.Key, _ => new List<Phoneme>());
 
             foreach (var group in noteGroups) {
                 var lyric = string.IsNullOrWhiteSpace(group[0].phoneticHint)
                     ? group[0].lyric ?? "R"
                     : group[0].phoneticHint;
-                var phonemes = NeutrinoPhoneme.KanaToPhonemes(lyric);
+                var phonemes = LyricToPhonemes(lyric);
                 float notePitchHz = phonemes.All(p => NeutrinoPhoneme.GetPhonemeId(p) == NeutrinoPhoneme.PAU)
                     ? 0
                     : (float)NeutrinoConfig.MidiToFreq(group[0].tone);
@@ -121,19 +126,11 @@ namespace OpenUtau.Core.Neutrino {
                 return;
             }
 
-            var timingInputs = new List<NamedOnnxValue> {
-                NamedOnnxValue.CreateFromTensor("electron",
-                    new DenseTensor<long>(phonemeIds.ToArray(), new[] { 1, numPhones })),
-                NamedOnnxValue.CreateFromTensor("muon",
-                    new DenseTensor<float>(scorePitchesHz.ToArray(), new[] { 1, numPhones })),
-                NamedOnnxValue.CreateFromTensor("tau",
-                    new DenseTensor<float>(scoreDurations.ToArray(), new[] { 1, numPhones })),
-                NamedOnnxValue.CreateFromTensor("selectron",
-                    new DenseTensor<long>(phonePositions.ToArray(), new[] { 1, numPhones })),
-            };
-            var boundaryShifts = neutrinoSinger.RunTiming(timingInputs);
-            var baseBoundaries = BuildBaseBoundaryTimes(scoreDurations.ToArray(), phonePositions.ToArray());
-            var boundaries = ApplyTimingBoundaryShifts(baseBoundaries, boundaryShifts);
+            var boundaries = BuildChunkedTimingBoundaries(
+                phonemeIds.ToArray(),
+                scorePitchesHz.ToArray(),
+                scoreDurations.ToArray(),
+                phonePositions.ToArray());
             double phraseStartMs = timeAxis.TickPosToMsPos(noteGroups[0][0].position);
 
             for (int i = 0; i < phoneRefs.Count; i++) {
@@ -149,9 +146,23 @@ namespace OpenUtau.Core.Neutrino {
 
             foreach (var pair in groupedPhonemes) {
                 if (pair.Value.Count > 0) {
-                    timedPhonemes[pair.Key] = pair.Value.ToArray();
+                    timedPhonemes[pair.Key] = PostProcessTimedPhonemePositions(
+                        pair.Value.ToArray(),
+                        groupsByPosition[pair.Key]);
                 }
             }
+        }
+
+        protected virtual string[] LyricToPhonemes(string lyric) {
+            return NeutrinoPhoneme.KanaToPhonemes(lyric);
+        }
+
+        protected virtual Phoneme[] PostProcessPhonemePositions(Phoneme[] phonemes, Note[] notes) {
+            return phonemes;
+        }
+
+        protected virtual Phoneme[] PostProcessTimedPhonemePositions(Phoneme[] phonemes, Note[] notes) {
+            return PostProcessPhonemePositions(phonemes, notes);
         }
 
         double GetGroupDurationMs(Note[] notes) {
@@ -161,35 +172,43 @@ namespace OpenUtau.Core.Neutrino {
             return Math.Max(1, endMs - startMs);
         }
 
-        double[] BuildBaseBoundaryTimes(float[] scoreDurations, long[] phonePositions) {
-            int numPhones = scoreDurations.Length;
-            var boundaries = new double[numPhones + 1];
-            double time = 0;
-            for (int i = 0; i < numPhones; i++) {
-                boundaries[i] = time;
-                long nextPosition = i + 1 < numPhones ? phonePositions[i + 1] : -1;
-                if (i == numPhones - 1 || nextPosition <= phonePositions[i]) {
-                    time += scoreDurations[i];
-                }
-            }
-            boundaries[numPhones] = time;
-            return boundaries;
-        }
+        double[] BuildChunkedTimingBoundaries(
+            long[] phonemeIds,
+            float[] scorePitchesHz,
+            float[] scoreDurations,
+            long[] phonePositions) {
 
-        double[] ApplyTimingBoundaryShifts(double[] baseBoundaries, float[] boundaryShifts) {
-            var boundaries = (double[])baseBoundaries.Clone();
-            double frameSec = (double)hopSize / sampleRate;
-            for (int i = 1; i < boundaries.Length - 1; i++) {
-                double shift = i < boundaryShifts.Length ? boundaryShifts[i] : 0;
-                double shifted = baseBoundaries[i] + shift;
-                boundaries[i] = Math.Round(Math.Max(shifted, boundaries[i - 1] + frameSec) * 1000.0) / 1000.0;
-            }
-            for (int i = 1; i < boundaries.Length; i++) {
-                if (boundaries[i] <= boundaries[i - 1]) {
-                    boundaries[i] = Math.Round((boundaries[i - 1] + frameSec) * 1000.0) / 1000.0;
-                }
-            }
-            return boundaries;
+            var chunks = NeutrinoInferenceUtil.BuildPhoneChunks(phonemeIds);
+            double frameSeconds = (double)hopSize / sampleRate;
+            return NeutrinoInferenceUtil.BuildTimingBoundaries(
+                scoreDurations,
+                phonePositions,
+                chunks,
+                frameSeconds,
+                chunk => {
+                    var chunkPitches = NeutrinoInferenceUtil.Slice(
+                        scorePitchesHz, chunk.PhoneStart, chunk.PhoneCount);
+                    var chunkDurations = NeutrinoInferenceUtil.Slice(
+                        scoreDurations, chunk.PhoneStart, chunk.PhoneCount);
+                    var chunkPositions = NeutrinoInferenceUtil.Slice(
+                        phonePositions, chunk.PhoneStart, chunk.PhoneCount);
+                    var chunkIds = NeutrinoInferenceUtil.Slice(
+                        phonemeIds, chunk.PhoneStart, chunk.PhoneCount);
+                    var timingInputs = new List<NamedOnnxValue> {
+                        NamedOnnxValue.CreateFromTensor("electron",
+                            new DenseTensor<long>(chunkIds, new[] { 1, chunk.PhoneCount })),
+                        NamedOnnxValue.CreateFromTensor("muon",
+                            new DenseTensor<float>(chunkPitches, new[] { 1, chunk.PhoneCount })),
+                        NamedOnnxValue.CreateFromTensor("tau",
+                            new DenseTensor<float>(chunkDurations, new[] { 1, chunk.PhoneCount })),
+                        NamedOnnxValue.CreateFromTensor("selectron",
+                            new DenseTensor<long>(chunkPositions, new[] { 1, chunk.PhoneCount })),
+                    };
+                    return NeutrinoInferenceUtil.RequireTimingBoundaryLength(
+                        neutrinoSinger.RunTiming(timingInputs),
+                        chunk.PhoneCount,
+                        "NEUTRINO v3 t.bin timing output");
+                });
         }
 
         struct TimedPhoneRef {

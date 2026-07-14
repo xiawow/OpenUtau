@@ -128,7 +128,10 @@ namespace OpenUtau.Classic {
             string modelDirectory = Path.Combine(directory, "model");
             return File.Exists(Path.Combine(modelDirectory, "info.toml"))
                 || HasNeutrinoModelFiles(modelDirectory)
-                || HasNeutrinoModelFiles(directory);
+                || HasNeutrinoModelFiles(directory)
+                || HasLegacyNeutrinoV2ModelFiles(modelDirectory)
+                || HasLegacyNeutrinoV2ModelFiles(directory)
+                || HasLegacyNeutrinoV2ModelSubdirectory(modelDirectory);
         }
 
         static bool HasNeutrinoModelFiles(string directory) {
@@ -136,6 +139,22 @@ namespace OpenUtau.Classic {
                 && File.Exists(Path.Combine(directory, "p.bin"))
                 && File.Exists(Path.Combine(directory, "s.bin"))
                 && File.Exists(Path.Combine(directory, "v.bin"));
+        }
+
+        static bool HasLegacyNeutrinoV2ModelFiles(string directory) {
+            return File.Exists(Path.Combine(directory, "e.bin"))
+                && File.Exists(Path.Combine(directory, "t.bin"))
+                && (File.Exists(Path.Combine(directory, "ds.bin"))
+                    || File.Exists(Path.Combine(directory, "da.bin"))
+                    || File.Exists(Path.Combine(directory, "de.bin")))
+                && (File.Exists(Path.Combine(directory, "vs.bin"))
+                    || File.Exists(Path.Combine(directory, "va.bin"))
+                    || File.Exists(Path.Combine(directory, "ve.bin")));
+        }
+
+        static bool HasLegacyNeutrinoV2ModelSubdirectory(string directory) {
+            return Directory.Exists(directory)
+                && Directory.EnumerateDirectories(directory).Any(HasLegacyNeutrinoV2ModelFiles);
         }
 
         public static void ParseCharacterTxt(Voicebank voicebank, Stream stream, string filePath, string basePath, Encoding encoding) {

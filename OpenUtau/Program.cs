@@ -11,6 +11,7 @@ using Avalonia.Media;
 using Avalonia.ReactiveUI;
 using OpenUtau.App.ViewModels;
 using OpenUtau.Core;
+using OpenUtau.Core.Util;
 using Serilog;
 
 namespace OpenUtau.App {
@@ -20,6 +21,7 @@ namespace OpenUtau.App {
         // yet and stuff might break.
         [STAThread]
         public static void Main(string[] args) {
+            OnnxRuntimeLibraryLoader.ConfigureCudaRuntimeIfRequested();
             Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
             InitLogging();
             string processName = Process.GetCurrentProcess().ProcessName;

@@ -59,6 +59,46 @@ namespace OpenUtau.App.Views {
             LoadingWindow.EndLoading();
         }
 
+        void OpenCudaFolder(object sender, RoutedEventArgs e) {
+            OpenExistingFolder(viewModel!.CudaPath);
+        }
+
+        void ResetCudaPath(object sender, RoutedEventArgs e) {
+            viewModel!.SetCudaPath(string.Empty);
+        }
+
+        async void SelectCudaPath(object sender, RoutedEventArgs e) {
+            var path = await FilePicker.OpenFolder(this, "CUDA", viewModel!.CudaPath);
+            if (!string.IsNullOrEmpty(path) && Directory.Exists(path)) {
+                viewModel!.SetCudaPath(path);
+            }
+        }
+
+        void OpenCudnnFolder(object sender, RoutedEventArgs e) {
+            OpenExistingFolder(viewModel!.CudnnPath);
+        }
+
+        void ResetCudnnPath(object sender, RoutedEventArgs e) {
+            viewModel!.SetCudnnPath(string.Empty);
+        }
+
+        async void SelectCudnnPath(object sender, RoutedEventArgs e) {
+            var path = await FilePicker.OpenFolder(this, "cuDNN", viewModel!.CudnnPath);
+            if (!string.IsNullOrEmpty(path) && Directory.Exists(path)) {
+                viewModel!.SetCudnnPath(path);
+            }
+        }
+
+        void OpenExistingFolder(string path) {
+            try {
+                if (Directory.Exists(path)) {
+                    OS.OpenFolder(path);
+                }
+            } catch (Exception ex) {
+                DocManager.Inst.ExecuteCmd(new ErrorMessageNotification(ex));
+            }
+        }
+
         void ResetVLabelerPath(object sender, RoutedEventArgs e) {
             viewModel!.SetVLabelerPath(string.Empty);
         }

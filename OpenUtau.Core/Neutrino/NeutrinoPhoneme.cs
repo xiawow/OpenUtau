@@ -13,6 +13,7 @@ namespace OpenUtau.Core.Neutrino {
     /// </summary>
     public static class NeutrinoPhoneme {
         public const int PAU = 0;
+        public const int BR = 3;
         public const int VR = 26;
         public const int PAD = 32;
         public const int AP = 41;
@@ -298,6 +299,17 @@ namespace OpenUtau.Core.Neutrino {
 
         public static int[] KanaToPhonemeIds(string kana) {
             return KanaToPhonemes(kana).Select(p => GetPhonemeId(p)).ToArray();
+        }
+
+        public static string[] RenderPhoneToPhonemes(string phone) {
+            phone = phone?.Trim();
+            if (string.IsNullOrEmpty(phone)) {
+                return new[] { "pau" };
+            }
+            if (IsKnownPhoneme(phone)) {
+                return new[] { NormalizePhoneme(phone) };
+            }
+            return KanaToPhonemes(phone);
         }
 
         public static bool IsVowelPhoneme(string phoneme) {

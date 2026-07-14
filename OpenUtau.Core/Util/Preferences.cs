@@ -116,6 +116,7 @@ namespace OpenUtau.Core.Util {
                     if (!Onnx.getRunnerOptions().Contains(Default.OnnxRunner)) Default.OnnxRunner = string.Empty;
                     Default.HifiNeuralMelEnhanceMode = HifiRenderConfig.NormalizeMelEnhanceMode(Default.HifiNeuralMelEnhanceMode);
                     Default.HifiNeuralHnsepRunner = HifiHnsepOnnx.NormalizeRunner(Default.HifiNeuralHnsepRunner);
+                    Default.NeutrinoLegacyV2RenderQuality = Math.Clamp(Default.NeutrinoLegacyV2RenderQuality, 0, 2);
                     if (Default.Theme != null) {
                         Default.ThemeName = Default.Theme switch {
                             1 => "Dark",
@@ -162,6 +163,8 @@ namespace OpenUtau.Core.Util {
             public int WorldlineR = 0;
             public string OnnxRunner = string.Empty;
             public int OnnxGpu = 0;
+            public string CudaPath = string.Empty;
+            public string CudnnPath = string.Empty;
             public double DiffSingerDepth = 1.0;
             public int DiffSingerSteps = 20;
             public int DiffSingerStepsVariance = 20;
@@ -171,6 +174,7 @@ namespace OpenUtau.Core.Util {
             public string HifiNeuralMelEnhanceMode = HifiRenderConfig.MelEnhanceNone;
             public string HifiNeuralHnsepRunner = HifiHnsepOnnx.RunnerCpu;
             public bool HifiNeuralDebugExportEnabled = false;
+            public int NeutrinoLegacyV2RenderQuality = 1;
             public bool SkipRenderingMutedTracks = false;
             public string Language = string.Empty;
             public string? SortingOrder = null;
