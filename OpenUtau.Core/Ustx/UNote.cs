@@ -26,6 +26,7 @@ namespace OpenUtau.Core.Ustx {
 
         public List<UExpression> phonemeExpressions = new List<UExpression>();
         public List<UPhonemeOverride> phonemeOverrides = new List<UPhonemeOverride>();
+        public Dictionary<string, string>? rendererSettings;
 
         [YamlIgnore] public int End => position + duration;
         /// <summary>
@@ -89,6 +90,27 @@ namespace OpenUtau.Core.Ustx {
                 .OrderBy(exp => exp.index)
                 .ThenBy(exp => exp.abbr)
                 .ToList();
+            if (rendererSettings?.Count == 0) {
+                rendererSettings = null;
+            }
+        }
+
+        public string? GetRendererSetting(string key) {
+            return rendererSettings != null && rendererSettings.TryGetValue(key, out var value)
+                ? value
+                : null;
+        }
+
+        public void SetRendererSetting(string key, string? value) {
+            if (string.IsNullOrWhiteSpace(value)) {
+                rendererSettings?.Remove(key);
+                if (rendererSettings?.Count == 0) {
+                    rendererSettings = null;
+                }
+                return;
+            }
+            rendererSettings ??= new Dictionary<string, string>(StringComparer.Ordinal);
+            rendererSettings[key] = value;
         }
 
         public void Validate(ValidateOptions options, UProject project, UTrack track, UVoicePart part) {
@@ -262,7 +284,11 @@ namespace OpenUtau.Core.Ustx {
                 PhonemizerOverride = PhonemizerOverride,
                 phonemeExpressions = phonemeExpressions.Select(exp => exp.Clone()).ToList(),
                 phonemeOverrides = phonemeOverrides.Select(o => o.Clone()).ToList(),
-                phonemeIndexes = (int[])phonemeIndexes.Clone()
+                phonemeIndexes = (int[])phonemeIndexes.Clone(),
+                rendererSettings = rendererSettings?.ToDictionary(
+                    pair => pair.Key,
+                    pair => pair.Value,
+                    StringComparer.Ordinal),
             };
         }
     }

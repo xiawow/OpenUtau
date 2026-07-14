@@ -1,0 +1,228 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:c="clr-namespace:OpenUtau.App.Controls"
+        x:Class="OpenUtau.App.Views.HifiHnSpectralDesignerDialog"
+        Icon="/Assets/open-utau.ico"
+        Title="{DynamicResource hifi.hn.title}"
+        Width="900" Height="680" MinWidth="720" MinHeight="540"
+        WindowStartupLocation="CenterOwner">
+  <Window.Styles>
+    <Style Selector="TextBlock.hint">
+      <Setter Property="FontSize" Value="11"/>
+      <Setter Property="Foreground" Value="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+    </Style>
+    <Style Selector="TextBlock.value">
+      <Setter Property="FontSize" Value="11"/>
+      <Setter Property="FontFamily" Value="monospace"/>
+    </Style>
+    <Style Selector="TextBox.parameter">
+      <Setter Property="Width" Value="76"/>
+      <Setter Property="MinHeight" Value="27"/>
+      <Setter Property="Padding" Value="6,2"/>
+      <Setter Property="FontFamily" Value="monospace"/>
+      <Setter Property="HorizontalContentAlignment" Value="Right"/>
+      <Setter Property="Background" Value="{DynamicResource SystemControlBackgroundAltHighBrush}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource SystemControlForegroundBaseMediumBrush}"/>
+    </Style>
+    <Style Selector="Button.bandNav">
+      <Setter Property="Width" Value="30"/>
+      <Setter Property="Height" Value="30"/>
+      <Setter Property="Padding" Value="0"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="Background" Value="{DynamicResource SystemControlBackgroundBaseLowBrush}"/>
+    </Style>
+    <Style Selector="Slider">
+      <Setter Property="Margin" Value="0"/>
+    </Style>
+  </Window.Styles>
+
+  <Border Margin="{Binding $parent.WindowDecorationMargin}">
+    <Grid Margin="12" RowDefinitions="*,10,Auto">
+      <Border Grid.Row="0" MinHeight="400" CornerRadius="9" ClipToBounds="True"
+              BorderThickness="1" BorderBrush="{DynamicResource SystemControlForegroundBaseMediumBrush}">
+        <Grid>
+          <c:HifiHnBalanceGraph
+              Bands="{Binding Bands}"
+              SelectedBandIndex="{Binding SelectedBandIndex, Mode=TwoWay}"
+              IsEnabled="{Binding Enabled}"
+              PlotBackground="{DynamicResource SystemControlBackgroundAltHighBrush}"
+              GridLineBrush="{DynamicResource TickLineBrushLow}"
+              ZeroLineBrush="{DynamicResource SystemControlForegroundBaseMediumBrush}"
+              CurveBrush="{DynamicResource AccentBrush1}"
+              HarmonicBrush="{DynamicResource AccentBrush1}"
+              NoiseBrush="{DynamicResource AccentBrush2}"
+              SelectionBrush="{DynamicResource SystemControlForegroundBaseHighBrush}"
+              FocusGuideBrush="{DynamicResource AccentBrush1Semi}"/>
+
+          <StackPanel Margin="14" MaxWidth="300" HorizontalAlignment="Left" VerticalAlignment="Top" Spacing="3"
+                      IsHitTestVisible="False">
+            <StackPanel Orientation="Horizontal" Spacing="10">
+              <TextBlock FontSize="15" FontWeight="SemiBold" Text="{DynamicResource hifi.hn.title}"/>
+              <TextBlock Classes="hint" VerticalAlignment="Center" Text="{Binding SelectionCompactText}"/>
+            </StackPanel>
+            <TextBlock Classes="hint" MaxWidth="300" TextTrimming="CharacterEllipsis"
+                       Text="{DynamicResource hifi.hn.balance.tip}"/>
+            <StackPanel Orientation="Horizontal" Spacing="14">
+              <StackPanel Orientation="Horizontal" Spacing="4">
+                <TextBlock Foreground="{DynamicResource AccentBrush1}" Text="↑"/>
+                <TextBlock Foreground="{DynamicResource AccentBrush1}" Text="{DynamicResource hifi.hn.harmonic}"/>
+              </StackPanel>
+              <StackPanel Orientation="Horizontal" Spacing="4">
+                <TextBlock Foreground="{DynamicResource AccentBrush2}" Text="↓"/>
+                <TextBlock Foreground="{DynamicResource AccentBrush2}" Text="{DynamicResource hifi.hn.noise}"/>
+              </StackPanel>
+            </StackPanel>
+          </StackPanel>
+
+          <StackPanel Margin="0,12,12,0" HorizontalAlignment="Right" VerticalAlignment="Top"
+                      Orientation="Horizontal" Spacing="8">
+            <Border Height="38" CornerRadius="7" BorderThickness="1"
+                    BorderBrush="{DynamicResource SystemControlForegroundBaseMediumBrush}"
+                    Background="{DynamicResource SystemControlBackgroundAltHighBrush}">
+              <StackPanel Margin="10,0" Orientation="Horizontal" Spacing="7" VerticalAlignment="Center">
+                <TextBlock Classes="hint" VerticalAlignment="Center" Text="{DynamicResource hifi.hn.enabled}"/>
+                <ToggleSwitch IsChecked="{Binding Enabled}">
+                  <ToggleSwitch.Styles>
+                    <Style Selector="TextBlock"><Setter Property="IsVisible" Value="False"/></Style>
+                  </ToggleSwitch.Styles>
+                </ToggleSwitch>
+              </StackPanel>
+            </Border>
+
+            <Border Height="38" CornerRadius="7" BorderThickness="1"
+                    BorderBrush="{DynamicResource SystemControlForegroundBaseMediumBrush}"
+                    Background="{DynamicResource SystemControlBackgroundAltHighBrush}">
+              <Grid ColumnDefinitions="Auto,Auto">
+                <Button x:Name="DynamicsPanelToggle" Grid.Column="0"
+                        Height="36" Padding="10,0" BorderThickness="0"
+                        HorizontalContentAlignment="Left" VerticalContentAlignment="Center"
+                        Background="Transparent" Click="OnToggleDynamics"
+                        ToolTip.Tip="{DynamicResource hifi.hn.dynamics.tip}">
+                  <StackPanel Orientation="Horizontal" Spacing="7" IsHitTestVisible="False">
+                    <TextBlock FontWeight="SemiBold" VerticalAlignment="Center"
+                               Text="{DynamicResource hifi.hn.dynamics}"/>
+                    <TextBlock Width="12" HorizontalAlignment="Center" FontSize="9"
+                               VerticalAlignment="Center" Text="{Binding DynamicsPanelChevron}"/>
+                  </StackPanel>
+                </Button>
+                <StackPanel Grid.Column="1" Margin="4,0,9,0" Orientation="Horizontal"
+                            Spacing="6" VerticalAlignment="Center">
+                  <TextBlock Classes="hint" VerticalAlignment="Center" Text="{DynamicResource hifi.hn.enabled}"/>
+                  <ToggleSwitch IsChecked="{Binding DynamicsEnabled}">
+                    <ToggleSwitch.Styles>
+                      <Style Selector="TextBlock"><Setter Property="IsVisible" Value="False"/></Style>
+                    </ToggleSwitch.Styles>
+                  </ToggleSwitch>
+                </StackPanel>
+              </Grid>
+            </Border>
+          </StackPanel>
+
+          <Border x:Name="DynamicsPanel" Margin="72,52,12,0" MaxWidth="680"
+                  HorizontalAlignment="Right" VerticalAlignment="Top"
+                  Height="{Binding DynamicsPanelHeight}"
+                  Opacity="{Binding DynamicsPanelOpacity}"
+                  IsHitTestVisible="{Binding DynamicsPanelExpanded}"
+                  CornerRadius="8" BorderThickness="1"
+                  BorderBrush="{DynamicResource SystemControlForegroundBaseMediumBrush}"
+                  Background="{DynamicResource SystemControlBackgroundAltHighBrush}"
+                  ClipToBounds="True">
+            <Border.Transitions>
+              <Transitions>
+                <DoubleTransition Property="Height" Duration="0:0:0.18"/>
+                <DoubleTransition Property="Opacity" Duration="0:0:0.14"/>
+              </Transitions>
+            </Border.Transitions>
+            <Grid Margin="12,8" RowDefinitions="Auto,8,Auto"
+                  IsEnabled="{Binding DynamicsEnabled}">
+              <Grid Grid.Row="0" ColumnDefinitions="*,190">
+                <TextBlock VerticalAlignment="Center" Text="{DynamicResource hifi.hn.dynamics.target}"/>
+                <ComboBox Grid.Column="1" ItemsSource="{Binding DynamicsTargets}"
+                          SelectedIndex="{Binding DynamicsTargetIndex}"/>
+              </Grid>
+              <Grid Grid.Row="2" ColumnDefinitions="*,10,*,10,*,10,*,10,*">
+                <StackPanel Grid.Column="0">
+                  <Grid ColumnDefinitions="*,Auto"><TextBlock Text="{DynamicResource hifi.hn.threshold}"/><TextBlock Grid.Column="1" Classes="value" Text="{Binding ThresholdDb, StringFormat={}{0:F0} dB}"/></Grid>
+                  <Slider Classes="fader" Minimum="-60" Maximum="0" Value="{Binding ThresholdDb}"/>
+                </StackPanel>
+                <StackPanel Grid.Column="2">
+                  <Grid ColumnDefinitions="*,Auto"><TextBlock Text="{DynamicResource hifi.hn.ratio}"/><TextBlock Grid.Column="1" Classes="value" Text="{Binding Ratio, StringFormat={}{0:F1}:1}"/></Grid>
+                  <Slider Classes="fader" Minimum="1" Maximum="12" Value="{Binding Ratio}"/>
+                </StackPanel>
+                <StackPanel Grid.Column="4">
+                  <Grid ColumnDefinitions="*,Auto"><TextBlock Text="{DynamicResource hifi.hn.attack}"/><TextBlock Grid.Column="1" Classes="value" Text="{Binding AttackMs, StringFormat={}{0:F0} ms}"/></Grid>
+                  <Slider Classes="fader" Minimum="1" Maximum="100" Value="{Binding AttackMs}"/>
+                </StackPanel>
+                <StackPanel Grid.Column="6">
+                  <Grid ColumnDefinitions="*,Auto"><TextBlock Text="{DynamicResource hifi.hn.release}"/><TextBlock Grid.Column="1" Classes="value" Text="{Binding ReleaseMs, StringFormat={}{0:F0} ms}"/></Grid>
+                  <Slider Classes="fader" Minimum="10" Maximum="600" Value="{Binding ReleaseMs}"/>
+                </StackPanel>
+                <StackPanel Grid.Column="8">
+                  <Grid ColumnDefinitions="*,Auto"><TextBlock Text="{DynamicResource hifi.hn.reduction}"/><TextBlock Grid.Column="1" Classes="value" Text="{Binding MaxReductionDb, StringFormat={}{0:F0} dB}"/></Grid>
+                  <Slider Classes="fader" Minimum="0" Maximum="18" Value="{Binding MaxReductionDb}"/>
+                </StackPanel>
+              </Grid>
+            </Grid>
+          </Border>
+
+          <Border Margin="14" MaxWidth="650" Height="82"
+                  HorizontalAlignment="Center" VerticalAlignment="Bottom"
+                  Opacity="{Binding SelectedBandOpacity}"
+                  IsEnabled="{Binding HasSelectedBand}"
+                  IsHitTestVisible="{Binding HasSelectedBand}"
+                  CornerRadius="8" BorderThickness="1"
+                  BorderBrush="{DynamicResource SystemControlForegroundBaseMediumBrush}"
+                  Background="{DynamicResource SystemControlBackgroundAltHighBrush}">
+            <Border.Transitions>
+              <Transitions>
+                <DoubleTransition Property="Opacity" Duration="0:0:0.17"/>
+              </Transitions>
+            </Border.Transitions>
+            <Grid Margin="10,8"
+                  ColumnDefinitions="Auto,8,90,8,Auto,18,130,18,*,18,Auto">
+              <Button Grid.Column="0" Classes="bandNav" Click="OnPreviousBand" Content="&lt;"
+                      ToolTip.Tip="{DynamicResource hifi.hn.previous}"/>
+              <TextBlock Grid.Column="2" FontSize="14" FontWeight="SemiBold"
+                         Foreground="{DynamicResource AccentBrush1}"
+                         VerticalAlignment="Center" Text="{Binding SelectedBandTitle}"/>
+              <Button Grid.Column="4" Classes="bandNav" Click="OnNextBand" Content=">"
+                      ToolTip.Tip="{DynamicResource hifi.hn.next}"/>
+
+              <StackPanel Grid.Column="6" VerticalAlignment="Center" Spacing="2">
+                <TextBlock Classes="hint" Text="{DynamicResource hifi.hn.frequency}"/>
+                <Grid ColumnDefinitions="Auto,5,Auto">
+                  <TextBox Classes="parameter" Text="{Binding SelectedFrequencyHz, Mode=TwoWay}"/>
+                  <TextBlock Grid.Column="2" Classes="hint" VerticalAlignment="Center" Text="Hz"/>
+                </Grid>
+              </StackPanel>
+
+              <Grid Grid.Column="8" VerticalAlignment="Center" RowDefinitions="Auto,4,18">
+                <Grid Grid.Row="0" ColumnDefinitions="*,Auto,5,Auto">
+                  <TextBlock Classes="hint" VerticalAlignment="Center" Text="{DynamicResource hifi.hn.amount}"/>
+                  <TextBox Grid.Column="1" Classes="parameter" Width="68"
+                           Text="{Binding SelectedBalancePercent, Mode=TwoWay, StringFormat={}{0:F0}}"/>
+                  <TextBlock Grid.Column="3" Classes="hint" VerticalAlignment="Center" Text="%"/>
+                </Grid>
+                <Slider x:Name="BalanceSlider" Grid.Row="2" Classes="fader" Height="18" VerticalAlignment="Center"
+                        Minimum="-100" Maximum="100" TickFrequency="1"
+                        Value="{Binding SelectedBalancePercent, Mode=TwoWay}"/>
+              </Grid>
+
+              <Button Grid.Column="10" MinWidth="54" VerticalAlignment="Center"
+                      Click="OnResetSelectedBand" Content="{DynamicResource hifi.hn.zero}"
+                      ToolTip.Tip="{DynamicResource hifi.hn.zero.tip}"/>
+            </Grid>
+          </Border>
+        </Grid>
+      </Border>
+
+      <Grid Grid.Row="2" ColumnDefinitions="*,Auto,8,Auto,8,Auto">
+        <TextBlock Grid.Column="0" Classes="hint" VerticalAlignment="Center"
+                   Text="{DynamicResource hifi.hn.save.tip}"/>
+        <Button Grid.Column="1" MinWidth="86" Click="OnReset" Content="{DynamicResource button.reset}"/>
+        <Button Grid.Column="3" MinWidth="86" Click="OnClose" Content="{DynamicResource hifi.hn.close}"/>
+        <Button Grid.Column="5" MinWidth="110" Click="OnApply" Content="{DynamicResource button.apply}"/>
+      </Grid>
+    </Grid>
+  </Border>
+</Window>

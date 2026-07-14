@@ -38,12 +38,16 @@ namespace OpenUtau.Core.HifiNeural {
         const double SustainTextureMaxStepFrames = SustainTextureNaturalStepFrames * 1.35;
         const double SustainTextureBodyAmount = 0.88;
         const double SustainTextureBodyClamp = 0.22;
-        const double SustainTextureBodyLowBandResidual = 0.42;
+        const double SustainTextureBodyLowBandResidual = 0.06;
+        const double SustainTextureBodyHighBandResidual = 0.36;
+        const double SustainResidualLowFrequencyHz = 1300.0;
+        const double SustainResidualHighFrequencyHz = 5200.0;
         const int StableLoopMinStableFrames = 8;
         const int StableLoopMinOutputFrames = 14;
         const double StableLoopBodyAmount = 0.78;
         const double StableLoopResidualClamp = 0.18;
-        const double StableLoopLowBandWeight = 0.36;
+        const double StableLoopLowBandWeight = 0.06;
+        const double StableLoopHighBandWeight = 0.32;
         const double StableLoopStepDriftFrames = 0.28;
         const int StableLoopPoolSwitchMinFrames = 18;
         const double StableLoopPoolSwitchBlendPortion = 0.28;
@@ -63,8 +67,17 @@ namespace OpenUtau.Core.HifiNeural {
         const double F0MelCompDbPerOctave = 0.95;
         const double F0MelCompHighBandExtra = 0.30;
         const double F0MelCompMaxCutDb = 2.4;
-        const double F0MelCompReferenceCapHz = 330.0;
         const int F0MelCompSmoothHalfFrames = 4;
+        const double HarmonicSmoothMinCents = 150.0;
+        const double HarmonicSmoothMaxCents = 700.0;
+        const double HarmonicSmoothMaxBlend = 0.60;
+        const int HarmonicSmoothBinRadius = 2;
+        const double HarmonicSmoothFullHz = 900.0;
+        const double HarmonicSmoothZeroHz = 1300.0;
+        const double SourceReferenceMinHz = 70.0;
+        const double SourceReferenceMaxHz = 800.0;
+        const int BoundarySmoothRadius = 2;
+        const float BoundarySmoothMaxStrength = 0.30f;
         const double SourceFrameMs = 1000.0 * HifiMelExtractor.OriginHopSize / HifiMelExtractor.SampleRate;
         const double SourceSampleMs = 1000.0 / HifiMelExtractor.SampleRate;
         const int MinSourceSamples = MinSourceFrames * HifiMelExtractor.OriginHopSize;
@@ -120,6 +133,11 @@ namespace OpenUtau.Core.HifiNeural {
         }
 
         public HifiPhraseFeatures Build(RenderPhrase phrase, RenderResult layout) {
+            return Build(phrase, layout, HifiRenderContext.None);
+        }
+
+        public HifiPhraseFeatures Build(RenderPhrase phrase, RenderResult layout, HifiRenderContext context) {
+            context.ThrowIfCancellationRequested();
             double phraseStartMs = layout.positionMs - layout.leadingMs;
             int targetFrames = Math.Max(1, (int)Math.Ceiling(layout.estimatedLengthMs / HifiF0Builder.FrameMs));
             float[] f0 = f0Builder.Build(phrase, targetFrames, phraseStartMs);
@@ -132,13 +150,18 @@ namespace OpenUtau.Core.HifiNeural {
             // overlap cross-fades. Replaces the previous SharpWavtool rough + variable-position
             // mel sampling, which broke VCV/CVVC vowel boundaries under stretch.
             var sourceCache = new Dictionary<string, float[]>(StringComparer.OrdinalIgnoreCase);
-            float[,] alignedMel = melAssembler.Build(phrase, phraseStartMs, targetFrames, f0, sourceCache, out var assemblyReport);
+            float[,] alignedMel = melAssembler.Build(phrase, phraseStartMs, targetFrames, f0, sourceCache, out var assemblyReport, context);
+            context.ThrowIfCancellationRequested();
 
             // NOTE: F0 is kept continuous across consonants on purpose. This NSF vocoder produces
             // silence (not noise) when F0 == 0, so masking the consonant F0 made those frames go
             // dead/mute. The consonant's unvoiced character comes from its mel spectrum; the F0
             // there just needs to be a smooth continuation of the neighbouring vowels' pitch.
-            ApplyF0MelCompensation(alignedMel, f0);
+            using (HifiRenderProfiler.Measure(HifiRenderStage.FeaturePost)) {
+                float[] sourceReferenceF0 = BuildSourceReferenceF0(assemblyReport, targetFrames);
+                ApplyF0MelCompensation(alignedMel, f0, sourceReferenceF0);
+                ApplyBoundaryTemporalSmoothing(alignedMel, assemblyReport);
+            }
 
             double targetDurationMs = targetFrames * HifiF0Builder.FrameMs;
             Log.Information(
@@ -219,7 +242,8 @@ namespace OpenUtau.Core.HifiNeural {
             int sourceFrames,
             int outputFrames,
             RenderPhone phone,
-            double autoLeadCatchupMs = 0) {
+            double autoLeadCatchupMs = 0,
+            int activeSourceFrames = 0) {
             var map = new double[Math.Max(0, outputFrames)];
             if (map.Length == 0) {
                 return map;
@@ -227,6 +251,16 @@ namespace OpenUtau.Core.HifiNeural {
             sourceFrames = Math.Max(1, sourceFrames);
             int sourceStartOffsetFrames = ResolveSourceStartOffsetFrames(sourceFrames, phone, autoLeadCatchupMs);
             int mappedSourceFrames = Math.Max(1, sourceFrames - sourceStartOffsetFrames);
+            if (activeSourceFrames > 0) {
+                // Mirror the inactive-tail trim in WritePhoneMappedSegment so the HNSEP parameter
+                // projection stays aligned with the actual mel mapping when a slice has dead tail.
+                var initialTiming = BuildPhoneTimingPlan(mappedSourceFrames, outputFrames, phone, sourceStartOffsetFrames * SourceFrameMs);
+                mappedSourceFrames = ApplyWaveformSourceTailTrim(
+                    mappedSourceFrames,
+                    sourceStartOffsetFrames,
+                    activeSourceFrames,
+                    initialTiming.SourceLeadFrames);
+            }
             var timing = BuildPhoneTimingPlan(mappedSourceFrames, outputFrames, phone, sourceStartOffsetFrames * SourceFrameMs);
             if (outputFrames <= 2) {
                 WriteCompactPhoneFrameMap(map, 0, outputFrames, mappedSourceFrames, timing.SourceLeadFrames);
@@ -510,7 +544,9 @@ namespace OpenUtau.Core.HifiNeural {
             float[]? sourceSamples,
             double sourceKeyShiftSemitones = 0,
             int sustainMode = HifiSustainModes.Auto,
-            double autoLeadCatchupMs = 0) {
+            double autoLeadCatchupMs = 0,
+            int activeSourceFrames = 0,
+            int sourceToneOverride = 0) {
             sourceFrames = Math.Max(1, Math.Min(sourceFrames, sourceMel.GetLength(1) - sourceStart));
             outputFrames = Math.Max(1, Math.Min(outputFrames, output.GetLength(1) - outputStart));
             int sourceStartOffsetFrames = ResolveSourceStartOffsetFrames(sourceFrames, phone, autoLeadCatchupMs);
@@ -520,8 +556,14 @@ namespace OpenUtau.Core.HifiNeural {
             }
             double sourceStartOffsetMs = sourceStartOffsetFrames * SourceFrameMs;
             var initialTiming = BuildPhoneTimingPlan(sourceFrames, outputFrames, phone, sourceStartOffsetMs);
-            sourceFrames = TrimInactiveTailFrames(sourceMel, sourceStart, sourceFrames, initialTiming.SourceLeadFrames, phone.phoneme);
+            // With a waveform-derived active-frame hint the trim uses the same numbers as the HNSEP
+            // parameter projection (see BuildPhoneTargetToSourceFrameMap); the mel-energy trim stays
+            // as the fallback for callers without source samples.
+            sourceFrames = activeSourceFrames > 0
+                ? ApplyWaveformSourceTailTrim(sourceFrames, sourceStartOffsetFrames, activeSourceFrames, initialTiming.SourceLeadFrames)
+                : TrimInactiveTailFrames(sourceMel, sourceStart, sourceFrames, initialTiming.SourceLeadFrames, phone.phoneme);
             var timing = BuildPhoneTimingPlan(sourceFrames, outputFrames, phone, sourceStartOffsetMs);
+            int effectiveSourceTone = sourceToneOverride > 0 ? sourceToneOverride : phone.tone;
             if (outputFrames <= 2) {
                 WriteCompactPhoneRegion(sourceMel, sourceStart, sourceFrames, output, outputStart, outputFrames, timing.SourceLeadFrames);
                 return new PhoneMapReport(false, "compact_short_target", 0, 0, timing.SourceSoftSkipMs, sourceStartOffsetFrames);
@@ -557,7 +599,7 @@ namespace OpenUtau.Core.HifiNeural {
                 phone.phoneme,
                 timing.SourceVowelOnsetFrames,
                 sourceSamples,
-                phone.tone,
+                effectiveSourceTone,
                 sourceKeyShiftSemitones,
                 sustainMode);
 
@@ -744,61 +786,187 @@ namespace OpenUtau.Core.HifiNeural {
             ResolveVowelSections(vowelSourceFrames, preferredOnsetFrames: -1, out onsetFrames, out releaseFrames, out sustainFrames);
         }
 
-        static void ApplyF0MelCompensation(float[,] mel, float[] f0) {
+        /// <summary>
+        /// Per-frame pitch-mismatch compensation. The mel comes from an unshifted recording, so
+        /// when the target F0 rises above the pitch that recording was sung at, the NSF vocoder
+        /// packs more excitation energy under the same envelope (cut highs progressively) and the
+        /// low mel bins carry harmonic peaks at the wrong spacing (blend toward a locally smoothed
+        /// envelope so only the formant shape remains). The reference is the estimated recording
+        /// pitch of the phone that owns each frame, not a phrase-relative percentile, so the same
+        /// note renders with the same brightness regardless of what else is in the phrase.
+        /// </summary>
+        static void ApplyF0MelCompensation(float[,] mel, float[] f0, float[] sourceReferenceF0) {
             int frames = Math.Min(mel.GetLength(1), f0.Length);
             if (frames <= 0) {
                 return;
             }
 
-            var voiced = new List<double>(frames);
-            for (int i = 0; i < frames; i++) {
-                float hz = f0[i];
-                if (hz >= 55 && hz <= 1400 && !float.IsNaN(hz) && !float.IsInfinity(hz)) {
-                    voiced.Add(hz);
-                }
-            }
-            if (voiced.Count < 4) {
-                return;
-            }
-
-            double referenceF0 = Math.Min(Percentile(voiced, 0.45), F0MelCompReferenceCapHz);
-            if (referenceF0 <= 0 || !IsFinite(referenceF0)) {
-                return;
-            }
-
             var desiredCutDb = new double[frames];
+            var desiredHarmonicBlend = new double[frames];
+            bool anyAdjustment = false;
             for (int t = 0; t < frames; t++) {
                 float hz = f0[t];
-                if (hz <= referenceF0 * 1.04 || hz < 55 || hz > 1400 || float.IsNaN(hz) || float.IsInfinity(hz)) {
+                if (hz < 55 || hz > 1400 || float.IsNaN(hz) || float.IsInfinity(hz)) {
                     continue;
                 }
-                double octaves = Math.Log(hz / referenceF0, 2.0);
-                desiredCutDb[t] = Math.Clamp(octaves * F0MelCompDbPerOctave, 0, F0MelCompMaxCutDb);
+                double reference = t < sourceReferenceF0.Length ? sourceReferenceF0[t] : 0;
+                if (reference <= 0 || !IsFinite(reference)) {
+                    continue;
+                }
+                if (hz > reference * 1.04) {
+                    double octaves = Math.Log(hz / reference, 2.0);
+                    desiredCutDb[t] = Math.Clamp(octaves * F0MelCompDbPerOctave, 0, F0MelCompMaxCutDb);
+                }
+                double cents = Math.Abs(1200.0 * Math.Log(hz / reference, 2.0));
+                if (cents > HarmonicSmoothMinCents) {
+                    desiredHarmonicBlend[t] = HarmonicSmoothMaxBlend * SmoothStep(
+                        (cents - HarmonicSmoothMinCents) / (HarmonicSmoothMaxCents - HarmonicSmoothMinCents));
+                }
+                anyAdjustment |= desiredCutDb[t] > 1e-4 || desiredHarmonicBlend[t] > 1e-4;
+            }
+            if (!anyAdjustment) {
+                return;
             }
 
             double[] cutDb = SmoothPositiveEnvelope(desiredCutDb, F0MelCompSmoothHalfFrames);
+            double[] harmonicBlend = SmoothPositiveEnvelope(desiredHarmonicBlend, F0MelCompSmoothHalfFrames);
             int bins = mel.GetLength(0);
+            var lowBinWeight = BuildHarmonicSmoothBinWeights(bins);
+            var column = new float[bins];
             int cutFrames = 0;
             double maxCut = 0;
+            int smoothedFrames = 0;
             for (int t = 0; t < frames; t++) {
                 double baseCut = cutDb[t];
-                if (baseCut <= 1e-4) {
+                if (baseCut > 1e-4) {
+                    cutFrames++;
+                    maxCut = Math.Max(maxCut, baseCut);
+                    for (int m = 0; m < bins; m++) {
+                        double highWeight = SmoothStep((m - 42) / (double)Math.Max(1, bins - 42));
+                        double totalCutDb = Math.Min(F0MelCompMaxCutDb + 0.6, baseCut * (1.0 + F0MelCompHighBandExtra * highWeight));
+                        mel[m, t] -= (float)(totalCutDb * Math.Log(10.0) / 20.0);
+                    }
+                }
+                double blend = harmonicBlend[t];
+                if (blend <= 1e-3) {
                     continue;
                 }
-                cutFrames++;
-                maxCut = Math.Max(maxCut, baseCut);
+                smoothedFrames++;
                 for (int m = 0; m < bins; m++) {
-                    double highWeight = SmoothStep((m - 42) / (double)Math.Max(1, bins - 42));
-                    double totalCutDb = Math.Min(F0MelCompMaxCutDb + 0.6, baseCut * (1.0 + F0MelCompHighBandExtra * highWeight));
-                    mel[m, t] -= (float)(totalCutDb * Math.Log(10.0) / 20.0);
+                    column[m] = mel[m, t];
+                }
+                for (int m = 0; m < bins; m++) {
+                    double w = blend * lowBinWeight[m];
+                    if (w <= 1e-4) {
+                        continue;
+                    }
+                    double sum = 0;
+                    double weightSum = 0;
+                    int first = Math.Max(0, m - HarmonicSmoothBinRadius);
+                    int last = Math.Min(bins - 1, m + HarmonicSmoothBinRadius);
+                    for (int k = first; k <= last; k++) {
+                        double distance = Math.Abs(k - m) / (double)(HarmonicSmoothBinRadius + 1);
+                        double weight = 0.5 + 0.5 * Math.Cos(Math.PI * distance);
+                        sum += column[k] * weight;
+                        weightSum += weight;
+                    }
+                    double smoothed = weightSum > 0 ? sum / weightSum : column[m];
+                    mel[m, t] = (float)(column[m] * (1.0 - w) + smoothed * w);
                 }
             }
-            if (cutFrames > 0) {
+            if (cutFrames > 0 || smoothedFrames > 0) {
                 Log.Information(
-                    "HifiPhraseFeatureBuilder f0_mel_compensation reference_f0={ReferenceF0:F2} cut_frames={CutFrames} max_cut_db={MaxCutDb:F2}",
-                    referenceF0,
+                    "HifiPhraseFeatureBuilder f0_mel_compensation cut_frames={CutFrames} max_cut_db={MaxCutDb:F2} harmonic_smoothed_frames={SmoothedFrames}",
                     cutFrames,
-                    maxCut);
+                    maxCut,
+                    smoothedFrames);
+            }
+        }
+
+        // Weight 1 below HarmonicSmoothFullHz, fading to 0 by HarmonicSmoothZeroHz: only the bins
+        // where individual source harmonics are resolved by the mel filterbank get smoothed.
+        static double[] BuildHarmonicSmoothBinWeights(int bins) {
+            var weights = new double[bins];
+            for (int m = 0; m < bins; m++) {
+                double centerHz = HifiMelExtractor.MelBinCenterHz(m);
+                if (centerHz <= HarmonicSmoothFullHz) {
+                    weights[m] = 1.0;
+                } else if (centerHz >= HarmonicSmoothZeroHz) {
+                    weights[m] = 0.0;
+                } else {
+                    weights[m] = 1.0 - SmoothStep((centerHz - HarmonicSmoothFullHz) / (HarmonicSmoothZeroHz - HarmonicSmoothFullHz));
+                }
+            }
+            return weights;
+        }
+
+        // Per-frame source recording pitch: each phone paints its estimated slice F0 (fallback:
+        // its note tone) over its frame span; edges extend outward so every frame has a reference.
+        static float[] BuildSourceReferenceF0(HifiMelAssemblyReport report, int frames) {
+            var reference = new float[Math.Max(0, frames)];
+            foreach (var phone in report.Phones) {
+                double hz = phone.SourceF0Hz > 0 ? phone.SourceF0Hz : MusicMath.ToneToFreq(phone.Tone);
+                if (hz <= 0 || !IsFinite(hz)) {
+                    continue;
+                }
+                float clamped = (float)Math.Clamp(hz, SourceReferenceMinHz, SourceReferenceMaxHz);
+                int start = Math.Clamp(phone.StartFrame, 0, reference.Length);
+                int end = Math.Clamp(phone.StartFrame + phone.FrameCount, start, reference.Length);
+                for (int t = start; t < end; t++) {
+                    reference[t] = clamped;
+                }
+            }
+            float previous = 0;
+            for (int t = 0; t < reference.Length; t++) {
+                if (reference[t] > 0) {
+                    previous = reference[t];
+                } else if (previous > 0) {
+                    reference[t] = previous;
+                }
+            }
+            float next = 0;
+            for (int t = reference.Length - 1; t >= 0; t--) {
+                if (reference[t] > 0) {
+                    next = reference[t];
+                } else if (next > 0) {
+                    reference[t] = next;
+                }
+            }
+            return reference;
+        }
+
+        /// <summary>
+        /// Light temporal smoothing applied only around phone boundaries so residual concat steps
+        /// after the fine-grid crossfade are softened without dulling consonant transients the way
+        /// a global smoother would.
+        /// </summary>
+        static void ApplyBoundaryTemporalSmoothing(float[,] mel, HifiMelAssemblyReport report) {
+            int frames = mel.GetLength(1);
+            if (frames < 3 || report.Boundaries.Count == 0) {
+                return;
+            }
+            var strength = new float[frames];
+            foreach (var boundary in report.Boundaries) {
+                for (int offset = -BoundarySmoothRadius; offset <= BoundarySmoothRadius; offset++) {
+                    int t = boundary.Frame + offset;
+                    if (t < 1 || t > frames - 2) {
+                        continue;
+                    }
+                    float s = BoundarySmoothMaxStrength * (1f - Math.Abs(offset) / (BoundarySmoothRadius + 1f));
+                    strength[t] = Math.Max(strength[t], s);
+                }
+            }
+            int bins = mel.GetLength(0);
+            var snapshot = (float[,])mel.Clone();
+            for (int t = 1; t < frames - 1; t++) {
+                float s = strength[t];
+                if (s <= 0) {
+                    continue;
+                }
+                for (int m = 0; m < bins; m++) {
+                    float smoothed = (snapshot[m, t - 1] + snapshot[m, t] * 2f + snapshot[m, t + 1]) * 0.25f;
+                    mel[m, t] = snapshot[m, t] * (1f - s) + smoothed * s;
+                }
             }
         }
 
@@ -821,18 +989,6 @@ namespace OpenUtau.Core.HifiNeural {
                 output[i] = weightSum > 0 ? sum / weightSum : Math.Max(0, values[i]);
             }
             return output;
-        }
-
-        static double Percentile(List<double> values, double percentile) {
-            if (values.Count == 0) {
-                return 0;
-            }
-            values.Sort();
-            double index = Math.Clamp(percentile, 0, 1) * (values.Count - 1);
-            int left = (int)Math.Floor(index);
-            int right = Math.Min(values.Count - 1, left + 1);
-            double alpha = index - left;
-            return values[left] + (values[right] - values[left]) * alpha;
         }
 
         static void ResolveVowelSections(int vowelSourceFrames, int preferredOnsetFrames, out int onsetFrames, out int releaseFrames, out int sustainFrames) {
@@ -1491,8 +1647,7 @@ namespace OpenUtau.Core.HifiNeural {
             if (bins <= 1) {
                 return StableLoopLowBandWeight;
             }
-            double high = SmoothStep((bin - 10) / (double)Math.Max(1, bins - 10));
-            return StableLoopLowBandWeight + (1.0 - StableLoopLowBandWeight) * high;
+            return ResidualWeightByMelFrequency(bin, StableLoopLowBandWeight, StableLoopHighBandWeight);
         }
 
         static double PositiveModulo(double value, double divisor) {
@@ -1501,6 +1656,31 @@ namespace OpenUtau.Core.HifiNeural {
             }
             double result = value % divisor;
             return result < 0 ? result + divisor : result;
+        }
+
+        static ulong HashFloatArray(float[] values) {
+            const ulong offset = 14695981039346656037UL;
+            const ulong prime = 1099511628211UL;
+            ulong hash = offset;
+            for (int i = 0; i < values.Length; i++) {
+                hash ^= unchecked((uint)BitConverter.SingleToInt32Bits(values[i]));
+                hash *= prime;
+            }
+            return hash;
+        }
+
+        static ulong HashDoubleArray(double[] values) {
+            const ulong offset = 14695981039346656037UL;
+            const ulong prime = 1099511628211UL;
+            ulong hash = offset;
+            for (int i = 0; i < values.Length; i++) {
+                ulong bits = unchecked((ulong)BitConverter.DoubleToInt64Bits(values[i]));
+                hash ^= (uint)bits;
+                hash *= prime;
+                hash ^= bits >> 32;
+                hash *= prime;
+            }
+            return hash;
         }
 
         static bool TryWriteWaveformSustainTexture(
@@ -1548,7 +1728,23 @@ namespace OpenUtau.Core.HifiNeural {
                 positions[t] = Math.Clamp(MelFrameToSampleCenter(absoluteSourceFrame), 0, sourceSamples.Length - 1);
             }
 
-            float[,] waveformTextureMel = sustainMelExtractor.ExtractAtPositions(sourceSamples, positions, sourceKeyShiftSemitones);
+            string textureCacheKey = string.Concat(
+                "sustain-mel-v1-nfft", HifiMelExtractor.Nfft,
+                "-mels", HifiMelExtractor.NMels,
+                "|samples", sourceSamples.Length, "-", HashFloatArray(sourceSamples).ToString("x16"),
+                "|positions", positions.Length, "-", HashDoubleArray(positions).ToString("x16"),
+                "|shift", BitConverter.DoubleToInt64Bits(sourceKeyShiftSemitones).ToString("x16"));
+            float[,] waveformTextureMel = HifiRenderMemoryCache.Shared.GetOrAdd(
+                textureCacheKey,
+                () => {
+                    using var timing = HifiRenderProfiler.Measure(HifiRenderStage.SustainMel);
+                    return sustainMelExtractor.ExtractAtPositions(sourceSamples, positions, sourceKeyShiftSemitones);
+                },
+                HifiRenderMemoryCache.FloatBytes,
+                out bool sustainMelCacheHit);
+            HifiRenderProfiler.Count(sustainMelCacheHit
+                ? HifiRenderCounter.SustainMelHit
+                : HifiRenderCounter.SustainMelMiss);
             if (waveformTextureMel.GetLength(1) != outputFrames) {
                 return false;
             }
@@ -1713,8 +1909,17 @@ namespace OpenUtau.Core.HifiNeural {
             if (bins <= 1) {
                 return SustainTextureBodyLowBandResidual;
             }
-            double high = SmoothStep((bin - 12) / (double)Math.Max(1, bins - 12));
-            return SustainTextureBodyLowBandResidual + (1.0 - SustainTextureBodyLowBandResidual) * high;
+            return ResidualWeightByMelFrequency(bin, SustainTextureBodyLowBandResidual, SustainTextureBodyHighBandResidual);
+        }
+
+        static double ResidualWeightByMelFrequency(int bin, double lowWeight, double highWeight) {
+            double centerHz = HifiMelExtractor.MelBinCenterHz(bin);
+            if (!IsFinite(centerHz)) {
+                return lowWeight;
+            }
+            double blend = SmoothStep((centerHz - SustainResidualLowFrequencyHz)
+                / Math.Max(1.0, SustainResidualHighFrequencyHz - SustainResidualLowFrequencyHz));
+            return lowWeight + (highWeight - lowWeight) * blend;
         }
 
         static void CopyMelColumn(float[,] mel, int frame, float[] output) {
@@ -1824,18 +2029,32 @@ namespace OpenUtau.Core.HifiNeural {
                 return stableStart;
             }
             double span = stableFrames - 1;
-            double center = stableStart + span * 0.5;
-            double wanderRange = Math.Max(0.5, span * Math.Clamp(0.18 + 0.05 * Math.Log(Math.Max(1.0, stretchRatio), 2.0), 0.18, 0.36));
-            double slow = SmoothWobble(targetFrame * 0.021, seed + 0.37);
-            double slower = SmoothWobble(targetFrame * 0.0067, seed + 1.11);
-            double detail = SmoothWobble(targetFrame * 0.113, seed + 2.73);
-            double wander = (slow * 0.55 + slower * 0.35 + detail * 0.10) * wanderRange;
-            return Math.Clamp(center + wander, stableStart, stableStart + span);
+            double baseStep = Math.Clamp(
+                span / Math.Max(1.0, targetFrames * 0.72),
+                0.22,
+                SustainTextureMaxStepFrames);
+            int segmentFrames = Math.Max(4, (int)Math.Ceiling((span + 1.0) / Math.Max(0.1, baseStep)));
+            double segment = Math.Floor(targetFrame / (double)segmentFrames);
+            double localFrame = targetFrame - segment * segmentFrames;
+
+            // The old texture cursor wandered around the stable center and could scan backward.
+            // Keep texture reads as short forward passes, then reseed the next pass instead of
+            // sweeping back through source vibrato/formant motion.
+            double startJitter = Math.Min(3.0, span * 0.18)
+                * (0.5 + 0.5 * SmoothWobble(segment * 0.73, seed + 0.37));
+            double stepScale = 1.0 + 0.10 * SmoothWobble(segment * 0.41, seed + 1.11);
+            double forward = startJitter + localFrame * Math.Max(0.12, baseStep * stepScale);
+            return stableStart + Math.Clamp(forward, 0, span);
         }
 
         static double LimitTextureIndexStep(double previous, double current, double stretchRatio) {
             double maxStep = SustainTextureMaxStepFrames + Math.Clamp((stretchRatio - 2.0) * 0.12, 0, 0.55);
-            return previous + Math.Clamp(current - previous, -maxStep, maxStep);
+            if (current < previous) {
+                // Segment reset: jump to the next forward pass. Do not turn this into a slow
+                // backwards sweep, because that reintroduces repeated source-vibrato texture.
+                return current;
+            }
+            return previous + Math.Min(current - previous, maxStep);
         }
 
         static void SampleInterpolatedFrame(
@@ -2186,6 +2405,22 @@ namespace OpenUtau.Core.HifiNeural {
                         : sourceMel[m, sourceStart + first];
                 }
             }
+        }
+
+        // Shared with the HNSEP parameter projection: trims the mapped source span using the
+        // waveform-derived active frame count (absolute, from slice start) so both the mel mapping
+        // and the parameter map cut the same dead tail.
+        internal static int ApplyWaveformSourceTailTrim(
+            int sourceFrames,
+            int sourceStartOffsetFrames,
+            int activeSourceFrames,
+            int sourceLeadFrames) {
+            if (activeSourceFrames <= 0 || sourceFrames <= MinSourceFrames * 2) {
+                return sourceFrames;
+            }
+            int minKeep = Math.Clamp(sourceLeadFrames + MinVowelSourceFrames, 1, sourceFrames);
+            int trimmed = activeSourceFrames - sourceStartOffsetFrames + InactiveTailGuardFrames;
+            return Math.Clamp(trimmed, minKeep, sourceFrames);
         }
 
         static int TrimInactiveTailFrames(

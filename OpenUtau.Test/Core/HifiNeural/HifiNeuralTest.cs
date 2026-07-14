@@ -4,6 +4,9 @@ using System.Linq;
 using System.Numerics;
 using System.Reflection;
 using System.Runtime.Serialization;
+using System.Threading;
+using System.Threading.Tasks;
+using OpenUtau.App.ViewModels;
 using OpenUtau.Classic;
 using OpenUtau.Core.HifiNeural;
 using OpenUtau.Core.Render;
@@ -138,6 +141,536 @@ namespace OpenUtau.Core.Test.HifiNeural {
                 Assert.False(float.IsNaN(value));
                 Assert.False(float.IsInfinity(value));
             }
+        }
+
+        [Fact]
+        public void MelExtractorHandlesTinySlices() {
+            // Slices shorter than one hop used to run the first FFT frame past the padded buffer.
+            foreach (int length in new[] { 1, 64, 127, 128, 129 }) {
+                var samples = new float[length];
+                for (int i = 0; i < samples.Length; i++) {
+                    samples[i] = (float)(0.1 * Math.Sin(2.0 * Math.PI * 220.0 * i / HifiMelExtractor.SampleRate));
+                }
+                var mel = new HifiMelExtractor().Extract(samples);
+                Assert.Equal(HifiMelExtractor.NMels, mel.GetLength(0));
+                Assert.True(mel.GetLength(1) >= 1);
+                foreach (var value in mel) {
+                    Assert.False(float.IsNaN(value));
+                    Assert.False(float.IsInfinity(value));
+                }
+            }
+        }
+
+        [Fact]
+        public void SourceAnalysisEstimatesSineF0() {
+            var samples = new float[HifiMelExtractor.SampleRate / 2];
+            for (int i = 0; i < samples.Length; i++) {
+                double t = i / (double)HifiMelExtractor.SampleRate;
+                samples[i] = (float)(0.2 * Math.Sin(2.0 * Math.PI * 220.0 * t)
+                    + 0.05 * Math.Sin(2.0 * Math.PI * 440.0 * t));
+            }
+
+            double f0 = HifiSourceAnalysis.EstimateF0Hz(samples);
+
+            Assert.True(Math.Abs(f0 - 220.0) < 6.0, $"expected ~220Hz, got {f0:F2}Hz");
+        }
+
+        [Fact]
+        public void SourceAnalysisReturnsZeroForNoise() {
+            var samples = new float[HifiMelExtractor.SampleRate / 2];
+            uint state = 12345;
+            for (int i = 0; i < samples.Length; i++) {
+                state = state * 1664525u + 1013904223u;
+                samples[i] = (state / (float)uint.MaxValue - 0.5f) * 0.3f;
+            }
+
+            double f0 = HifiSourceAnalysis.EstimateF0Hz(samples);
+
+            Assert.Equal(0, f0, 6);
+        }
+
+        [Fact]
+        public void SourceAnalysisActiveFramesDetectsSilentTail() {
+            int active = HifiMelExtractor.SampleRate / 5;
+            var samples = new float[HifiMelExtractor.SampleRate * 2 / 5];
+            for (int i = 0; i < active; i++) {
+                samples[i] = (float)(0.2 * Math.Sin(2.0 * Math.PI * 220.0 * i / HifiMelExtractor.SampleRate));
+            }
+
+            int activeFrames = HifiSourceAnalysis.EstimateActiveFrameCount(samples);
+            int expected = active / HifiMelExtractor.OriginHopSize;
+            int totalFrames = HifiMelExtractor.EstimateFrameCount(samples.Length);
+
+            Assert.True(activeFrames >= expected - 2 && activeFrames <= expected + 2,
+                $"expected ~{expected} active frames, got {activeFrames}");
+            Assert.True(activeFrames < totalFrames, "silent tail should reduce the active frame count");
+        }
+
+        [Fact]
+        public void HifiMemoryCacheEvictsLeastRecentlyUsedEntry() {
+            var cache = new HifiBoundedMemoryCache(16);
+            var first = new float[2];
+            var second = new float[2];
+            var third = new float[2];
+            cache.AddOrRefresh("first", first, 8);
+            cache.AddOrRefresh("second", second, 8);
+            Assert.True(cache.TryGet("first", out float[] touched));
+            Assert.Same(first, touched);
+
+            cache.AddOrRefresh("third", third, 8);
+
+            Assert.True(cache.TryGet("first", out float[] retained));
+            Assert.Same(first, retained);
+            Assert.False(cache.TryGet("second", out float[] _));
+            Assert.True(cache.TryGet("third", out float[] newest));
+            Assert.Same(third, newest);
+            Assert.Equal(16, cache.UsedBytes);
+        }
+
+        [Fact]
+        public async Task HifiMemoryCacheCoalescesConcurrentFactories() {
+            var cache = new HifiBoundedMemoryCache(1024);
+            int factoryCalls = 0;
+            var tasks = Enumerable.Range(0, 8).Select(index => Task.Run(() =>
+                cache.GetOrAdd(
+                    "shared",
+                    () => {
+                        Interlocked.Increment(ref factoryCalls);
+                        Thread.Sleep(20);
+                        return new float[16];
+                    },
+                    HifiRenderMemoryCache.FloatBytes,
+                    out _))).ToArray();
+
+            float[][] values = await Task.WhenAll(tasks);
+
+            Assert.Equal(1, factoryCalls);
+            Assert.All(values, value => Assert.Same(values[0], value));
+        }
+
+        [Fact]
+        public void HifiFileVersionKeyChangesAfterExternalEdit() {
+            string path = Path.Combine(Path.GetTempPath(), "hifi-cache-key-" + Guid.NewGuid().ToString("N") + ".wav");
+            try {
+                File.WriteAllBytes(path, new byte[] { 1, 2, 3 });
+                File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(-2));
+                string before = HifiRenderMemoryCache.FileVersionKey(path);
+
+                File.WriteAllBytes(path, new byte[] { 1, 2, 3, 4 });
+                File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(2));
+                string after = HifiRenderMemoryCache.FileVersionKey(path);
+
+                Assert.NotEqual(before, after);
+            } finally {
+                if (File.Exists(path)) {
+                    File.Delete(path);
+                }
+            }
+        }
+
+        [Fact]
+        public void HnSpectralProfileSurvivesYamlRoundTripAndNoteClone() {
+            var note = UNote.Create();
+            var profile = new HifiHnSpectralProfile {
+                Enabled = true,
+                BalanceDb = new double[] { 1, -2, 3, -4, 5 },
+                FrequenciesHz = new double[] { 90, 280, 900, 3600, 14000 },
+                DynamicsEnabled = true,
+                DynamicsTarget = HifiHnDynamicsTarget.Noise,
+                ThresholdDb = -27,
+                Ratio = 3.5,
+            };
+            note.SetRendererSetting(HifiHnSpectralProfile.RendererSettingKey, profile.Serialize());
+
+            string yaml = Yaml.DefaultSerializer.Serialize(note);
+            var loaded = Yaml.DefaultDeserializer.Deserialize<UNote>(yaml);
+            var restored = HifiHnSpectralProfile.FromNote(loaded);
+            var clone = note.Clone();
+
+            Assert.True(restored.Enabled);
+            Assert.Equal(profile.BalanceDb, restored.BalanceDb);
+            Assert.Equal(profile.FrequenciesHz, restored.FrequenciesHz);
+            Assert.True(restored.DynamicsEnabled);
+            Assert.Equal(HifiHnDynamicsTarget.Noise, restored.DynamicsTarget);
+            Assert.Equal(-27, restored.ThresholdDb);
+            Assert.Equal(3.5, restored.Ratio);
+            Assert.Equal(
+                note.GetRendererSetting(HifiHnSpectralProfile.RendererSettingKey),
+                clone.GetRendererSetting(HifiHnSpectralProfile.RendererSettingKey));
+
+            clone.SetRendererSetting(HifiHnSpectralProfile.RendererSettingKey, null);
+            Assert.NotNull(note.GetRendererSetting(HifiHnSpectralProfile.RendererSettingKey));
+        }
+
+        [Fact]
+        public void LegacyHnSpectralProfileUsesDefaultMovableFrequencies() {
+            var restored = HifiHnSpectralProfile.Deserialize(
+                "{\"Enabled\":true,\"BalanceDb\":[1,2,3,4,5],\"ProtectTransients\":true,\"AutoGain\":true}");
+
+            Assert.Equal(HifiHnSpectralProfile.DefaultFrequenciesHz, restored.FrequenciesHz);
+            Assert.Equal(new double[] { 1, 2, 3, 4, 5 }, restored.BalanceDb);
+        }
+
+        [Fact]
+        public void HnSpectralProfilePreservesVariableControlPoints() {
+            var profile = new HifiHnSpectralProfile {
+                FrequenciesHz = new double[] { 80, 180, 420, 1000, 2600, 6800, 15000 },
+                BalanceDb = new double[] { 1, -1, 2, -2, 3, -3, 4 },
+            };
+
+            var restored = HifiHnSpectralProfile.Deserialize(profile.Serialize());
+
+            Assert.Equal(7, restored.FrequenciesHz.Length);
+            Assert.Equal(profile.FrequenciesHz, restored.FrequenciesHz);
+            Assert.Equal(profile.BalanceDb, restored.BalanceDb);
+        }
+
+        [Fact]
+        public void HnSpectralProfileKeepsControlPointCountWithinSafeLimits() {
+            var tooFew = new HifiHnSpectralProfile {
+                FrequenciesHz = new double[] { 400 },
+                BalanceDb = new double[] { 2 },
+            }.Normalize();
+            var tooMany = new HifiHnSpectralProfile {
+                FrequenciesHz = Enumerable.Range(0, 24).Select(i => 50.0 + i * 700).ToArray(),
+                BalanceDb = Enumerable.Range(0, 24).Select(i => i % 2 == 0 ? 2.0 : -2.0).ToArray(),
+            }.Normalize();
+
+            Assert.Equal(HifiHnSpectralProfile.MinBandCount, tooFew.FrequenciesHz.Length);
+            Assert.Equal(HifiHnSpectralProfile.MinBandCount, tooFew.BalanceDb.Length);
+            Assert.Equal(HifiHnSpectralProfile.MaxBandCount, tooMany.FrequenciesHz.Length);
+            Assert.Equal(HifiHnSpectralProfile.MaxBandCount, tooMany.BalanceDb.Length);
+        }
+
+        [Fact]
+        public void HnSpectralDesignerAddsCopiesAndSafelyDeletesControlPoints() {
+            var viewModel = new HifiHnSpectralDesignerViewModel(new HifiHnSpectralProfile(), 1);
+
+            int added = viewModel.AddBand(700, 2.5);
+            Assert.True(added >= 0);
+            Assert.Equal(6, viewModel.Bands.Count);
+            Assert.Equal(2.5, viewModel.Bands[added].BalancePercent);
+            Assert.True(viewModel.Bands.Zip(viewModel.Bands.Skip(1),
+                (left, right) => left.FrequencyHz < right.FrequencyHz).All(value => value));
+
+            viewModel.UndoBandEdit();
+            Assert.Equal(5, viewModel.Bands.Count);
+            viewModel.RedoBandEdit();
+            Assert.Equal(6, viewModel.Bands.Count);
+
+            int selected = viewModel.SelectedBandIndex;
+            double originalFrequency = viewModel.Bands[selected].FrequencyHz;
+            double originalBalance = viewModel.Bands[selected].BalancePercent;
+            viewModel.BeginBandEdit();
+            viewModel.Bands[selected].FrequencyHz = originalFrequency + 20;
+            viewModel.Bands[selected].BalancePercent = originalBalance - 1;
+            viewModel.CommitBandEdit();
+            viewModel.UndoBandEdit();
+            Assert.Equal(originalFrequency, viewModel.Bands[selected].FrequencyHz);
+            Assert.Equal(originalBalance, viewModel.Bands[selected].BalancePercent);
+            viewModel.RedoBandEdit();
+
+            viewModel.CopySelectedBand();
+            viewModel.PasteBand();
+            Assert.Equal(7, viewModel.Bands.Count);
+
+            while (viewModel.Bands.Count > HifiHnSpectralProfile.MinBandCount) {
+                viewModel.SelectedBandIndex = 0;
+                viewModel.DeleteSelectedBand();
+            }
+            viewModel.DeleteSelectedBand();
+
+            Assert.Equal(HifiHnSpectralProfile.MinBandCount, viewModel.Bands.Count);
+            Assert.False(viewModel.CanDeleteSelectedBand);
+            Assert.Equal(HifiHnSpectralProfile.MinBandCount, viewModel.BuildProfile().FrequenciesHz.Length);
+        }
+
+        [Fact]
+        public void HnSpectralDesignerDynamicsPanelTogglesExpandedSize() {
+            var viewModel = new HifiHnSpectralDesignerViewModel(new HifiHnSpectralProfile(), 1);
+
+            Assert.False(viewModel.DynamicsPanelExpanded);
+            Assert.Equal(0, viewModel.DynamicsPanelHeight);
+            Assert.Equal(0, viewModel.DynamicsPanelOpacity);
+
+            viewModel.ToggleDynamicsPanel();
+
+            Assert.True(viewModel.DynamicsPanelExpanded);
+            Assert.Equal(124, viewModel.DynamicsPanelHeight);
+            Assert.Equal(1, viewModel.DynamicsPanelOpacity);
+
+            viewModel.ToggleDynamicsPanel();
+            Assert.False(viewModel.DynamicsPanelExpanded);
+        }
+
+        [Fact]
+        public void HnSpectralDesignerReportsProfileEditsWithoutReportingUiNavigation() {
+            var viewModel = new HifiHnSpectralDesignerViewModel(new HifiHnSpectralProfile(), 1);
+            int changed = 0;
+            viewModel.ProfileChanged += (_, _) => changed++;
+
+            viewModel.SelectedBandIndex = 0;
+            viewModel.ToggleDynamicsPanel();
+            Assert.Equal(0, changed);
+
+            viewModel.Enabled = !viewModel.Enabled;
+            Assert.Equal(1, changed);
+
+            viewModel.BeginBandEdit();
+            Assert.True(viewModel.IsBandEditInProgress);
+            viewModel.Bands[0].BalancePercent += 1;
+            Assert.Equal(2, changed);
+            viewModel.CommitBandEdit();
+            Assert.False(viewModel.IsBandEditInProgress);
+
+            viewModel.UndoBandEdit();
+            Assert.Equal(3, changed);
+            viewModel.Reset();
+            Assert.Equal(4, changed);
+        }
+
+        [Fact]
+        public void HnSpectralDesignerResetCanRestoreTheWholeProfileWithUndo() {
+            var original = new HifiHnSpectralProfile {
+                Enabled = false,
+                FrequenciesHz = new double[] { 90, 300, 1400, 6000 },
+                BalanceDb = new double[] { -4, 2, 7, -3 },
+                DynamicsEnabled = true,
+                DynamicsTarget = HifiHnDynamicsTarget.Noise,
+                ThresholdDb = -42,
+                Ratio = 5,
+                AttackMs = 8,
+                ReleaseMs = 240,
+                MaxReductionDb = 11,
+            }.Normalize();
+            var viewModel = new HifiHnSpectralDesignerViewModel(original, 1);
+
+            viewModel.Reset();
+            Assert.True(viewModel.CanUndoBandEdit);
+
+            viewModel.UndoBandEdit();
+
+            var restored = viewModel.BuildProfile();
+            Assert.Equal(original.Enabled, restored.Enabled);
+            Assert.Equal(original.FrequenciesHz, restored.FrequenciesHz);
+            Assert.Equal(original.BalanceDb.Length, restored.BalanceDb.Length);
+            for (int i = 0; i < original.BalanceDb.Length; i++) {
+                Assert.Equal(original.BalanceDb[i], restored.BalanceDb[i], 9);
+            }
+            Assert.Equal(original.DynamicsEnabled, restored.DynamicsEnabled);
+            Assert.Equal(original.DynamicsTarget, restored.DynamicsTarget);
+            Assert.Equal(original.ThresholdDb, restored.ThresholdDb);
+            Assert.Equal(original.Ratio, restored.Ratio);
+            Assert.Equal(original.AttackMs, restored.AttackMs);
+            Assert.Equal(original.ReleaseMs, restored.ReleaseMs);
+            Assert.Equal(original.MaxReductionDb, restored.MaxReductionDb);
+            Assert.True(viewModel.CanRedoBandEdit);
+        }
+
+        [Theory]
+        [InlineData(-100, -18.0)]
+        [InlineData(-50, -7.5681)]
+        [InlineData(0, 0.0)]
+        [InlineData(25, 3.1820)]
+        [InlineData(50, 7.5681)]
+        [InlineData(75, 12.5632)]
+        [InlineData(100, 18.0)]
+        public void HnSpectralBalancePercentUsesStrongNonlinearMapping(double percent, double expectedDb) {
+            double balanceDb = HifiHnSpectralProfile.PercentToBalanceDb(percent);
+
+            Assert.Equal(expectedDb, balanceDb, 3);
+            Assert.Equal(percent, HifiHnSpectralProfile.BalanceDbToPercent(balanceDb), 8);
+        }
+
+        [Fact]
+        public void HnSpectralDesignerPreservesLegacyDbSettingsThroughPercentUi() {
+            var profile = new HifiHnSpectralProfile {
+                BalanceDb = new double[] { -9, -3, 0, 3, 9 },
+            };
+            var viewModel = new HifiHnSpectralDesignerViewModel(profile, 1);
+
+            Assert.InRange(viewModel.Bands[0].BalancePercent, -58, -57);
+            Assert.InRange(viewModel.Bands[^1].BalancePercent, 57, 58);
+            double[] rebuilt = viewModel.BuildProfile().BalanceDb;
+            Assert.Equal(profile.BalanceDb.Length, rebuilt.Length);
+            for (int i = 0; i < rebuilt.Length; i++) {
+                Assert.Equal(profile.BalanceDb[i], rebuilt[i], 9);
+            }
+        }
+
+        [Fact]
+        public void NoteRendererSettingCommandRestoresEachPreviousValue() {
+            var part = new UVoicePart();
+            var first = UNote.Create();
+            var second = UNote.Create();
+            first.SetRendererSetting(HifiHnSpectralProfile.RendererSettingKey, "first");
+            second.SetRendererSetting(HifiHnSpectralProfile.RendererSettingKey, "second");
+            string replacement = new HifiHnSpectralProfile {
+                BalanceDb = new double[] { 0, 0, 0, 2, 4 },
+            }.Serialize();
+            var command = new SetNoteRendererSettingCommand(
+                part,
+                new[] { first, second },
+                HifiHnSpectralProfile.RendererSettingKey,
+                replacement);
+
+            command.Execute();
+            Assert.Equal(replacement, first.GetRendererSetting(HifiHnSpectralProfile.RendererSettingKey));
+            Assert.Equal(replacement, second.GetRendererSetting(HifiHnSpectralProfile.RendererSettingKey));
+
+            command.Unexecute();
+            Assert.Equal("first", first.GetRendererSetting(HifiHnSpectralProfile.RendererSettingKey));
+            Assert.Equal("second", second.GetRendererSetting(HifiHnSpectralProfile.RendererSettingKey));
+        }
+
+        [Fact]
+        public void DisabledHnSpectralProfileKeepsExistingRemixExactly() {
+            var source = Enumerable.Range(0, 4096)
+                .Select(i => (float)(0.25 * Math.Sin(2 * Math.PI * 220 * i / HifiMelExtractor.SampleRate)
+                    + 0.03 * Math.Sin(2 * Math.PI * 6200 * i / HifiMelExtractor.SampleRate)))
+                .ToArray();
+            var harmonic = Enumerable.Range(0, source.Length)
+                .Select(i => (float)(0.25 * Math.Sin(2 * Math.PI * 220 * i / HifiMelExtractor.SampleRate)))
+                .ToArray();
+            var parameters = HifiFrameParameterTrack.Constant(
+                new HifiFrameParameterAverages(0, 0, 0, 100));
+
+            float[] original = HifiHnsepSourceProcessor.RemixHarmonicNoiseWithSourceEnergy(
+                source, harmonic, harmonic, parameters);
+            float[] disabled = HifiHnsepSourceProcessor.RemixHarmonicNoiseWithSourceEnergy(
+                source,
+                harmonic,
+                harmonic,
+                parameters,
+                new HifiHnSpectralProfile { Enabled = false });
+
+            Assert.Equal(original, disabled);
+        }
+
+        [Fact]
+        public void HnSpectralProcessorShapesWholeSourceWithoutAutomaticGain() {
+            const int length = 8192;
+            var harmonic = Enumerable.Range(0, length)
+                .Select(i => (float)(0.25 * Math.Sin(2 * Math.PI * 220 * i / HifiMelExtractor.SampleRate)))
+                .ToArray();
+            var noise = Enumerable.Range(0, length)
+                .Select(i => (float)(0.04 * Math.Sin(2 * Math.PI * 7000 * i / HifiMelExtractor.SampleRate)))
+                .ToArray();
+            var baseline = harmonic.Zip(noise, (left, right) => left + right).ToArray();
+            var profile = new HifiHnSpectralProfile {
+                BalanceDb = new double[] { 6, 6, 6, 6, 6 },
+            };
+
+            float[] result = HifiHnSpectralProcessor.Process(
+                baseline,
+                harmonic,
+                noise,
+                profile);
+
+            Assert.Equal(length, result.Length);
+            Assert.All(result, value => Assert.True(float.IsFinite(value)));
+            Assert.Contains(Enumerable.Range(0, 1000), i => Math.Abs(result[i] - baseline[i]) > 1e-5);
+            Assert.Contains(Enumerable.Range(length - 1000, 1000), i => Math.Abs(result[i] - baseline[i]) > 1e-5);
+            Assert.True(Math.Abs(Rms(result) - Rms(baseline)) > 1e-4);
+        }
+
+        [Fact]
+        public void HnSpectralProcessorAcceptsAddedControlPoints() {
+            const int length = 8192;
+            var harmonic = Enumerable.Range(0, length)
+                .Select(i => (float)(0.2 * Math.Sin(2 * Math.PI * 300 * i / HifiMelExtractor.SampleRate)))
+                .ToArray();
+            var noise = Enumerable.Range(0, length)
+                .Select(i => (float)(0.04 * Math.Sin(2 * Math.PI * 8000 * i / HifiMelExtractor.SampleRate)))
+                .ToArray();
+            var baseline = harmonic.Zip(noise, (left, right) => left + right).ToArray();
+            var profile = new HifiHnSpectralProfile {
+                FrequenciesHz = new double[] { 80, 180, 420, 1000, 2600, 6800, 15000 },
+                BalanceDb = new double[] { 2, 2, 1, 0, -1, -2, -2 },
+            };
+
+            float[] result = HifiHnSpectralProcessor.Process(baseline, harmonic, noise, profile);
+
+            Assert.Equal(length, result.Length);
+            Assert.All(result, value => Assert.True(float.IsFinite(value)));
+            Assert.Contains(Enumerable.Range(0, length), i => Math.Abs(result[i] - baseline[i]) > 1e-5);
+        }
+
+        [Fact]
+        public void HnSpectralDynamicsProducesFiniteChangedOutput() {
+            const int length = 12288;
+            var harmonic = Enumerable.Range(0, length)
+                .Select(i => (float)(0.18 * Math.Sin(2 * Math.PI * 240 * i / HifiMelExtractor.SampleRate)))
+                .ToArray();
+            var noise = Enumerable.Range(0, length)
+                .Select(i => (float)(0.18 * Math.Sin(2 * Math.PI * 6500 * i / HifiMelExtractor.SampleRate)))
+                .ToArray();
+            var baseline = harmonic.Zip(noise, (left, right) => left + right).ToArray();
+            var profile = new HifiHnSpectralProfile {
+                DynamicsEnabled = true,
+                DynamicsTarget = HifiHnDynamicsTarget.Noise,
+                ThresholdDb = -55,
+                Ratio = 6,
+                MaxReductionDb = 9,
+            };
+
+            float[] result = HifiHnSpectralProcessor.Process(baseline, harmonic, noise, profile);
+
+            Assert.Equal(length, result.Length);
+            Assert.All(result, value => Assert.True(float.IsFinite(value)));
+            Assert.True(Rms(Difference(result, baseline)) > 1e-4);
+        }
+
+        [Fact]
+        public void HnSpectralProfileSortsMovableFrequenciesWithTheirValues() {
+            var profile = new HifiHnSpectralProfile {
+                FrequenciesHz = new double[] { 1000, 100, 5000, 300, 10000 },
+                BalanceDb = new double[] { 1, 2, 3, 4, 5 },
+            };
+
+            profile.Normalize();
+
+            Assert.Equal(new double[] { 2, 4, 1, 3, 5 }, profile.BalanceDb);
+            Assert.All(
+                Enumerable.Range(1, profile.FrequenciesHz.Length - 1),
+                i => Assert.True(profile.FrequenciesHz[i] > profile.FrequenciesHz[i - 1]));
+        }
+
+        [Fact]
+        public void HnSpectralProcessorUsesMovedControlPointFrequencies() {
+            const int length = 12288;
+            var harmonic = Enumerable.Range(0, length)
+                .Select(i => (float)(0.2 * Math.Sin(2 * Math.PI * 240 * i / HifiMelExtractor.SampleRate)))
+                .ToArray();
+            var noise = new float[length];
+            var nearProfile = new HifiHnSpectralProfile {
+                FrequenciesHz = new double[] { 80, 240, 1200, 4200, 12000 },
+                BalanceDb = new double[] { 0, 9, 0, 0, 0 },
+            };
+            var farProfile = new HifiHnSpectralProfile {
+                FrequenciesHz = new double[] { 80, 800, 1800, 5000, 12000 },
+                BalanceDb = new double[] { 0, 9, 0, 0, 0 },
+            };
+
+            float[] near = HifiHnSpectralProcessor.Process(harmonic, harmonic, noise, nearProfile);
+            float[] far = HifiHnSpectralProcessor.Process(harmonic, harmonic, noise, farProfile);
+
+            Assert.True(Rms(near) > Rms(far) * 1.05);
+        }
+
+        [Theory]
+        [InlineData(8, 0, 0, 8)]
+        [InlineData(8, 1, 0, 8)]
+        [InlineData(8, 2, 0, 4)]
+        [InlineData(8, 1, 1, 4)]
+        [InlineData(8, 2, 2, 2)]
+        [InlineData(2, 4, 2, 1)]
+        public void HifiMelThreadBudgetAccountsForConcurrentCpuWork(
+            int configured,
+            int features,
+            int inferences,
+            int expected) {
+            Assert.Equal(expected, HifiRenderConcurrency.ResolveMelParallelism(configured, features, inferences));
         }
 
         [Fact]
@@ -1360,7 +1893,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
-        public void SourceMapSoftlyCatchesUpWhenTargetPreutterIsCapped() {
+        public void SourceMapAppliesClassicSkipOverWhenTargetPreutterIsCapped() {
             var phone = CreateRenderPhoneForTiming(
                 preutterMs: 80,
                 overlapMs: 40,
@@ -1375,20 +1908,21 @@ namespace OpenUtau.Core.Test.HifiNeural {
             int targetLeadFrames = ResolveTargetLeadFrames(phone, outputFrames: 80);
             int targetPreutterSourceFrames = SourceFramesForMs(80);
             int rawOtoPreutterSourceFrames = SourceFramesForMs(180);
-            int midLead = Math.Max(2, targetLeadFrames / 2);
-            double linearMid = midLead * (rawOtoPreutterSourceFrames - 1.0) / Math.Max(1, targetLeadFrames - 1);
-            double linearStep = (rawOtoPreutterSourceFrames - 1.0) / Math.Max(1, targetLeadFrames - 1);
-            double maxStep = 0;
-            for (int i = 1; i < targetLeadFrames; i++) {
-                maxStep = Math.Max(maxStep, map[i] - map[i - 1]);
-            }
+            // ClassicRenderer skipOver semantics: the raw oto preutter exceeds the capped target
+            // lead by 100ms, so the map starts that far into the source instead of stretching the
+            // whole 180ms lead into an 80ms window.
+            int skipSourceFrames = SourceFramesForMs(180 - 80);
 
             Assert.True(rawOtoPreutterSourceFrames > targetPreutterSourceFrames);
-            Assert.Equal(0, map[0], 6);
-            Assert.True(map[1] <= linearStep + 0.001, $"lead should not add a skip boost at onset, got frame {map[1]:F3}");
-            Assert.True(map[midLead] > linearMid + 2.0, $"lead should smoothly catch up inside preutter, got {map[midLead]:F3} vs linear {linearMid:F3}");
-            Assert.True(maxStep <= linearStep * 1.30, $"lead catch-up step is too abrupt, max={maxStep:F3} linear={linearStep:F3}");
+            Assert.Equal(skipSourceFrames, map[0], 1.0);
             Assert.Equal(rawOtoPreutterSourceFrames, map[targetLeadFrames], 1.0);
+            double linearLeadStep = (rawOtoPreutterSourceFrames - skipSourceFrames)
+                / (double)Math.Max(1, targetLeadFrames);
+            for (int i = 1; i <= targetLeadFrames; i++) {
+                double step = map[i] - map[i - 1];
+                Assert.True(step >= 0, $"lead map must be monotonic, got step {step:F3} at index {i}");
+                Assert.True(step <= linearLeadStep * 1.5 + 0.001, $"lead catch-up step is too abrupt, step={step:F3} linear={linearLeadStep:F3}");
+            }
         }
 
         [Fact]

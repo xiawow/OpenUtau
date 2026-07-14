@@ -11,7 +11,9 @@ namespace OpenUtau.Core.HifiNeural {
         public float[] Build(RenderPhrase phrase, int frames, double startMs) {
             var f0 = new float[frames];
             for (int i = 0; i < frames; i++) {
-                double posMs = startMs + i * FrameMs;
+                // Sample at the frame center so F0 lines up with the mel frames and the
+                // parameter curves, which both use center-of-frame conventions.
+                double posMs = startMs + (i + 0.5) * FrameMs;
                 int tick = phrase.timeAxis.MsPosToTickPos(posMs);
                 double tone = ToneAt(phrase, tick, posMs);
                 f0[i] = tone > 0 ? (float)MusicMath.ToneToFreq(tone) : 0f;

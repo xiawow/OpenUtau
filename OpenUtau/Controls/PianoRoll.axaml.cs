@@ -15,6 +15,7 @@ using OpenUtau.App.ViewModels;
 using OpenUtau.App.Views;
 using OpenUtau.Core;
 using OpenUtau.Core.Editing;
+using OpenUtau.Core.HifiNeural;
 using OpenUtau.Core.Ustx;
 using OpenUtau.Core.Util;
 using OpenUtau.ViewModels;
@@ -46,6 +47,7 @@ namespace OpenUtau.App.Controls {
         private ReactiveCommand<Unit, Unit>? lyricsDialogCommand;
         private ReactiveCommand<Unit, Unit>? noteDefaultsCommand;
         private ReactiveCommand<BatchEdit, Unit>? noteBatchEditCommand;
+        private HifiHnSpectralDesignerDialog? hifiHnSpectralDesignerDialog;
 
         private Window RootWindow => (Window)TopLevel.GetTopLevel(this)!;
 
@@ -920,6 +922,13 @@ namespace OpenUtau.App.Controls {
                             Command = ReactiveCommand.Create(() => ViewModel.NotesViewModel.PasteSelectedParams(RootWindow)),
                             InputGesture = new KeyGesture(Key.V, KeyModifiers.Alt),
                         });
+                        if (IsHifiNeuraTrack()) {
+                            ViewModel.NotesContextMenuItems.Add(new MenuItemViewModel() {
+                                Header = ThemeManager.GetString("context.note.hifi.hn"),
+                                Command = ReactiveCommand.Create(
+                                    () => OpenHifiHnSpectralDesigner(hitInfo.note)),
+                            });
+                        }
                         ViewModel.NotesContextMenuItems.Add(new MenuItemViewModel() {
                             Header = ThemeManager.GetString("pianoroll.menu.notes"),
                             Items = ViewModel.NoteBatchEdits.ToArray(),
@@ -1105,6 +1114,64 @@ namespace OpenUtau.App.Controls {
             } else {
                 args.Cancel = true;
             }
+        }
+
+        bool IsHifiNeuraTrack() {
+            var notesViewModel = ViewModel.NotesViewModel;
+            if (notesViewModel.Project == null || notesViewModel.Part == null) {
+                return false;
+            }
+            int trackNo = notesViewModel.Part.trackNo;
+            if (trackNo < 0 || trackNo >= notesViewModel.Project.tracks.Count) {
+                return false;
+            }
+            var settings = notesViewModel.Project.tracks[trackNo].RendererSettings;
+            return string.Equals(settings.renderer, HifiNeuralPhraseRenderer.RendererId, StringComparison.OrdinalIgnoreCase)
+                || settings.Renderer is HifiNeuralPhraseRenderer;
+        }
+
+        void OpenHifiHnSpectralDesigner(UNote? clickedNote) {
+            var notesViewModel = ViewModel.NotesViewModel;
+            if (notesViewModel.Part == null || notesViewModel.Selection.IsEmpty) {
+                return;
+            }
+            if (hifiHnSpectralDesignerDialog != null) {
+                hifiHnSpectralDesignerDialog.Activate();
+                return;
+            }
+            var part = notesViewModel.Part;
+            var notes = notesViewModel.Selection.ToList();
+            var sourceNote = clickedNote != null && notes.Contains(clickedNote)
+                ? clickedNote
+                : notes[0];
+            var viewModel = new HifiHnSpectralDesignerViewModel(
+                HifiHnSpectralProfile.FromNote(sourceNote),
+                notes.Count);
+            var dialog = new HifiHnSpectralDesignerDialog { DataContext = viewModel };
+            hifiHnSpectralDesignerDialog = dialog;
+            dialog.ApplyRequested += (_, _) => {
+                if (!ReferenceEquals(notesViewModel.Part, part)
+                    || notes.Any(note => !part.notes.Contains(note))) {
+                    dialog.Close();
+                    return;
+                }
+                string value = dialog.ResultProfile.Serialize();
+                if (notes.All(note => string.Equals(
+                        note.GetRendererSetting(HifiHnSpectralProfile.RendererSettingKey),
+                        value,
+                        StringComparison.Ordinal))) {
+                    return;
+                }
+                DocManager.Inst.StartUndoGroup("command.note.edit");
+                DocManager.Inst.ExecuteCmd(new SetNoteRendererSettingCommand(
+                        part,
+                        notes,
+                        HifiHnSpectralProfile.RendererSettingKey,
+                        value));
+                DocManager.Inst.EndUndoGroup();
+            };
+            dialog.Closed += (_, _) => hifiHnSpectralDesignerDialog = null;
+            dialog.Show(RootWindow);
         }
 
         public void ExpCanvasPointerPressed(object sender, PointerPressedEventArgs args) {
