@@ -171,7 +171,7 @@ namespace OpenUtau.Core.Util {
             public int DiffSingerStepsPitch = 10;
             public bool DiffSingerTensorCache = true;
             public bool DiffSingerLangCodeHide = false;
-            public string HifiNeuralMelEnhanceMode = HifiRenderConfig.MelEnhanceNone;
+            public string HifiNeuralMelEnhanceMode = HifiRenderConfig.MelEnhanceLight;
             public string HifiNeuralHnsepRunner = HifiHnsepOnnx.RunnerCpu;
             public bool HifiNeuralDebugExportEnabled = false;
             public int NeutrinoLegacyV2RenderQuality = 1;

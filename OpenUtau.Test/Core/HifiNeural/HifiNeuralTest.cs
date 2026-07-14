@@ -681,6 +681,13 @@ namespace OpenUtau.Core.Test.HifiNeural {
         }
 
         [Fact]
+        public void MelEnhanceModeDefaultsToLight() {
+            var preferences = new Preferences.SerializablePreferences();
+
+            Assert.Equal(HifiRenderConfig.MelEnhanceLight, preferences.HifiNeuralMelEnhanceMode);
+        }
+
+        [Fact]
         public void CreateMelEnhancerRespectsPreference() {
             string originalMode = Preferences.Default.HifiNeuralMelEnhanceMode;
             try {
