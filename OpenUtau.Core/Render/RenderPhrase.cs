@@ -252,6 +252,7 @@ namespace OpenUtau.Core.Render {
         public readonly double durationMs;
         public readonly double endMs;
         public readonly double leadingMs;
+        public readonly double availableLeadingMs;
 
         public readonly RenderNote[] notes;
         public readonly RenderPhone[] phones;
@@ -300,6 +301,16 @@ namespace OpenUtau.Core.Render {
             renderer = track.RendererSettings.Renderer;
             wavtool = track.RendererSettings.wavtool;
             timeAxis = project.timeAxis.Clone();
+
+            var firstSourcePhone = phonemes.First();
+            int scoreOriginTick = part.position + firstSourcePhone.Parent.position;
+            int contextStartTick = firstSourcePhone.Parent.Prev == null
+                ? 0
+                : part.position + firstSourcePhone.Parent.Prev.End;
+            contextStartTick = Math.Min(scoreOriginTick, contextStartTick);
+            availableLeadingMs = Math.Max(0,
+                timeAxis.TickPosToMsPos(scoreOriginTick)
+                - timeAxis.TickPosToMsPos(contextStartTick));
 
             position = part.position + phonemes.First().position;
             end = part.position + phonemes.Last().End;
@@ -588,6 +599,7 @@ namespace OpenUtau.Core.Render {
                     writer.Write(renderer?.ToString() ?? "");
                     writer.Write(wavtool ?? "");
                     writer.Write(timeAxis.Timestamp);
+                    writer.Write(availableLeadingMs);
                     foreach (var phone in phones) {
                         writer.Write(phone.hash);
                     }

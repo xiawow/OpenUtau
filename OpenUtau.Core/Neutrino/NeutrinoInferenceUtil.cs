@@ -107,7 +107,8 @@ namespace OpenUtau.Core.Neutrino {
             long[] phonePositions,
             NeutrinoPhoneChunk[] chunks,
             double frameSeconds,
-            Func<NeutrinoPhoneChunk, float[]> predictBoundaryShifts) {
+            Func<NeutrinoPhoneChunk, float[]> predictBoundaryShifts,
+            double? leadingContextSeconds = null) {
 
             if (scoreDurations.Length != phonePositions.Length) {
                 throw new ArgumentException("Score duration and phone position lengths must match.");
@@ -135,7 +136,11 @@ namespace OpenUtau.Core.Neutrino {
                     chunk.PhoneStart,
                     chunk.PhoneCount);
             }
-            return ApplyTimingBoundaryShifts(baseBoundaries, globalBoundaryShifts, frameSeconds);
+            return ApplyTimingBoundaryShifts(
+                baseBoundaries,
+                globalBoundaryShifts,
+                frameSeconds,
+                leadingContextSeconds);
         }
 
         public static NeutrinoFrameChunk[] BuildFrameChunks(
@@ -171,6 +176,17 @@ namespace OpenUtau.Core.Neutrino {
             return result;
         }
 
+        public static double NormalizeBoundaryStart(double[] boundaries) {
+            if (boundaries.Length == 0) {
+                return 0;
+            }
+            double start = boundaries[0];
+            for (int i = 0; i < boundaries.Length; i++) {
+                boundaries[i] -= start;
+            }
+            return start;
+        }
+
         static double[] BuildBaseBoundaryTimes(float[] scoreDurations, long[] phonePositions) {
             int numPhones = scoreDurations.Length;
             var boundaries = new double[numPhones + 1];
@@ -189,9 +205,20 @@ namespace OpenUtau.Core.Neutrino {
         static double[] ApplyTimingBoundaryShifts(
             double[] baseBoundaries,
             float[] boundaryShifts,
-            double frameSeconds) {
+            double frameSeconds,
+            double? leadingContextSeconds) {
 
             var boundaries = (double[])baseBoundaries.Clone();
+            if (boundaries.Length > 1 && leadingContextSeconds.HasValue) {
+                // Official labels normally have a leading pau, so the first active
+                // phone is not global boundary zero and receives gluon[0]. Emulate
+                // that context when an OpenUtau phrase starts directly with a phone.
+                double contextSeconds = Math.Max(0, leadingContextSeconds.Value);
+                double minBoundary = Math.Min(0, -contextSeconds + frameSeconds);
+                double shifted = baseBoundaries[0] + boundaryShifts[0];
+                boundaries[0] = Math.Round(
+                    Math.Max(shifted, minBoundary) * 1000.0) / 1000.0;
+            }
             for (int i = 1; i < boundaries.Length - 1; i++) {
                 double shifted = baseBoundaries[i] + boundaryShifts[i];
                 boundaries[i] = Math.Round(
