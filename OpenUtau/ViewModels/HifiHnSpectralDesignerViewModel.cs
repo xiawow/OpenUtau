@@ -42,17 +42,28 @@ namespace OpenUtau.App.ViewModels {
 
     public sealed class HifiHnSpectralDesignerViewModel : ViewModelBase {
         readonly record struct BandClipboard(double FrequencyHz, double BalancePercent);
-        sealed record BandSnapshot(double[] FrequenciesHz, double[] BalancePercent, int SelectedIndex);
+        sealed record ProfileSnapshot(
+            bool Enabled,
+            double[] FrequenciesHz,
+            double[] BalancePercent,
+            int SelectedIndex,
+            bool DynamicsEnabled,
+            int DynamicsTargetIndex,
+            double ThresholdDb,
+            double Ratio,
+            double AttackMs,
+            double ReleaseMs,
+            double MaxReductionDb);
         const int MaxHistoryEntries = 64;
         static BandClipboard? clipboard;
 
         readonly int noteCount;
-        readonly System.Collections.Generic.List<BandSnapshot> undoHistory = new();
-        readonly System.Collections.Generic.List<BandSnapshot> redoHistory = new();
+        readonly System.Collections.Generic.List<ProfileSnapshot> undoHistory = new();
+        readonly System.Collections.Generic.List<ProfileSnapshot> redoHistory = new();
         bool updatingBands;
         bool loadingProfile;
         int bandEditDepth;
-        BandSnapshot? pendingBandEdit;
+        ProfileSnapshot? pendingBandEdit;
         int selectedBandIndex = -1;
         bool dynamicsPanelExpanded;
 
@@ -145,7 +156,19 @@ namespace OpenUtau.App.ViewModels {
             PropertyChanged += OnProfilePropertyChanged;
         }
 
-        public void Reset() => Load(new HifiHnSpectralProfile());
+        public void Reset() {
+            FinishPendingBandEdit();
+            ProfileSnapshot before = CaptureProfileSnapshot();
+            ProfileSnapshot defaults = SnapshotFromProfile(new HifiHnSpectralProfile(), -1);
+            if (ProfileSnapshotsEqual(before, defaults)) {
+                SelectedBandIndex = -1;
+                return;
+            }
+            PushHistory(undoHistory, before);
+            redoHistory.Clear();
+            RestoreProfileSnapshot(defaults);
+            RaiseHistoryProperties();
+        }
 
         public void SelectPreviousBand() {
             SelectedBandIndex = SelectedBandIndex <= 0
@@ -246,7 +269,7 @@ namespace OpenUtau.App.ViewModels {
 
         public void BeginBandEdit() {
             if (bandEditDepth++ == 0) {
-                pendingBandEdit = CaptureBandSnapshot();
+                pendingBandEdit = CaptureProfileSnapshot();
             }
         }
 
@@ -258,9 +281,9 @@ namespace OpenUtau.App.ViewModels {
             if (bandEditDepth > 0) {
                 return;
             }
-            BandSnapshot? before = pendingBandEdit;
+            ProfileSnapshot? before = pendingBandEdit;
             pendingBandEdit = null;
-            if (before != null && !BandSnapshotsEqual(before, CaptureBandSnapshot())) {
+            if (before != null && !ProfileSnapshotsEqual(before, CaptureProfileSnapshot())) {
                 PushHistory(undoHistory, before);
                 redoHistory.Clear();
                 RaiseHistoryProperties();
@@ -272,9 +295,9 @@ namespace OpenUtau.App.ViewModels {
             if (undoHistory.Count == 0) {
                 return;
             }
-            BandSnapshot target = PopHistory(undoHistory);
-            PushHistory(redoHistory, CaptureBandSnapshot());
-            RestoreBandSnapshot(target);
+            ProfileSnapshot target = PopHistory(undoHistory);
+            PushHistory(redoHistory, CaptureProfileSnapshot());
+            RestoreProfileSnapshot(target);
             RaiseHistoryProperties();
         }
 
@@ -283,9 +306,9 @@ namespace OpenUtau.App.ViewModels {
             if (redoHistory.Count == 0) {
                 return;
             }
-            BandSnapshot target = PopHistory(redoHistory);
-            PushHistory(undoHistory, CaptureBandSnapshot());
-            RestoreBandSnapshot(target);
+            ProfileSnapshot target = PopHistory(redoHistory);
+            PushHistory(undoHistory, CaptureProfileSnapshot());
+            RestoreProfileSnapshot(target);
             RaiseHistoryProperties();
         }
 
@@ -491,44 +514,89 @@ namespace OpenUtau.App.ViewModels {
             CommitBandEdit();
         }
 
-        BandSnapshot CaptureBandSnapshot() {
-            return new BandSnapshot(
+        ProfileSnapshot CaptureProfileSnapshot() {
+            return new ProfileSnapshot(
+                Enabled,
                 Bands.Select(band => band.FrequencyHz).ToArray(),
                 Bands.Select(band => band.BalancePercent).ToArray(),
-                SelectedBandIndex);
+                SelectedBandIndex,
+                DynamicsEnabled,
+                DynamicsTargetIndex,
+                ThresholdDb,
+                Ratio,
+                AttackMs,
+                ReleaseMs,
+                MaxReductionDb);
         }
 
-        void RestoreBandSnapshot(BandSnapshot snapshot) {
-            updatingBands = true;
+        static ProfileSnapshot SnapshotFromProfile(HifiHnSpectralProfile profile, int selectedIndex) {
+            profile = profile.Clone().Normalize();
+            return new ProfileSnapshot(
+                profile.Enabled,
+                (double[])profile.FrequenciesHz.Clone(),
+                profile.BalanceDb.Select(HifiHnSpectralProfile.BalanceDbToPercent).ToArray(),
+                selectedIndex,
+                profile.DynamicsEnabled,
+                (int)profile.DynamicsTarget,
+                profile.ThresholdDb,
+                profile.Ratio,
+                profile.AttackMs,
+                profile.ReleaseMs,
+                profile.MaxReductionDb);
+        }
+
+        void RestoreProfileSnapshot(ProfileSnapshot snapshot) {
+            loadingProfile = true;
             try {
-                foreach (var band in Bands) {
-                    band.PropertyChanged -= OnBandPropertyChanged;
+                Enabled = snapshot.Enabled;
+                updatingBands = true;
+                try {
+                    foreach (var band in Bands) {
+                        band.PropertyChanged -= OnBandPropertyChanged;
+                    }
+                    Bands.Clear();
+                    for (int i = 0; i < snapshot.FrequenciesHz.Length; i++) {
+                        Bands.Add(new HifiHnBandViewModel(snapshot.FrequenciesHz[i], snapshot.BalancePercent[i]));
+                    }
+                } finally {
+                    updatingBands = false;
                 }
-                Bands.Clear();
-                for (int i = 0; i < snapshot.FrequenciesHz.Length; i++) {
-                    Bands.Add(new HifiHnBandViewModel(snapshot.FrequenciesHz[i], snapshot.BalancePercent[i]));
-                }
+                SelectedBandIndex = Math.Clamp(snapshot.SelectedIndex, -1, Bands.Count - 1);
+                DynamicsEnabled = snapshot.DynamicsEnabled;
+                DynamicsTargetIndex = snapshot.DynamicsTargetIndex;
+                ThresholdDb = snapshot.ThresholdDb;
+                Ratio = snapshot.Ratio;
+                AttackMs = snapshot.AttackMs;
+                ReleaseMs = snapshot.ReleaseMs;
+                MaxReductionDb = snapshot.MaxReductionDb;
             } finally {
-                updatingBands = false;
+                loadingProfile = false;
             }
-            SelectedBandIndex = Math.Clamp(snapshot.SelectedIndex, -1, Bands.Count - 1);
             RaiseSelectedBandProperties();
             RaiseProfileChanged();
         }
 
-        static bool BandSnapshotsEqual(BandSnapshot left, BandSnapshot right) {
-            return left.FrequenciesHz.SequenceEqual(right.FrequenciesHz)
-                && left.BalancePercent.SequenceEqual(right.BalancePercent);
+        static bool ProfileSnapshotsEqual(ProfileSnapshot left, ProfileSnapshot right) {
+            return left.Enabled == right.Enabled
+                && left.FrequenciesHz.SequenceEqual(right.FrequenciesHz)
+                && left.BalancePercent.SequenceEqual(right.BalancePercent)
+                && left.DynamicsEnabled == right.DynamicsEnabled
+                && left.DynamicsTargetIndex == right.DynamicsTargetIndex
+                && left.ThresholdDb == right.ThresholdDb
+                && left.Ratio == right.Ratio
+                && left.AttackMs == right.AttackMs
+                && left.ReleaseMs == right.ReleaseMs
+                && left.MaxReductionDb == right.MaxReductionDb;
         }
 
-        static BandSnapshot PopHistory(System.Collections.Generic.List<BandSnapshot> history) {
+        static ProfileSnapshot PopHistory(System.Collections.Generic.List<ProfileSnapshot> history) {
             int index = history.Count - 1;
-            BandSnapshot value = history[index];
+            ProfileSnapshot value = history[index];
             history.RemoveAt(index);
             return value;
         }
 
-        static void PushHistory(System.Collections.Generic.List<BandSnapshot> history, BandSnapshot snapshot) {
+        static void PushHistory(System.Collections.Generic.List<ProfileSnapshot> history, ProfileSnapshot snapshot) {
             history.Add(snapshot);
             if (history.Count > MaxHistoryEntries) {
                 history.RemoveAt(0);

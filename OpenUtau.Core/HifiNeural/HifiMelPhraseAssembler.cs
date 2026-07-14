@@ -73,6 +73,13 @@ namespace OpenUtau.Core.HifiNeural {
             public HifiHnsepProcessingReport HnsepReport;
         }
 
+        sealed class SourceMelCacheEntry {
+            public required float[] Samples;
+            public required float[,] Mel;
+            public required HifiHnsepProcessingReport HnsepReport;
+            public required bool CanShare;
+        }
+
         /// <summary>
         /// Build the full phrase mel [NMels, targetFrames] from per-phone source slices.
         /// The assembly report records each phone's fixed leading span for diagnostics only.
@@ -107,7 +114,7 @@ namespace OpenUtau.Core.HifiNeural {
             var segments = new List<PhoneMelSegment>(phrase.phones.Length);
             // Source mels are cached per oto slice (File + Offset + Cutoff) so a phone/oto that
             // recurs within the phrase reuses its STFT instead of re-extracting it.
-            var sliceMelCache = new Dictionary<string, float[,]>(StringComparer.Ordinal);
+            var sliceMelCache = new Dictionary<string, SourceMelCacheEntry>(StringComparer.Ordinal);
             var hnsepCache = new HifiHnsepSourceCache();
             bool collectDiagnostics = HifiRenderConfig.DebugExportEnabled;
             for (int i = 0; i < phrase.phones.Length; i++) {
@@ -162,7 +169,7 @@ namespace OpenUtau.Core.HifiNeural {
             int targetFrames,
             float[] targetF0,
             Dictionary<string, float[]> sourceCache,
-            Dictionary<string, float[,]> sliceMelCache,
+            Dictionary<string, SourceMelCacheEntry> sliceMelCache,
             HifiHnsepSourceCache hnsepCache,
             bool collectDiagnostics,
             HifiRenderContext context) {
@@ -230,24 +237,18 @@ namespace OpenUtau.Core.HifiNeural {
             double sourceF0Hz = EstimateSliceF0(phone, sourceSamples);
             int activeSourceFrames = HifiSourceAnalysis.EstimateActiveFrameCount(sourceSamples);
             var sourceParameterTrack = BuildHnsepSourceParameterTrack(parameterTrack, sourceSamples.Length, frameCount, phone, autoLeadCatchupMs, activeSourceFrames);
-            context.ThrowIfCancellationRequested();
-            sourceSamples = HifiHnsepSourceProcessor.Apply(
+            var sourceFeatures = LoadSliceMel(
                 phone,
-                phone.oto.File,
                 fullSourceSamples,
-                sourceSamples,
-                sourceParameterTrack,
-                hnsepCache,
-                phone.hifiHnSpectralProfile,
-                out var hnsepReport,
-                context);
-            float[,] sourceMel = LoadSliceMel(
-                phone,
                 sourceSamples,
                 sliceMelCache,
                 parameterTrack,
                 sourceParameterTrack,
-                hnsepReport);
+                hnsepCache,
+                context);
+            sourceSamples = sourceFeatures.Samples;
+            float[,] sourceMel = sourceFeatures.Mel;
+            var hnsepReport = sourceFeatures.HnsepReport;
             int sourceFrames = sourceMel.GetLength(1);
             if (sourceFrames <= 0) {
                 return null;
@@ -804,42 +805,72 @@ namespace OpenUtau.Core.HifiNeural {
             return (float)Math.Log(Math.Max(mixed, 1e-5));
         }
 
-        float[,] LoadSliceMel(
+        SourceMelCacheEntry LoadSliceMel(
             RenderPhone phone,
+            float[] fullSourceSamples,
             float[] sourceSamples,
-            Dictionary<string, float[,]> sliceMelCache,
+            Dictionary<string, SourceMelCacheEntry> sliceMelCache,
             HifiFrameParameterTrack parameterTrack,
             HifiFrameParameterTrack sourceParameterTrack,
-            HifiHnsepProcessingReport hnsepReport) {
-            string key = SliceCacheKey(phone, parameterTrack, sourceParameterTrack, hnsepReport);
-            if (key.Length > 0 && sliceMelCache.TryGetValue(key, out var cachedMel)) {
+            HifiHnsepSourceCache hnsepCache,
+            HifiRenderContext context) {
+            bool processingRequested = sourceParameterTrack.NeedsHnsep
+                || phone.hifiHnSpectralProfile.HasAudibleEffect;
+            string key = SliceCacheKey(phone, parameterTrack, sourceParameterTrack, processingRequested);
+            if (key.Length > 0 && sliceMelCache.TryGetValue(key, out var localEntry)) {
                 HifiRenderProfiler.Count(HifiRenderCounter.SourceMelHit);
-                return cachedMel;
+                return localEntry;
             }
             var parameters = parameterTrack.Average;
-            float[,] ExtractMel() {
+            SourceMelCacheEntry BuildEntry() {
+                context.ThrowIfCancellationRequested();
+                float[] processedSamples = HifiHnsepSourceProcessor.Apply(
+                    phone,
+                    phone.oto.File,
+                    fullSourceSamples,
+                    sourceSamples,
+                    sourceParameterTrack,
+                    hnsepCache,
+                    phone.hifiHnSpectralProfile,
+                    out var hnsepReport,
+                    context);
                 using var timing = HifiRenderProfiler.Measure(HifiRenderStage.SourceMel);
-                return sourceSamples.Length == 0
+                float[,] mel = processedSamples.Length == 0
                     ? new float[HifiMelExtractor.NMels, 0]
-                    : melExtractor.Extract(sourceSamples, parameters.GenderKeyShiftSemitones);
+                    : melExtractor.Extract(processedSamples, parameters.GenderKeyShiftSemitones);
+                return new SourceMelCacheEntry {
+                    Samples = processedSamples,
+                    Mel = mel,
+                    HnsepReport = hnsepReport,
+                    // A failed separation may recover on a later render. Reuse it inside this
+                    // phrase, but do not let the fallback waveform poison the process-wide cache.
+                    CanShare = !processingRequested || hnsepReport.Applied,
+                };
             }
 
-            float[,] mel;
+            SourceMelCacheEntry entry;
             if (key.Length > 0) {
-                mel = HifiRenderMemoryCache.Shared.GetOrAdd(
-                    "source-mel|" + key,
-                    ExtractMel,
-                    HifiRenderMemoryCache.FloatBytes,
-                    out bool cacheHit);
-                HifiRenderProfiler.Count(cacheHit
-                    ? HifiRenderCounter.SourceMelHit
-                    : HifiRenderCounter.SourceMelMiss);
-                sliceMelCache[key] = mel;
+                string sharedKey = "source-mel-v2|" + key;
+                if (HifiRenderMemoryCache.Shared.TryGet(sharedKey, out SourceMelCacheEntry sharedEntry)) {
+                    entry = sharedEntry;
+                    HifiRenderProfiler.Count(HifiRenderCounter.SourceMelHit);
+                } else {
+                    entry = BuildEntry();
+                    HifiRenderProfiler.Count(HifiRenderCounter.SourceMelMiss);
+                    if (entry.CanShare) {
+                        HifiRenderMemoryCache.Shared.AddOrRefresh(
+                            sharedKey,
+                            entry,
+                            HifiRenderMemoryCache.FloatBytes(entry.Samples)
+                                + HifiRenderMemoryCache.FloatBytes(entry.Mel));
+                    }
+                }
+                sliceMelCache[key] = entry;
             } else {
                 HifiRenderProfiler.Count(HifiRenderCounter.SourceMelMiss);
-                mel = ExtractMel();
+                entry = BuildEntry();
             }
-            return mel;
+            return entry;
         }
 
         static float[] SliceTargetF0(float[] targetF0, int startFrame, int frameCount) {
@@ -858,28 +889,31 @@ namespace OpenUtau.Core.HifiNeural {
             RenderPhone phone,
             HifiFrameParameterTrack parameterTrack,
             HifiFrameParameterTrack sourceParameterTrack,
-            HifiHnsepProcessingReport hnsepReport) {
+            bool processingRequested) {
             if (phone.oto == null || string.IsNullOrWhiteSpace(phone.oto.File)) {
                 return string.Empty;
             }
             var parameters = parameterTrack.Average;
             // Offset+Cutoff fully determine the sample slice taken from the file, so two phones
             // sharing them (same oto entry) share the extracted mel.
-            return string.Concat(
-                "v1-nfft", HifiMelExtractor.Nfft,
+            string key = string.Concat(
+                "v2-nfft", HifiMelExtractor.Nfft,
                 "-hop", HifiMelExtractor.OriginHopSize,
                 "-mels", HifiMelExtractor.NMels,
                 "|", HifiRenderMemoryCache.FileVersionKey(phone.oto.File),
                 "|", phone.oto.Offset.ToString("R"),
                 "|", phone.oto.Cutoff.ToString("R"),
-                "|g", Quantize(parameters.GenderKeyShiftSemitones),
-                "|trk", parameterTrack.CacheKey,
-                "|src", sourceParameterTrack.CacheKey,
-                "|hnreq", hnsepReport.Requested,
-                "|hnapplied", hnsepReport.Applied,
-                "|hnreason", hnsepReport.Reason,
-                "|hnprofile", phone.hifiHnSpectralProfile.CacheKey(),
-                hnsepReport.Requested ? "|hnmodel" + HifiHnsepOnnx.CacheKeyOrDisabled() : string.Empty);
+                "|g", Quantize(parameters.GenderKeyShiftSemitones));
+            if (sourceParameterTrack.NeedsHnsep) {
+                key += "|src" + sourceParameterTrack.CacheKey;
+            }
+            if (phone.hifiHnSpectralProfile.HasAudibleEffect) {
+                key += "|hnprofile" + phone.hifiHnSpectralProfile.CacheKey();
+            }
+            if (processingRequested) {
+                key += "|hnmodel" + HifiHnsepOnnx.CacheKeyOrDisabled();
+            }
+            return key;
         }
 
         static string Quantize(double value) {

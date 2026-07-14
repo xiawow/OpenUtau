@@ -429,6 +429,44 @@ namespace OpenUtau.Core.Test.HifiNeural {
             Assert.Equal(4, changed);
         }
 
+        [Fact]
+        public void HnSpectralDesignerResetCanRestoreTheWholeProfileWithUndo() {
+            var original = new HifiHnSpectralProfile {
+                Enabled = false,
+                FrequenciesHz = new double[] { 90, 300, 1400, 6000 },
+                BalanceDb = new double[] { -4, 2, 7, -3 },
+                DynamicsEnabled = true,
+                DynamicsTarget = HifiHnDynamicsTarget.Noise,
+                ThresholdDb = -42,
+                Ratio = 5,
+                AttackMs = 8,
+                ReleaseMs = 240,
+                MaxReductionDb = 11,
+            }.Normalize();
+            var viewModel = new HifiHnSpectralDesignerViewModel(original, 1);
+
+            viewModel.Reset();
+            Assert.True(viewModel.CanUndoBandEdit);
+
+            viewModel.UndoBandEdit();
+
+            var restored = viewModel.BuildProfile();
+            Assert.Equal(original.Enabled, restored.Enabled);
+            Assert.Equal(original.FrequenciesHz, restored.FrequenciesHz);
+            Assert.Equal(original.BalanceDb.Length, restored.BalanceDb.Length);
+            for (int i = 0; i < original.BalanceDb.Length; i++) {
+                Assert.Equal(original.BalanceDb[i], restored.BalanceDb[i], 9);
+            }
+            Assert.Equal(original.DynamicsEnabled, restored.DynamicsEnabled);
+            Assert.Equal(original.DynamicsTarget, restored.DynamicsTarget);
+            Assert.Equal(original.ThresholdDb, restored.ThresholdDb);
+            Assert.Equal(original.Ratio, restored.Ratio);
+            Assert.Equal(original.AttackMs, restored.AttackMs);
+            Assert.Equal(original.ReleaseMs, restored.ReleaseMs);
+            Assert.Equal(original.MaxReductionDb, restored.MaxReductionDb);
+            Assert.True(viewModel.CanRedoBandEdit);
+        }
+
         [Theory]
         [InlineData(-100, -18.0)]
         [InlineData(-50, -7.5681)]

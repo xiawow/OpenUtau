@@ -225,6 +225,27 @@ namespace OpenUtau.App.Controls {
                     ValueY(Bands[i].BalancePercent, plot));
             }
 
+            // The DSP holds the outer values to the plot edges. Keep those shelves visually
+            // subordinate to the editable curve while still showing their real behavior.
+            DrawEdgeShelf(
+                context,
+                plot.X,
+                points[0].X,
+                points[0].Y,
+                fadeAtStart: true,
+                curveBrush,
+                SelectedBandIndex == 0,
+                Bands[0].BalancePercent);
+            DrawEdgeShelf(
+                context,
+                points[^1].X,
+                plot.Right,
+                points[^1].Y,
+                fadeAtStart: false,
+                curveBrush,
+                SelectedBandIndex == Bands.Count - 1,
+                Bands[^1].BalancePercent);
+
             var geometry = new PathGeometry();
             var figure = new PathFigure { StartPoint = points[0], IsClosed = false };
             for (int i = 0; i < points.Length - 1; i++) {
@@ -248,6 +269,59 @@ namespace OpenUtau.App.Controls {
                 }
                 double radius = i == activeBand ? 9 : selected ? 8 : 6;
                 context.DrawEllipse(fill, new Pen(plotBackground, 1.5), points[i], radius, radius);
+            }
+        }
+
+        static void DrawEdgeShelf(
+            DrawingContext context,
+            double startX,
+            double endX,
+            double y,
+            bool fadeAtStart,
+            IBrush brush,
+            bool selected,
+            double valuePercent) {
+            const double lineWidth = 1.6;
+            const double edgeFadePixels = 28;
+            const int fadeSegments = 8;
+            double length = endX - startX;
+            if (length <= 0.5) {
+                return;
+            }
+
+            double maxOpacity = selected ? 0.62 : 0.40;
+            double zeroLineFactor = Math.Clamp(Math.Abs(valuePercent) / 12.0, 0.55, 1.0);
+            maxOpacity *= zeroLineFactor;
+            double fadeLength = Math.Min(edgeFadePixels, length);
+            double fadeStart = fadeAtStart ? startX : endX - fadeLength;
+            double fadeEnd = fadeAtStart ? startX + fadeLength : endX;
+            double solidStart = fadeAtStart ? fadeEnd : startX;
+            double solidEnd = fadeAtStart ? endX : fadeStart;
+
+            if (solidEnd - solidStart > 0.5) {
+                using (context.PushOpacity(maxOpacity)) {
+                    context.DrawLine(
+                        new Pen(brush, lineWidth),
+                        new Point(solidStart, y),
+                        new Point(solidEnd, y));
+                }
+            }
+
+            for (int i = 0; i < fadeSegments; i++) {
+                double t0 = i / (double)fadeSegments;
+                double t1 = (i + 1) / (double)fadeSegments;
+                double x0 = fadeStart + (fadeEnd - fadeStart) * t0;
+                double x1 = fadeStart + (fadeEnd - fadeStart) * t1;
+                double towardCurve = fadeAtStart
+                    ? (t0 + t1) * 0.5
+                    : 1.0 - (t0 + t1) * 0.5;
+                double smoothOpacity = towardCurve * towardCurve * (3.0 - 2.0 * towardCurve);
+                using (context.PushOpacity(maxOpacity * smoothOpacity)) {
+                    context.DrawLine(
+                        new Pen(brush, lineWidth),
+                        new Point(x0, y),
+                        new Point(x1, y));
+                }
             }
         }
 

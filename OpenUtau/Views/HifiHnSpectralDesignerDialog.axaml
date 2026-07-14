@@ -203,7 +203,7 @@
                            Text="{Binding SelectedBalancePercent, Mode=TwoWay, StringFormat={}{0:F0}}"/>
                   <TextBlock Grid.Column="3" Classes="hint" VerticalAlignment="Center" Text="%"/>
                 </Grid>
-                <Slider Grid.Row="2" Classes="fader" Height="18" VerticalAlignment="Center"
+                <Slider x:Name="BalanceSlider" Grid.Row="2" Classes="fader" Height="18" VerticalAlignment="Center"
                         Minimum="-100" Maximum="100" TickFrequency="1"
                         Value="{Binding SelectedBalancePercent, Mode=TwoWay}"/>
               </Grid>

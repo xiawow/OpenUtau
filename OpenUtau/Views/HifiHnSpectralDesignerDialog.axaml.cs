@@ -13,6 +13,7 @@ namespace OpenUtau.App.Views {
 
         readonly DispatcherTimer autoApplyTimer;
         HifiHnSpectralDesignerViewModel? subscribedViewModel;
+        HifiHnSpectralDesignerViewModel? continuousBandEditViewModel;
         bool hasPendingChanges;
 
         public event EventHandler? ApplyRequested;
@@ -28,9 +29,24 @@ namespace OpenUtau.App.Views {
             DataContextChanged += OnDataContextChanged;
             Deactivated += OnDeactivated;
             Closing += OnClosing;
+            BalanceSlider.AddHandler(
+                InputElement.PointerPressedEvent,
+                OnBalanceSliderPointerPressed,
+                RoutingStrategies.Tunnel,
+                handledEventsToo: true);
+            BalanceSlider.AddHandler(
+                InputElement.PointerReleasedEvent,
+                OnBalanceSliderPointerReleased,
+                RoutingStrategies.Tunnel,
+                handledEventsToo: true);
+            BalanceSlider.PointerCaptureLost += OnBalanceSliderPointerCaptureLost;
         }
 
-        void OnReset(object? sender, RoutedEventArgs e) => ViewModel.Reset();
+        void OnReset(object? sender, RoutedEventArgs e) {
+            // A hidden parameter TextBox can otherwise keep keyboard focus and consume Ctrl+Z.
+            (sender as Control)?.Focus();
+            ViewModel.Reset();
+        }
         void OnPreviousBand(object? sender, RoutedEventArgs e) => ViewModel.SelectPreviousBand();
         void OnNextBand(object? sender, RoutedEventArgs e) => ViewModel.SelectNextBand();
         void OnResetSelectedBand(object? sender, RoutedEventArgs e) => ViewModel.ResetSelectedBalance();
@@ -68,7 +84,34 @@ namespace OpenUtau.App.Views {
         }
 
         void OnClosing(object? sender, WindowClosingEventArgs e) {
+            EndContinuousBandEdit();
             FlushPendingChanges(force: false, allowDuringEdit: true);
+        }
+
+        void OnBalanceSliderPointerPressed(object? sender, PointerPressedEventArgs e) {
+            if (!e.GetCurrentPoint(BalanceSlider).Properties.IsLeftButtonPressed
+                || continuousBandEditViewModel != null
+                || subscribedViewModel == null) {
+                return;
+            }
+            continuousBandEditViewModel = subscribedViewModel;
+            continuousBandEditViewModel.BeginBandEdit();
+        }
+
+        void OnBalanceSliderPointerReleased(object? sender, PointerReleasedEventArgs e) {
+            EndContinuousBandEdit();
+        }
+
+        void OnBalanceSliderPointerCaptureLost(object? sender, PointerCaptureLostEventArgs e) {
+            EndContinuousBandEdit();
+        }
+
+        void EndContinuousBandEdit() {
+            if (continuousBandEditViewModel == null) {
+                return;
+            }
+            continuousBandEditViewModel.CommitBandEdit();
+            continuousBandEditViewModel = null;
         }
 
         void ScheduleAutoApply(TimeSpan delay) {
@@ -91,6 +134,7 @@ namespace OpenUtau.App.Views {
         }
 
         protected override void OnClosed(EventArgs e) {
+            EndContinuousBandEdit();
             autoApplyTimer.Stop();
             if (subscribedViewModel != null) {
                 subscribedViewModel.ProfileChanged -= OnProfileChanged;
