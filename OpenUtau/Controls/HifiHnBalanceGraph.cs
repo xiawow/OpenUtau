@@ -222,7 +222,7 @@ namespace OpenUtau.App.Controls {
             for (int i = 0; i < Bands.Count; i++) {
                 points[i] = new Point(
                     FrequencyX(Bands[i].FrequencyHz, plot),
-                    ValueY(Bands[i].BalanceDb, plot));
+                    ValueY(Bands[i].BalancePercent, plot));
             }
 
             var geometry = new PathGeometry();
@@ -240,7 +240,7 @@ namespace OpenUtau.App.Controls {
             context.DrawGeometry(null, new Pen(curveBrush, 2.5), geometry);
 
             for (int i = 0; i < points.Length; i++) {
-                bool harmonic = Bands[i].BalanceDb >= 0;
+                bool harmonic = Bands[i].BalancePercent >= 0;
                 IBrush fill = harmonic ? harmonicBrush : noiseBrush;
                 bool selected = i == SelectedBandIndex;
                 if (selected) {
@@ -342,7 +342,7 @@ namespace OpenUtau.App.Controls {
             var plot = PlotBounds();
             return new Point(
                 FrequencyX(Bands[band].FrequencyHz, plot),
-                ValueY(Bands[band].BalanceDb, plot));
+                ValueY(Bands[band].BalancePercent, plot));
         }
 
         void DrawHoverGuides(DrawingContext context, Rect plot, IBrush brush) {
@@ -413,8 +413,8 @@ namespace OpenUtau.App.Controls {
             double frequency = FrequencyAtX(position.X, plot);
             Bands[band].FrequencyHz = Math.Round(ClampFrequencyForBand(band, frequency));
             double value = (plot.Center.Y - position.Y) / (plot.Height * 0.5)
-                * HifiHnSpectralProfile.MaxBalanceDb;
-            Bands[band].BalanceDb = Math.Round(ClampDb(value) * 2.0) / 2.0;
+                * HifiHnSpectralProfile.MaxBalancePercent;
+            Bands[band].BalancePercent = Math.Round(ClampPercent(value));
         }
 
         double ClampFrequencyForBand(int band, double value) {
@@ -435,10 +435,10 @@ namespace OpenUtau.App.Controls {
                 return 0;
             }
             if (frequency <= Bands[0].FrequencyHz) {
-                return Bands[0].BalanceDb;
+                return Bands[0].BalancePercent;
             }
             if (frequency >= Bands[^1].FrequencyHz) {
-                return Bands[^1].BalanceDb;
+                return Bands[^1].BalancePercent;
             }
             double logFrequency = Math.Log(frequency);
             for (int i = 0; i < Bands.Count - 1; i++) {
@@ -447,10 +447,10 @@ namespace OpenUtau.App.Controls {
                     double right = Math.Log(Bands[i + 1].FrequencyHz);
                     double t = Math.Clamp((logFrequency - left) / Math.Max(1e-9, right - left), 0, 1);
                     t = t * t * (3 - 2 * t);
-                    return Bands[i].BalanceDb + (Bands[i + 1].BalanceDb - Bands[i].BalanceDb) * t;
+                    return Bands[i].BalancePercent + (Bands[i + 1].BalancePercent - Bands[i].BalancePercent) * t;
                 }
             }
-            return Bands[^1].BalanceDb;
+            return Bands[^1].BalancePercent;
         }
 
         void SubscribeBands() {
@@ -519,12 +519,12 @@ namespace OpenUtau.App.Controls {
         }
 
         static double ValueY(double value, Rect plot) {
-            return plot.Center.Y - ClampDb(value) / HifiHnSpectralProfile.MaxBalanceDb * plot.Height * 0.5;
+            return plot.Center.Y - ClampPercent(value) / HifiHnSpectralProfile.MaxBalancePercent * plot.Height * 0.5;
         }
 
-        static double ClampDb(double value) {
+        static double ClampPercent(double value) {
             return double.IsFinite(value)
-                ? Math.Clamp(value, -HifiHnSpectralProfile.MaxBalanceDb, HifiHnSpectralProfile.MaxBalanceDb)
+                ? Math.Clamp(value, -HifiHnSpectralProfile.MaxBalancePercent, HifiHnSpectralProfile.MaxBalancePercent)
                 : 0;
         }
     }

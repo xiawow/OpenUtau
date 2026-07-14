@@ -2,17 +2,32 @@ using System;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
+using Avalonia.Threading;
 using OpenUtau.App.ViewModels;
 using OpenUtau.Core.HifiNeural;
 
 namespace OpenUtau.App.Views {
     public partial class HifiHnSpectralDesignerDialog : Window {
+        static readonly TimeSpan AutoApplyDelay = TimeSpan.FromMilliseconds(500);
+        static readonly TimeSpan ActiveEditPollDelay = TimeSpan.FromMilliseconds(75);
+
+        readonly DispatcherTimer autoApplyTimer;
+        HifiHnSpectralDesignerViewModel? subscribedViewModel;
+        bool hasPendingChanges;
+
         public event EventHandler? ApplyRequested;
         public HifiHnSpectralProfile ResultProfile => ViewModel.BuildProfile();
         HifiHnSpectralDesignerViewModel ViewModel => (HifiHnSpectralDesignerViewModel)DataContext!;
 
         public HifiHnSpectralDesignerDialog() {
             InitializeComponent();
+            autoApplyTimer = new DispatcherTimer(
+                AutoApplyDelay,
+                DispatcherPriority.Background,
+                OnAutoApplyTimerTick);
+            DataContextChanged += OnDataContextChanged;
+            Deactivated += OnDeactivated;
+            Closing += OnClosing;
         }
 
         void OnReset(object? sender, RoutedEventArgs e) => ViewModel.Reset();
@@ -23,7 +38,65 @@ namespace OpenUtau.App.Views {
         void OnClose(object? sender, RoutedEventArgs e) => Close();
 
         void OnApply(object? sender, RoutedEventArgs e) {
+            FlushPendingChanges(force: true, allowDuringEdit: true);
+        }
+
+        void OnDataContextChanged(object? sender, EventArgs e) {
+            if (subscribedViewModel != null) {
+                subscribedViewModel.ProfileChanged -= OnProfileChanged;
+            }
+            subscribedViewModel = DataContext as HifiHnSpectralDesignerViewModel;
+            if (subscribedViewModel != null) {
+                subscribedViewModel.ProfileChanged += OnProfileChanged;
+            }
+            hasPendingChanges = false;
+            autoApplyTimer.Stop();
+        }
+
+        void OnProfileChanged(object? sender, EventArgs e) {
+            hasPendingChanges = true;
+            ScheduleAutoApply(AutoApplyDelay);
+        }
+
+        void OnAutoApplyTimerTick(object? sender, EventArgs e) {
+            autoApplyTimer.Stop();
+            FlushPendingChanges(force: false, allowDuringEdit: false);
+        }
+
+        void OnDeactivated(object? sender, EventArgs e) {
+            FlushPendingChanges(force: false, allowDuringEdit: false);
+        }
+
+        void OnClosing(object? sender, WindowClosingEventArgs e) {
+            FlushPendingChanges(force: false, allowDuringEdit: true);
+        }
+
+        void ScheduleAutoApply(TimeSpan delay) {
+            autoApplyTimer.Stop();
+            autoApplyTimer.Interval = delay;
+            autoApplyTimer.Start();
+        }
+
+        void FlushPendingChanges(bool force, bool allowDuringEdit) {
+            if (subscribedViewModel == null || (!force && !hasPendingChanges)) {
+                return;
+            }
+            if (!allowDuringEdit && subscribedViewModel.IsBandEditInProgress) {
+                ScheduleAutoApply(ActiveEditPollDelay);
+                return;
+            }
+            autoApplyTimer.Stop();
+            hasPendingChanges = false;
             ApplyRequested?.Invoke(this, EventArgs.Empty);
+        }
+
+        protected override void OnClosed(EventArgs e) {
+            autoApplyTimer.Stop();
+            if (subscribedViewModel != null) {
+                subscribedViewModel.ProfileChanged -= OnProfileChanged;
+                subscribedViewModel = null;
+            }
+            base.OnClosed(e);
         }
 
         protected override void OnKeyDown(KeyEventArgs e) {

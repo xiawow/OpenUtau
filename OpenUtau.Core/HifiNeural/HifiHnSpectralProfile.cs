@@ -17,7 +17,9 @@ namespace OpenUtau.Core.HifiNeural {
         public const int BandCount = 5;
         public const int MinBandCount = 2;
         public const int MaxBandCount = 16;
-        public const double MaxBalanceDb = 9.0;
+        public const double MaxBalanceDb = 18.0;
+        public const double MaxBalancePercent = 100.0;
+        public const double BalancePercentExponent = 1.25;
         public const double MinFrequencyHz = 40.0;
         public const double MaxFrequencyHz = 20000.0;
         public const double MinFrequencyRatio = 1.05;
@@ -133,6 +135,29 @@ namespace OpenUtau.Core.HifiNeural {
             } catch {
                 return new HifiHnSpectralProfile();
             }
+        }
+
+        public static double PercentToBalanceDb(double percent) {
+            if (!double.IsFinite(percent)) {
+                return 0;
+            }
+            double normalized = Math.Clamp(
+                Math.Abs(percent) / MaxBalancePercent,
+                0,
+                1);
+            return Math.CopySign(
+                MaxBalanceDb * Math.Pow(normalized, BalancePercentExponent),
+                percent);
+        }
+
+        public static double BalanceDbToPercent(double balanceDb) {
+            if (!double.IsFinite(balanceDb)) {
+                return 0;
+            }
+            double normalized = Math.Clamp(Math.Abs(balanceDb) / MaxBalanceDb, 0, 1);
+            return Math.CopySign(
+                MaxBalancePercent * Math.Pow(normalized, 1.0 / BalancePercentExponent),
+                balanceDb);
         }
 
         static double FiniteClamp(double value, double min, double max, double fallback) {

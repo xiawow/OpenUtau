@@ -676,7 +676,7 @@ Curve Type
   <system:String x:Key="hifi.hn.enabled">启用</system:String>
   <system:String x:Key="hifi.hn.close">关闭</system:String>
   <system:String x:Key="hifi.hn.balance">频段平衡</system:String>
-  <system:String x:Key="hifi.hn.balance.tip">拖动控制点塑形；双击曲线添加，右键控制点可复制、粘贴或删除。</system:String>
+  <system:String x:Key="hifi.hn.balance.tip">拖动控制点塑形；双击曲线添加。</system:String>
   <system:String x:Key="hifi.hn.point">控制点 {0}</system:String>
   <system:String x:Key="hifi.hn.current.point">当前选中的频点</system:String>
   <system:String x:Key="hifi.hn.frequency">频率</system:String>
@@ -703,5 +703,5 @@ Curve Type
   <system:String x:Key="hifi.hn.attack">反应速度</system:String>
   <system:String x:Key="hifi.hn.release">恢复速度</system:String>
   <system:String x:Key="hifi.hn.reduction">最大压低</system:String>
-  <system:String x:Key="hifi.hn.save.tip">“应用”会更新选中音符但不关闭窗口，设置会随工程保存。</system:String>
+  <system:String x:Key="hifi.hn.save.tip">停止调整或切回钢琴窗后会自动更新；“应用”可立即更新。</system:String>
 </ResourceDictionary>

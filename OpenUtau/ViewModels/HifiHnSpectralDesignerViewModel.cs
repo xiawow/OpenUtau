@@ -10,7 +10,7 @@ using ReactiveUI.Fody.Helpers;
 namespace OpenUtau.App.ViewModels {
     public sealed class HifiHnBandViewModel : ReactiveObject {
         double frequencyHz;
-        double balanceDb;
+        double balancePercent;
 
         public double FrequencyHz {
             get => frequencyHz;
@@ -21,28 +21,28 @@ namespace OpenUtau.App.ViewModels {
                     : HifiHnSpectralProfile.MinFrequencyHz);
         }
 
-        public double BalanceDb {
-            get => balanceDb;
+        public double BalancePercent {
+            get => balancePercent;
             set => this.RaiseAndSetIfChanged(
-                ref balanceDb,
+                ref balancePercent,
                 double.IsFinite(value)
-                    ? Math.Clamp(value, -HifiHnSpectralProfile.MaxBalanceDb, HifiHnSpectralProfile.MaxBalanceDb)
+                    ? Math.Clamp(value, -HifiHnSpectralProfile.MaxBalancePercent, HifiHnSpectralProfile.MaxBalancePercent)
                     : 0);
         }
 
-        public HifiHnBandViewModel(double frequencyHz, double balanceDb) {
+        public HifiHnBandViewModel(double frequencyHz, double balancePercent) {
             this.frequencyHz = double.IsFinite(frequencyHz)
                 ? Math.Clamp(frequencyHz, HifiHnSpectralProfile.MinFrequencyHz, HifiHnSpectralProfile.MaxFrequencyHz)
                 : HifiHnSpectralProfile.MinFrequencyHz;
-            this.balanceDb = double.IsFinite(balanceDb)
-                ? Math.Clamp(balanceDb, -HifiHnSpectralProfile.MaxBalanceDb, HifiHnSpectralProfile.MaxBalanceDb)
+            this.balancePercent = double.IsFinite(balancePercent)
+                ? Math.Clamp(balancePercent, -HifiHnSpectralProfile.MaxBalancePercent, HifiHnSpectralProfile.MaxBalancePercent)
                 : 0;
         }
     }
 
     public sealed class HifiHnSpectralDesignerViewModel : ViewModelBase {
-        readonly record struct BandClipboard(double FrequencyHz, double BalanceDb);
-        sealed record BandSnapshot(double[] FrequenciesHz, double[] BalanceDb, int SelectedIndex);
+        readonly record struct BandClipboard(double FrequencyHz, double BalancePercent);
+        sealed record BandSnapshot(double[] FrequenciesHz, double[] BalancePercent, int SelectedIndex);
         const int MaxHistoryEntries = 64;
         static BandClipboard? clipboard;
 
@@ -50,6 +50,7 @@ namespace OpenUtau.App.ViewModels {
         readonly System.Collections.Generic.List<BandSnapshot> undoHistory = new();
         readonly System.Collections.Generic.List<BandSnapshot> redoHistory = new();
         bool updatingBands;
+        bool loadingProfile;
         int bandEditDepth;
         BandSnapshot? pendingBandEdit;
         int selectedBandIndex = -1;
@@ -65,6 +66,8 @@ namespace OpenUtau.App.ViewModels {
         [Reactive] public double MaxReductionDb { get; set; }
 
         public ObservableCollection<HifiHnBandViewModel> Bands { get; } = new();
+        public event EventHandler? ProfileChanged;
+        public bool IsBandEditInProgress => bandEditDepth > 0;
 
         public int SelectedBandIndex {
             get => selectedBandIndex;
@@ -97,11 +100,11 @@ namespace OpenUtau.App.ViewModels {
                 }
             }
         }
-        public double SelectedBalanceDb {
-            get => HasSelectedBand ? Bands[SelectedBandIndex].BalanceDb : 0;
+        public double SelectedBalancePercent {
+            get => HasSelectedBand ? Bands[SelectedBandIndex].BalancePercent : 0;
             set {
                 if (HasSelectedBand) {
-                    RunBandEdit(() => Bands[SelectedBandIndex].BalanceDb = value);
+                    RunBandEdit(() => Bands[SelectedBandIndex].BalancePercent = value);
                 }
             }
         }
@@ -139,6 +142,7 @@ namespace OpenUtau.App.ViewModels {
                 ThemeManager.GetString("hifi.hn.target.both"),
             };
             Load(profile);
+            PropertyChanged += OnProfilePropertyChanged;
         }
 
         public void Reset() => Load(new HifiHnSpectralProfile());
@@ -156,18 +160,18 @@ namespace OpenUtau.App.ViewModels {
         }
 
         public void ResetSelectedBalance() {
-            SelectedBalanceDb = 0;
+            SelectedBalancePercent = 0;
         }
 
         public void ToggleDynamicsPanel() {
             DynamicsPanelExpanded = !DynamicsPanelExpanded;
         }
 
-        public int AddBand(double frequencyHz, double balanceDb) {
-            return RunBandEdit(() => AddBandCore(frequencyHz, balanceDb));
+        public int AddBand(double frequencyHz, double balancePercent) {
+            return RunBandEdit(() => AddBandCore(frequencyHz, balancePercent));
         }
 
-        int AddBandCore(double frequencyHz, double balanceDb) {
+        int AddBandCore(double frequencyHz, double balancePercent) {
             if (Bands.Count >= HifiHnSpectralProfile.MaxBandCount) {
                 return -1;
             }
@@ -198,7 +202,7 @@ namespace OpenUtau.App.ViewModels {
             if (bestIndex < 0) {
                 return -1;
             }
-            Bands.Insert(bestIndex, new HifiHnBandViewModel(bestFrequency, balanceDb));
+            Bands.Insert(bestIndex, new HifiHnBandViewModel(bestFrequency, balancePercent));
             SelectedBandIndex = bestIndex;
             return bestIndex;
         }
@@ -217,7 +221,7 @@ namespace OpenUtau.App.ViewModels {
         public void CopySelectedBand() {
             if (HasSelectedBand) {
                 var band = Bands[SelectedBandIndex];
-                clipboard = new BandClipboard(band.FrequencyHz, band.BalanceDb);
+                clipboard = new BandClipboard(band.FrequencyHz, band.BalancePercent);
             }
         }
 
@@ -237,7 +241,7 @@ namespace OpenUtau.App.ViewModels {
             double frequency = CanInsertAtFrequency(value.FrequencyHz)
                 ? value.FrequencyHz
                 : FrequencyNearSelectedBand();
-            AddBand(frequency, value.BalanceDb);
+            AddBand(frequency, value.BalancePercent);
         }
 
         public void BeginBandEdit() {
@@ -288,7 +292,9 @@ namespace OpenUtau.App.ViewModels {
         public HifiHnSpectralProfile BuildProfile() {
             return new HifiHnSpectralProfile {
                 Enabled = Enabled,
-                BalanceDb = Bands.Select(band => band.BalanceDb).ToArray(),
+                BalanceDb = Bands
+                    .Select(band => HifiHnSpectralProfile.PercentToBalanceDb(band.BalancePercent))
+                    .ToArray(),
                 FrequenciesHz = Bands.Select(band => band.FrequencyHz).ToArray(),
                 DynamicsEnabled = DynamicsEnabled,
                 DynamicsTarget = Enum.IsDefined(typeof(HifiHnDynamicsTarget), DynamicsTargetIndex)
@@ -304,33 +310,41 @@ namespace OpenUtau.App.ViewModels {
 
         void Load(HifiHnSpectralProfile profile) {
             profile = profile.Clone().Normalize();
-            Enabled = profile.Enabled;
-            updatingBands = true;
+            loadingProfile = true;
             try {
-                foreach (var band in Bands) {
-                    band.PropertyChanged -= OnBandPropertyChanged;
+                Enabled = profile.Enabled;
+                updatingBands = true;
+                try {
+                    foreach (var band in Bands) {
+                        band.PropertyChanged -= OnBandPropertyChanged;
+                    }
+                    Bands.Clear();
+                    for (int i = 0; i < profile.FrequenciesHz.Length; i++) {
+                        Bands.Add(new HifiHnBandViewModel(
+                            profile.FrequenciesHz[i],
+                            HifiHnSpectralProfile.BalanceDbToPercent(profile.BalanceDb[i])));
+                    }
+                } finally {
+                    updatingBands = false;
                 }
-                Bands.Clear();
-                for (int i = 0; i < profile.FrequenciesHz.Length; i++) {
-                    Bands.Add(new HifiHnBandViewModel(profile.FrequenciesHz[i], profile.BalanceDb[i]));
-                }
+                SelectedBandIndex = -1;
+                DynamicsEnabled = profile.DynamicsEnabled;
+                DynamicsTargetIndex = (int)profile.DynamicsTarget;
+                ThresholdDb = profile.ThresholdDb;
+                Ratio = profile.Ratio;
+                AttackMs = profile.AttackMs;
+                ReleaseMs = profile.ReleaseMs;
+                MaxReductionDb = profile.MaxReductionDb;
+                undoHistory.Clear();
+                redoHistory.Clear();
+                pendingBandEdit = null;
+                bandEditDepth = 0;
+                RaiseSelectedBandProperties();
+                RaiseHistoryProperties();
             } finally {
-                updatingBands = false;
+                loadingProfile = false;
             }
-            SelectedBandIndex = -1;
-            DynamicsEnabled = profile.DynamicsEnabled;
-            DynamicsTargetIndex = (int)profile.DynamicsTarget;
-            ThresholdDb = profile.ThresholdDb;
-            Ratio = profile.Ratio;
-            AttackMs = profile.AttackMs;
-            ReleaseMs = profile.ReleaseMs;
-            MaxReductionDb = profile.MaxReductionDb;
-            undoHistory.Clear();
-            redoHistory.Clear();
-            pendingBandEdit = null;
-            bandEditDepth = 0;
-            RaiseSelectedBandProperties();
-            RaiseHistoryProperties();
+            RaiseProfileChanged();
         }
 
         void OnBandsChanged(object? sender, NotifyCollectionChangedEventArgs e) {
@@ -348,6 +362,9 @@ namespace OpenUtau.App.ViewModels {
                 SelectedBandIndex = Bands.Count - 1;
             }
             RaiseSelectedBandProperties();
+            if (!updatingBands) {
+                RaiseProfileChanged();
+            }
         }
 
         void OnBandPropertyChanged(object? sender, PropertyChangedEventArgs e) {
@@ -371,6 +388,28 @@ namespace OpenUtau.App.ViewModels {
             }
             if (index == SelectedBandIndex) {
                 RaiseSelectedBandProperties();
+            }
+            if (!updatingBands) {
+                RaiseProfileChanged();
+            }
+        }
+
+        void OnProfilePropertyChanged(object? sender, PropertyChangedEventArgs e) {
+            if (e.PropertyName is nameof(Enabled)
+                or nameof(DynamicsEnabled)
+                or nameof(DynamicsTargetIndex)
+                or nameof(ThresholdDb)
+                or nameof(Ratio)
+                or nameof(AttackMs)
+                or nameof(ReleaseMs)
+                or nameof(MaxReductionDb)) {
+                RaiseProfileChanged();
+            }
+        }
+
+        void RaiseProfileChanged() {
+            if (!loadingProfile) {
+                ProfileChanged?.Invoke(this, EventArgs.Empty);
             }
         }
 
@@ -455,7 +494,7 @@ namespace OpenUtau.App.ViewModels {
         BandSnapshot CaptureBandSnapshot() {
             return new BandSnapshot(
                 Bands.Select(band => band.FrequencyHz).ToArray(),
-                Bands.Select(band => band.BalanceDb).ToArray(),
+                Bands.Select(band => band.BalancePercent).ToArray(),
                 SelectedBandIndex);
         }
 
@@ -467,18 +506,19 @@ namespace OpenUtau.App.ViewModels {
                 }
                 Bands.Clear();
                 for (int i = 0; i < snapshot.FrequenciesHz.Length; i++) {
-                    Bands.Add(new HifiHnBandViewModel(snapshot.FrequenciesHz[i], snapshot.BalanceDb[i]));
+                    Bands.Add(new HifiHnBandViewModel(snapshot.FrequenciesHz[i], snapshot.BalancePercent[i]));
                 }
             } finally {
                 updatingBands = false;
             }
             SelectedBandIndex = Math.Clamp(snapshot.SelectedIndex, -1, Bands.Count - 1);
             RaiseSelectedBandProperties();
+            RaiseProfileChanged();
         }
 
         static bool BandSnapshotsEqual(BandSnapshot left, BandSnapshot right) {
             return left.FrequenciesHz.SequenceEqual(right.FrequenciesHz)
-                && left.BalanceDb.SequenceEqual(right.BalanceDb);
+                && left.BalancePercent.SequenceEqual(right.BalancePercent);
         }
 
         static BandSnapshot PopHistory(System.Collections.Generic.List<BandSnapshot> history) {
@@ -507,7 +547,7 @@ namespace OpenUtau.App.ViewModels {
             this.RaisePropertyChanged(nameof(SelectedBandOpacity));
             this.RaisePropertyChanged(nameof(SelectedBandTitle));
             this.RaisePropertyChanged(nameof(SelectedFrequencyHz));
-            this.RaisePropertyChanged(nameof(SelectedBalanceDb));
+            this.RaisePropertyChanged(nameof(SelectedBalancePercent));
         }
     }
 }

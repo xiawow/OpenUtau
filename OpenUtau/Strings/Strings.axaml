@@ -846,7 +846,7 @@ General
   <system:String x:Key="hifi.hn.enabled">Enabled</system:String>
   <system:String x:Key="hifi.hn.close">Close</system:String>
   <system:String x:Key="hifi.hn.balance">Frequency balance</system:String>
-  <system:String x:Key="hifi.hn.balance.tip">Drag points to shape. Double-click the curve to add; right-click a point for edit actions.</system:String>
+  <system:String x:Key="hifi.hn.balance.tip">Drag points to shape; double-click the curve to add.</system:String>
   <system:String x:Key="hifi.hn.point">Control point {0}</system:String>
   <system:String x:Key="hifi.hn.current.point">Selected point</system:String>
   <system:String x:Key="hifi.hn.frequency">Frequency</system:String>
@@ -873,5 +873,5 @@ General
   <system:String x:Key="hifi.hn.attack">Attack</system:String>
   <system:String x:Key="hifi.hn.release">Release</system:String>
   <system:String x:Key="hifi.hn.reduction">Max reduction</system:String>
-  <system:String x:Key="hifi.hn.save.tip">Apply updates the selected notes without closing this window. Settings are saved with the project.</system:String>
+  <system:String x:Key="hifi.hn.save.tip">Changes apply automatically after you pause editing or return to the piano roll. Apply updates immediately.</system:String>
 </ResourceDictionary>

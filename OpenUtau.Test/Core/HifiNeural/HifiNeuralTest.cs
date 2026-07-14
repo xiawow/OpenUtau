@@ -349,7 +349,7 @@ namespace OpenUtau.Core.Test.HifiNeural {
             int added = viewModel.AddBand(700, 2.5);
             Assert.True(added >= 0);
             Assert.Equal(6, viewModel.Bands.Count);
-            Assert.Equal(2.5, viewModel.Bands[added].BalanceDb);
+            Assert.Equal(2.5, viewModel.Bands[added].BalancePercent);
             Assert.True(viewModel.Bands.Zip(viewModel.Bands.Skip(1),
                 (left, right) => left.FrequencyHz < right.FrequencyHz).All(value => value));
 
@@ -360,14 +360,14 @@ namespace OpenUtau.Core.Test.HifiNeural {
 
             int selected = viewModel.SelectedBandIndex;
             double originalFrequency = viewModel.Bands[selected].FrequencyHz;
-            double originalBalance = viewModel.Bands[selected].BalanceDb;
+            double originalBalance = viewModel.Bands[selected].BalancePercent;
             viewModel.BeginBandEdit();
             viewModel.Bands[selected].FrequencyHz = originalFrequency + 20;
-            viewModel.Bands[selected].BalanceDb = originalBalance - 1;
+            viewModel.Bands[selected].BalancePercent = originalBalance - 1;
             viewModel.CommitBandEdit();
             viewModel.UndoBandEdit();
             Assert.Equal(originalFrequency, viewModel.Bands[selected].FrequencyHz);
-            Assert.Equal(originalBalance, viewModel.Bands[selected].BalanceDb);
+            Assert.Equal(originalBalance, viewModel.Bands[selected].BalancePercent);
             viewModel.RedoBandEdit();
 
             viewModel.CopySelectedBand();
@@ -401,6 +401,63 @@ namespace OpenUtau.Core.Test.HifiNeural {
 
             viewModel.ToggleDynamicsPanel();
             Assert.False(viewModel.DynamicsPanelExpanded);
+        }
+
+        [Fact]
+        public void HnSpectralDesignerReportsProfileEditsWithoutReportingUiNavigation() {
+            var viewModel = new HifiHnSpectralDesignerViewModel(new HifiHnSpectralProfile(), 1);
+            int changed = 0;
+            viewModel.ProfileChanged += (_, _) => changed++;
+
+            viewModel.SelectedBandIndex = 0;
+            viewModel.ToggleDynamicsPanel();
+            Assert.Equal(0, changed);
+
+            viewModel.Enabled = !viewModel.Enabled;
+            Assert.Equal(1, changed);
+
+            viewModel.BeginBandEdit();
+            Assert.True(viewModel.IsBandEditInProgress);
+            viewModel.Bands[0].BalancePercent += 1;
+            Assert.Equal(2, changed);
+            viewModel.CommitBandEdit();
+            Assert.False(viewModel.IsBandEditInProgress);
+
+            viewModel.UndoBandEdit();
+            Assert.Equal(3, changed);
+            viewModel.Reset();
+            Assert.Equal(4, changed);
+        }
+
+        [Theory]
+        [InlineData(-100, -18.0)]
+        [InlineData(-50, -7.5681)]
+        [InlineData(0, 0.0)]
+        [InlineData(25, 3.1820)]
+        [InlineData(50, 7.5681)]
+        [InlineData(75, 12.5632)]
+        [InlineData(100, 18.0)]
+        public void HnSpectralBalancePercentUsesStrongNonlinearMapping(double percent, double expectedDb) {
+            double balanceDb = HifiHnSpectralProfile.PercentToBalanceDb(percent);
+
+            Assert.Equal(expectedDb, balanceDb, 3);
+            Assert.Equal(percent, HifiHnSpectralProfile.BalanceDbToPercent(balanceDb), 8);
+        }
+
+        [Fact]
+        public void HnSpectralDesignerPreservesLegacyDbSettingsThroughPercentUi() {
+            var profile = new HifiHnSpectralProfile {
+                BalanceDb = new double[] { -9, -3, 0, 3, 9 },
+            };
+            var viewModel = new HifiHnSpectralDesignerViewModel(profile, 1);
+
+            Assert.InRange(viewModel.Bands[0].BalancePercent, -58, -57);
+            Assert.InRange(viewModel.Bands[^1].BalancePercent, 57, 58);
+            double[] rebuilt = viewModel.BuildProfile().BalanceDb;
+            Assert.Equal(profile.BalanceDb.Length, rebuilt.Length);
+            for (int i = 0; i < rebuilt.Length; i++) {
+                Assert.Equal(profile.BalanceDb[i], rebuilt[i], 9);
+            }
         }
 
         [Fact]

@@ -200,12 +200,12 @@
                 <Grid Grid.Row="0" ColumnDefinitions="*,Auto,5,Auto">
                   <TextBlock Classes="hint" VerticalAlignment="Center" Text="{DynamicResource hifi.hn.amount}"/>
                   <TextBox Grid.Column="1" Classes="parameter" Width="68"
-                           Text="{Binding SelectedBalanceDb, Mode=TwoWay}"/>
-                  <TextBlock Grid.Column="3" Classes="hint" VerticalAlignment="Center" Text="dB"/>
+                           Text="{Binding SelectedBalancePercent, Mode=TwoWay, StringFormat={}{0:F0}}"/>
+                  <TextBlock Grid.Column="3" Classes="hint" VerticalAlignment="Center" Text="%"/>
                 </Grid>
                 <Slider Grid.Row="2" Classes="fader" Height="18" VerticalAlignment="Center"
-                        Minimum="-9" Maximum="9" TickFrequency="0.5"
-                        Value="{Binding SelectedBalanceDb, Mode=TwoWay}"/>
+                        Minimum="-100" Maximum="100" TickFrequency="1"
+                        Value="{Binding SelectedBalancePercent, Mode=TwoWay}"/>
               </Grid>
 
               <Button Grid.Column="10" MinWidth="54" VerticalAlignment="Center"
