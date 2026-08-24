@@ -310,6 +310,71 @@ namespace OpenUtau.Core.Test.Neutrino {
         }
 
         [Fact]
+        public void ExtensionNotesRepeatSustainPhoneWithTheirOwnPitchAndDuration() {
+            int h = NeutrinoPhoneme.GetPhonemeId("h");
+            int o = NeutrinoPhoneme.GetPhonemeId("o");
+            var sequence = NeutrinoInferenceUtil.BuildScoreSequence(new[] {
+                new NeutrinoScoreNoteInput(
+                    392f,
+                    0.5f,
+                    false,
+                    new[] {
+                        new NeutrinoScorePhoneInput(h, sourceIndex: 0),
+                        new NeutrinoScorePhoneInput(o, sourceIndex: 1),
+                    }),
+                new NeutrinoScoreNoteInput(
+                    329.63f,
+                    0.25f,
+                    true,
+                    Array.Empty<NeutrinoScorePhoneInput>()),
+                new NeutrinoScoreNoteInput(
+                    293.66f,
+                    0.75f,
+                    true,
+                    Array.Empty<NeutrinoScorePhoneInput>()),
+            });
+
+            Assert.Equal(new long[] { h, o, o, o }, sequence.PhonemeIds);
+            Assert.Equal(new[] { 392f, 392f, 329.63f, 293.66f }, sequence.ScorePitchesHz);
+            Assert.Equal(new[] { 0.5f, 0.5f, 0.25f, 0.75f }, sequence.ScoreDurations);
+            Assert.Equal(new long[] { 0, 1, 0, 0 }, sequence.PhonePositions);
+            Assert.Equal(new[] { 0, 1, -1, -1 }, sequence.SourcePhoneIndices);
+            Assert.Equal(5, sequence.ManualBoundaries.Length);
+
+            var boundaries = NeutrinoInferenceUtil.BuildTimingBoundaries(
+                sequence.ScoreDurations,
+                sequence.PhonePositions,
+                NeutrinoInferenceUtil.BuildPhoneChunks(sequence.PhonemeIds),
+                frameSeconds: 0.01,
+                chunk => new float[chunk.PhoneCount + 1]);
+            Assert.Equal(1.5, boundaries[^1], 3);
+        }
+
+        [Fact]
+        public void IndependentNoteWithoutPhonesStopsExtensionCarry() {
+            int o = NeutrinoPhoneme.GetPhonemeId("o");
+            var sequence = NeutrinoInferenceUtil.BuildScoreSequence(new[] {
+                new NeutrinoScoreNoteInput(
+                    392f,
+                    0.5f,
+                    false,
+                    new[] { new NeutrinoScorePhoneInput(o) }),
+                new NeutrinoScoreNoteInput(
+                    349.23f,
+                    0.5f,
+                    false,
+                    Array.Empty<NeutrinoScorePhoneInput>()),
+                new NeutrinoScoreNoteInput(
+                    329.63f,
+                    0.5f,
+                    true,
+                    Array.Empty<NeutrinoScorePhoneInput>()),
+            });
+
+            Assert.Equal(new long[] { o }, sequence.PhonemeIds);
+        }
+
+        [Fact]
         public void FixedShapeModelOutputsRejectLengthMismatch() {
             var output = new[] { 0.1f, 0.2f };
             Assert.Same(output, NeutrinoInferenceUtil.RequireLength(output, 2, "test output"));

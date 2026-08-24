@@ -1,7 +1,68 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 
 namespace OpenUtau.Core.Neutrino {
+    internal readonly struct NeutrinoScorePhoneInput {
+        public long PhonemeId { get; }
+        public int SourceIndex { get; }
+        public double? ManualBoundarySeconds { get; }
+
+        public NeutrinoScorePhoneInput(
+            long phonemeId,
+            int sourceIndex = -1,
+            double? manualBoundarySeconds = null) {
+
+            PhonemeId = phonemeId;
+            SourceIndex = sourceIndex;
+            ManualBoundarySeconds = manualBoundarySeconds;
+        }
+    }
+
+    internal readonly struct NeutrinoScoreNoteInput {
+        public float PitchHz { get; }
+        public float DurationSeconds { get; }
+        public bool IsExtension { get; }
+        public NeutrinoScorePhoneInput[] Phones { get; }
+
+        public NeutrinoScoreNoteInput(
+            float pitchHz,
+            float durationSeconds,
+            bool isExtension,
+            NeutrinoScorePhoneInput[] phones) {
+
+            PitchHz = pitchHz;
+            DurationSeconds = durationSeconds;
+            IsExtension = isExtension;
+            Phones = phones ?? Array.Empty<NeutrinoScorePhoneInput>();
+        }
+    }
+
+    internal sealed class NeutrinoScoreSequence {
+        public long[] PhonemeIds { get; }
+        public float[] ScorePitchesHz { get; }
+        public float[] ScoreDurations { get; }
+        public long[] PhonePositions { get; }
+        public int[] SourcePhoneIndices { get; }
+        public double?[] ManualBoundaries { get; }
+
+        public NeutrinoScoreSequence(
+            long[] phonemeIds,
+            float[] scorePitchesHz,
+            float[] scoreDurations,
+            long[] phonePositions,
+            int[] sourcePhoneIndices,
+            double?[] manualBoundaries) {
+
+            PhonemeIds = phonemeIds;
+            ScorePitchesHz = scorePitchesHz;
+            ScoreDurations = scoreDurations;
+            PhonePositions = phonePositions;
+            SourcePhoneIndices = sourcePhoneIndices;
+            ManualBoundaries = manualBoundaries;
+        }
+    }
+
     internal readonly struct NeutrinoPhoneChunk {
         public int PhoneStart { get; }
         public int PhoneCount { get; }
@@ -39,6 +100,55 @@ namespace OpenUtau.Core.Neutrino {
     internal static class NeutrinoInferenceUtil {
         public static bool IsExtensionLyric(string lyric) {
             return lyric == "-" || lyric?.StartsWith("+", StringComparison.Ordinal) == true;
+        }
+
+        public static NeutrinoScoreSequence BuildScoreSequence(
+            IReadOnlyList<NeutrinoScoreNoteInput> notes) {
+
+            var phonemeIds = new List<long>();
+            var scorePitchesHz = new List<float>();
+            var scoreDurations = new List<float>();
+            var phonePositions = new List<long>();
+            var sourcePhoneIndices = new List<int>();
+            var manualBoundaries = new List<double?>();
+            long? sustainPhonemeId = null;
+
+            foreach (var note in notes) {
+                var phones = note.Phones;
+                if (phones.Length == 0) {
+                    if (!note.IsExtension || !sustainPhonemeId.HasValue) {
+                        if (!note.IsExtension) {
+                            sustainPhonemeId = null;
+                        }
+                        continue;
+                    }
+
+                    // Official long-mark labels repeat the preceding note's final
+                    // phoneme, while keeping the extension note's pitch and duration.
+                    phones = new[] { new NeutrinoScorePhoneInput(sustainPhonemeId.Value) };
+                }
+
+                float durationSeconds = Math.Max(0.001f, note.DurationSeconds);
+                for (int position = 0; position < phones.Length; position++) {
+                    var phone = phones[position];
+                    phonemeIds.Add(phone.PhonemeId);
+                    scorePitchesHz.Add(phone.PhonemeId == NeutrinoPhoneme.PAU ? 0 : note.PitchHz);
+                    scoreDurations.Add(durationSeconds);
+                    phonePositions.Add(position);
+                    sourcePhoneIndices.Add(phone.SourceIndex);
+                    manualBoundaries.Add(phone.ManualBoundarySeconds);
+                }
+                sustainPhonemeId = phones[^1].PhonemeId;
+            }
+
+            manualBoundaries.Add(null);
+            return new NeutrinoScoreSequence(
+                phonemeIds.ToArray(),
+                scorePitchesHz.ToArray(),
+                scoreDurations.ToArray(),
+                phonePositions.ToArray(),
+                sourcePhoneIndices.ToArray(),
+                manualBoundaries.ToArray());
         }
 
         public static float[] RequireLength(float[] values, int expectedLength, string outputName) {

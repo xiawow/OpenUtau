@@ -24,7 +24,7 @@ namespace OpenUtau.Core.Neutrino {
         const int hopSize = 480;
         const int pitchInterval = 5;
         const int numMelBins = 100;
-        const int cacheVersion = 15;
+        const int cacheVersion = 16;
         const int postEffectCacheVersion = 2;
         const int pitchCacheMagic = 0x4E465032; // NFP2
         const int edgeSilenceSamples = 240;
@@ -758,57 +758,60 @@ namespace OpenUtau.Core.Neutrino {
         (long[] phonemeIds, float[] scorePitchesHz, float[] scoreDurations, long[] phonePositions, double?[] manualBoundaries)
             BuildPhonemeSequence(RenderPhrase phrase) {
 
-            var phonemeIds = new List<long>();
-            var scorePitchesHz = new List<float>();
-            var scoreDurations = new List<float>();
-            var phonePositions = new List<long>();
-            var manualBoundaries = new List<double?>();
-            int lastNoteIndex = -1;
-            int positionInNote = 0;
             double scoreOriginMs = GetScoreOriginMs(phrase);
+            var phonesByNote = new Dictionary<int, List<NeutrinoScorePhoneInput>>();
 
             foreach (var phone in phrase.phones) {
                 var phoneStrs = NeutrinoPhoneme.RenderPhoneToPhonemes(phone.phoneme);
                 int noteIndex = Math.Clamp(phone.noteIndex, 0, phrase.notes.Length - 1);
-                if (noteIndex != lastNoteIndex) {
-                    positionInNote = 0;
-                    lastNoteIndex = noteIndex;
+                if (!phonesByNote.TryGetValue(noteIndex, out var modelPhones)) {
+                    modelPhones = new List<NeutrinoScorePhoneInput>();
+                    phonesByNote[noteIndex] = modelPhones;
                 }
-
-                var note = phrase.notes[noteIndex];
-                float notePitchHz = phoneStrs.All(p => NeutrinoPhoneme.GetPhonemeId(p) == NeutrinoPhoneme.PAU)
-                    ? 0
-                    : (float)NeutrinoConfig.MidiToFreq(note.tone + note.tuning * 0.01f);
-                float noteDurationSec = Math.Max(0.001f, (float)(GetExtendedNoteDurationMs(phrase.notes, noteIndex) / 1000.0));
 
                 for (int i = 0; i < phoneStrs.Length; i++) {
                     int id = NeutrinoPhoneme.GetPhonemeId(phoneStrs[i]);
-                    phonemeIds.Add(id);
-                    scorePitchesHz.Add(id == NeutrinoPhoneme.PAU ? 0 : notePitchHz);
-                    scoreDurations.Add(noteDurationSec);
-                    phonePositions.Add(positionInNote++);
-                    manualBoundaries.Add(phone.positionOverridden && i == 0
-                        ? (phone.positionMs - scoreOriginMs) / 1000.0
-                        : null);
+                    modelPhones.Add(new NeutrinoScorePhoneInput(
+                        id,
+                        manualBoundarySeconds: phone.positionOverridden && i == 0
+                            ? (phone.positionMs - scoreOriginMs) / 1000.0
+                            : null));
                 }
             }
 
-            if (phonemeIds.Count == 0) {
-                return (
-                    Array.Empty<long>(),
-                    Array.Empty<float>(),
-                    Array.Empty<float>(),
-                    Array.Empty<long>(),
-                    new double?[] { null }
-                );
+            var scoreNotes = new List<NeutrinoScoreNoteInput>();
+            int firstPhoneNoteIndex = GetFirstPhoneNoteIndex(phrase);
+            int lastPhoneNoteIndex = phrase.phones.Length == 0
+                ? firstPhoneNoteIndex
+                : Math.Clamp(
+                    phrase.phones.Max(phone => phone.noteIndex),
+                    firstPhoneNoteIndex,
+                    phrase.notes.Length - 1);
+            for (int noteIndex = firstPhoneNoteIndex; noteIndex < phrase.notes.Length; noteIndex++) {
+                var note = phrase.notes[noteIndex];
+                bool isExtension = NeutrinoInferenceUtil.IsExtensionLyric(note.lyric);
+                bool hasPhones = phonesByNote.TryGetValue(noteIndex, out var modelPhones);
+                if (noteIndex > lastPhoneNoteIndex && !isExtension) {
+                    break;
+                }
+
+                float notePitchHz = (float)NeutrinoConfig.MidiToFreq(
+                    note.tone + note.tuning * 0.01f);
+                float noteDurationSec = Math.Max(0.001f, (float)(note.durationMs / 1000.0));
+                scoreNotes.Add(new NeutrinoScoreNoteInput(
+                    notePitchHz,
+                    noteDurationSec,
+                    isExtension,
+                    hasPhones ? modelPhones.ToArray() : Array.Empty<NeutrinoScorePhoneInput>()));
             }
-            manualBoundaries.Add(null);
+
+            var sequence = NeutrinoInferenceUtil.BuildScoreSequence(scoreNotes);
             return (
-                phonemeIds.ToArray(),
-                scorePitchesHz.ToArray(),
-                scoreDurations.ToArray(),
-                phonePositions.ToArray(),
-                manualBoundaries.ToArray()
+                sequence.PhonemeIds,
+                sequence.ScorePitchesHz,
+                sequence.ScoreDurations,
+                sequence.PhonePositions,
+                sequence.ManualBoundaries
             );
         }
 
@@ -835,16 +838,6 @@ namespace OpenUtau.Core.Neutrino {
             double contextStartMs = phrase.timeAxis.TickPosToMsPos(scoreOriginTick - headTicks);
             double maximumContextMs = Math.Max(0, firstNote.positionMs - contextStartMs);
             return Math.Min(maximumContextMs, phrase.availableLeadingMs) / 1000.0;
-        }
-
-        double GetExtendedNoteDurationMs(RenderNote[] notes, int noteIndex) {
-            double endMs = notes[noteIndex].endMs;
-            for (int i = noteIndex + 1;
-                i < notes.Length && NeutrinoInferenceUtil.IsExtensionLyric(notes[i].lyric);
-                i++) {
-                endMs = notes[i].endMs;
-            }
-            return Math.Max(1, endMs - notes[noteIndex].positionMs);
         }
 
         internal static void ApplyManualBoundaryOverrides(
